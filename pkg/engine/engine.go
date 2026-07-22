@@ -1,0 +1,256 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/mohammed-v3/core/pkg/config"
+	"github.com/mohammed-v3/core/pkg/governor"
+	"github.com/mohammed-v3/core/pkg/proxy"
+)
+
+// ─────────────────────────────────────────
+// Phase interface
+// ─────────────────────────────────────────
+type Phase interface {
+	Name() string
+	Description() string
+	Execute(ctx context.Context, state *State) error
+}
+
+// ─────────────────────────────────────────
+// State: shared data across all phases
+// ─────────────────────────────────────────
+type State struct {
+	Config       *config.Config
+	Scope        *config.Scope
+	Governor     *governor.Governor
+	Proxy        *proxy.ProxyManager
+	Subdomains   []string
+	LiveHosts    []string
+	URLs         []string
+	Parameters   map[string][]string
+	Findings     []map[string]interface{}
+	OutputFolder string
+	StartTime    time.Time
+
+	// PrintMu protects all fmt.Printf calls so the live timer line and
+	// phase output lines do not interleave and corrupt each other.
+	PrintMu sync.Mutex
+}
+
+func NewState(cfg *config.Config, scope *config.Scope) *State {
+	target := "target"
+	if len(scope.Domains) > 0 {
+		target = scope.Domains[0]
+	}
+	outDir := config.GetOutputFolder(target)
+	config.EnsureDir(outDir)
+
+	return &State{
+		Config:       cfg,
+		Scope:        scope,
+		Governor:     governor.NewGovernor(cfg.Threads),
+		Proxy:        proxy.NewProxyManager(cfg.BurpProxy),
+		Subdomains:   make([]string, 0),
+		LiveHosts:    make([]string, 0),
+		URLs:         make([]string, 0),
+		Parameters:   make(map[string][]string),
+		Findings:     make([]map[string]interface{}, 0),
+		OutputFolder: outDir,
+		StartTime:    time.Now(),
+	}
+}
+
+// ─────────────────────────────────────────
+// Printf: thread-safe print helper used by phases
+// ─────────────────────────────────────────
+func (s *State) Printf(format string, a ...interface{}) {
+	s.PrintMu.Lock()
+	defer s.PrintMu.Unlock()
+	fmt.Printf(format, a...)
+}
+
+// ─────────────────────────────────────────
+// Orchestrator: manages phase registration and execution
+// ─────────────────────────────────────────
+type Orchestrator struct {
+	State  *State
+	Phases []Phase
+}
+
+func NewOrchestrator(state *State) *Orchestrator {
+	return &Orchestrator{
+		State:  state,
+		Phases: make([]Phase, 0),
+	}
+}
+
+func (o *Orchestrator) RegisterPhase(p Phase) {
+	o.Phases = append(o.Phases, p)
+}
+
+// ─────────────────────────────────────────
+// checkBurp: verify Burp Suite is reachable before scan starts
+// ─────────────────────────────────────────
+func checkBurp(proxyURL string) bool {
+	if proxyURL == "" {
+		return false
+	}
+	client := &http.Client{Timeout: 4 * time.Second}
+	// Send a simple request through the proxy to see if Burp is alive
+	req, err := http.NewRequest("GET", "http://burp-check.internal/", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-MOHAMMED-CHECK", "continue")
+	resp, err := client.Do(req)
+	if err != nil {
+		// If we get a connection refused to the proxy itself — not reachable
+		// If we get any response (even error from target) — proxy is alive
+		errStr := err.Error()
+		if strings.Contains(errStr, "connection refused") && strings.Contains(errStr, "proxy") {
+			return false
+		}
+		// Any other error means proxy accepted the connection (target just didn't respond)
+		return true
+	}
+	defer resp.Body.Close()
+	return true
+}
+
+// ─────────────────────────────────────────
+// Run: executes all registered phases with live timer
+// ─────────────────────────────────────────
+func (o *Orchestrator) Run(ctx context.Context) error {
+	o.State.StartTime = time.Now()
+
+	// ── Print initial header ──────────────────────────────
+	fmt.Printf("\n[+] MOHAMMED v3 Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
+
+	// ── Burp Suite connectivity check ────────────────────
+	if o.State.Proxy.Active {
+		fmt.Printf("[*] Checking Burp Suite connectivity at %s ... ", o.State.Proxy.ProxyURL)
+		if checkBurp(o.State.Proxy.ProxyURL) {
+			fmt.Printf("✅ Connected — traffic will be intercepted\n")
+		} else {
+			fmt.Printf("⚠️  Not reachable — scanning WITHOUT Burp (check proxy settings)\n")
+		}
+	}
+	fmt.Println()
+
+	// ── Live timer goroutine (every 1 second, single line with \r) ──
+	tickerCtx, cancelTicker := context.WithCancel(context.Background())
+	defer cancelTicker()
+
+	// currentTool stores the currently running tool name for display
+	var currentTool atomic.Value
+	currentTool.Store("engine")
+
+	// timerLine tracks whether we printed a timer line (so we can clear it)
+	timerRunning := make(chan struct{})
+
+	go func() {
+		close(timerRunning)
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-tickerCtx.Done():
+				// Clear the timer line on exit
+				o.State.PrintMu.Lock()
+				fmt.Printf("\r%s\r", strings.Repeat(" ", 80))
+				o.State.PrintMu.Unlock()
+				return
+			case <-ticker.C:
+				elapsed := time.Since(o.State.StartTime)
+				h := int(elapsed.Hours())
+				m := int(elapsed.Minutes()) % 60
+				s := int(elapsed.Seconds()) % 60
+				tool := currentTool.Load().(string)
+
+				o.State.PrintMu.Lock()
+				// \r goes back to start of line, overwriting the previous timer
+				fmt.Printf("\r\033[K  ⏱  %02d:%02d:%02d | %s ", h, m, s, tool)
+				o.State.PrintMu.Unlock()
+			}
+		}
+	}()
+
+	// Wait for goroutine to start
+	<-timerRunning
+
+	// ── Execute phases ───────────────────────────────────
+	for i, phase := range o.Phases {
+		select {
+		case <-ctx.Done():
+			cancelTicker()
+			elapsed := time.Since(o.State.StartTime)
+			fmt.Printf("\n\n[!] Scan cancelled. Total elapsed: %v\n", elapsed.Round(time.Second))
+			return fmt.Errorf("scan cancelled by user")
+		default:
+		}
+
+		phaseStart := time.Now()
+		elapsed := time.Since(o.State.StartTime)
+		h := int(elapsed.Hours())
+		m := int(elapsed.Minutes()) % 60
+		s := int(elapsed.Seconds()) % 60
+
+		// Update tool indicator so timer shows phase name
+		pLabel := fmt.Sprintf("Phase %02d/%02d: %s", i+1, len(o.Phases), phase.Name())
+		currentTool.Store(pLabel)
+
+		// Print phase header (with newline BEFORE to clear timer line)
+		o.State.PrintMu.Lock()
+		fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [Elapsed: %02d:%02d:%02d]\n", i+1, len(o.Phases), phase.Name(), h, m, s)
+		fmt.Printf("│  %s\n", phase.Description())
+		o.State.PrintMu.Unlock()
+
+		err := phase.Execute(ctx, o.State)
+
+		phaseDur := time.Since(phaseStart)
+		totalElapsed := time.Since(o.State.StartTime)
+
+		o.State.PrintMu.Lock()
+		if err != nil {
+			fmt.Printf("\r\033[K└─ ✖ Failed in %s: %v\n", fmtDur(phaseDur), err)
+		} else {
+			fmt.Printf("\r\033[K└─ ✔ Phase done in %s | Total: %s\n", fmtDur(phaseDur), fmtDur(totalElapsed))
+		}
+		o.State.PrintMu.Unlock()
+	}
+
+	// ── Final summary ────────────────────────────────────
+	cancelTicker()
+	time.Sleep(100 * time.Millisecond) // let ticker goroutine clean up
+
+	total := time.Since(o.State.StartTime)
+	fmt.Printf("\n\n╔═══════════════════════════════════════════════╗\n")
+	fmt.Printf("║  🎉 ALL PHASES COMPLETE                       ║\n")
+	fmt.Printf("║  Total Execution Time: %-22s ║\n", fmtDur(total))
+	fmt.Printf("║  Subdomains: %-32d ║\n", len(o.State.Subdomains))
+	fmt.Printf("║  Live Hosts: %-32d ║\n", len(o.State.LiveHosts))
+	fmt.Printf("║  URLs:       %-32d ║\n", len(o.State.URLs))
+	fmt.Printf("║  Findings:   %-32d ║\n", len(o.State.Findings))
+	fmt.Printf("╚═══════════════════════════════════════════════╝\n\n")
+
+	return nil
+}
+
+// fmtDur formats duration as Xm Ys or Xs depending on size
+func fmtDur(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d >= time.Minute {
+		m := int(d.Minutes())
+		s := int(d.Seconds()) % 60
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	return fmt.Sprintf("%.0fs", d.Seconds())
+}

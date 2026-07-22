@@ -1,0 +1,29 @@
+# ══════════════════════════════════════════════════════════════
+# MOHAMMED - Scope File: Whatnot Bug Bounty (HackerOne)
+# Program: https://hackerone.com/whatnot
+# Last Updated: 2026-07-14
+# Max Severity: Critical | Bounty: Eligible
+# ══════════════════════════════════════════════════════════════
+
+# ── In-Scope Domains (Critical - Eligible) ──────────────────
+whatnot.com
+www.whatnot.com
+live-service.whatnot.com
+auction-service.whatnot.com
+api.whatnot.com
+
+# ── Wildcard (High - Eligible) ───────────────────────────────
+# يشمل جميع النطاقات الفرعية ما عدا المستثنيات أدناه
+*.whatnot.com
+
+# ── Out of Scope (Non-Production Environments) ───────────────
+# المذكورة صراحةً في البرنامج: stage/test/qa/load/dev
+-*.stage.whatnot.com
+-*.test.whatnot.com
+-*.qa.whatnot.com
+-*.load.whatnot.com
+-*.dev.whatnot.com
+-stage.whatnot.com
+-test.whatnot.com
+-qa.whatnot.com
+-dev.whatnot.com

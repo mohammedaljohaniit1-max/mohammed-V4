@@ -1,0 +1,39 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# MOHAMMED v4 — Configuration File
+# Copy this file and fill in your API keys before running.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── API Keys ──────────────────────────────────────────────────────────────────
+api_keys:
+  github: ""           # GitHub PAT: https://github.com/settings/tokens
+  shodan: ""           # Shodan API: https://account.shodan.io
+  virustotal: ""       # VirusTotal API: https://www.virustotal.com/gui/my-apikey
+  alienvault: ""       # AlienVault OTX: https://otx.alienvault.com/api
+  securitytrails: ""   # SecurityTrails: https://securitytrails.com/app/account/credentials
+  chaos: ""            # Chaos (ProjectDiscovery): https://chaos.projectdiscovery.io
+  censys: ""           # Censys: https://search.censys.io/account/api
+
+# ── Ollama — Local AI (No cloud, no data leaks) ──────────────────────────────
+ollama:
+  enabled: true
+  endpoint: "http://127.0.0.1:11434"
+  model: "gemma:2b"    # Lightweight Google model — fast responses
+  temperature: 0.2
+  timeout: 60
+
+# ── Proxy & WAF Evasion ──────────────────────────────────────────────────────
+proxy:
+  header_spoofing: true
+  user_agent_rotation: true
+  adaptive_throttling: true
+
+# ── Context Chain (Auto token propagation) ────────────────────────────────────
+context_chain:
+  enabled: true
+  auto_extract_js: true
+  auto_inject_headers: true
+
+# ── Parameter Profiler (Intelligent parameter classification) ─────────────────
+param_profiler:
+  enabled: true
+  min_priority: 1
