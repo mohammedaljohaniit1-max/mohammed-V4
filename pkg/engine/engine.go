@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/mohammed-v3/core/pkg/ai"
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/governor"
 	"github.com/mohammed-v3/core/pkg/proxy"
@@ -31,6 +33,7 @@ type State struct {
 	Scope        *config.Scope
 	Governor     *governor.Governor
 	Proxy        *proxy.ProxyManager
+	AI           *ai.Client
 	Subdomains   []string
 	LiveHosts    []string
 	URLs         []string
@@ -42,6 +45,9 @@ type State struct {
 	// PrintMu protects all fmt.Printf calls so the live timer line and
 	// phase output lines do not interleave and corrupt each other.
 	PrintMu sync.Mutex
+
+	// findingsMu protects concurrent AddFinding calls (phases may fan out).
+	findingsMu sync.Mutex
 }
 
 func NewState(cfg *config.Config, scope *config.Scope) *State {
@@ -53,10 +59,16 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 	config.EnsureDir(outDir)
 
 	return &State{
-		Config:       cfg,
-		Scope:        scope,
-		Governor:     governor.NewGovernor(cfg.Threads),
-		Proxy:        proxy.NewProxyManager(cfg.BurpProxy),
+		Config:   cfg,
+		Scope:    scope,
+		Governor: governor.NewGovernor(cfg.Threads),
+		Proxy:    proxy.NewProxyManager(cfg.BurpProxy),
+		AI: ai.NewClient(
+			cfg.Ollama.Enabled,
+			cfg.Ollama.Endpoint,
+			cfg.Ollama.Model,
+			cfg.Ollama.Timeout,
+		),
 		Subdomains:   make([]string, 0),
 		LiveHosts:    make([]string, 0),
 		URLs:         make([]string, 0),
@@ -65,6 +77,30 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 		OutputFolder: outDir,
 		StartTime:    time.Now(),
 	}
+}
+
+// AddFinding appends a finding in a thread-safe manner.
+func (s *State) AddFinding(f map[string]interface{}) {
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	s.Findings = append(s.Findings, f)
+}
+
+// Triage runs AI triage on a candidate finding and adds it with the verdict
+// recorded. When the model marks it a false positive, the severity is demoted
+// to "Info" (never dropped — we keep the evidence for the report) and an
+// "ai_verdict" field records the reason. Fails open when Ollama is offline.
+func (s *State) Triage(ctx context.Context, findingType, target, evidence string, f map[string]interface{}) {
+	confirmed, reason := s.AI.TriageFinding(ctx, findingType, target, evidence)
+	f["ai_verdict"] = reason
+	if !confirmed {
+		f["ai_confirmed"] = false
+		f["original_severity"] = f["severity"]
+		f["severity"] = "Info"
+	} else {
+		f["ai_confirmed"] = true
+	}
+	s.AddFinding(f)
 }
 
 // ─────────────────────────────────────────
@@ -102,22 +138,36 @@ func checkBurp(proxyURL string) bool {
 	if proxyURL == "" {
 		return false
 	}
-	client := &http.Client{Timeout: 4 * time.Second}
-	// Send a simple request through the proxy to see if Burp is alive
-	req, err := http.NewRequest("GET", "http://burp-check.internal/", nil)
+	pu, err := url.Parse(proxyURL)
 	if err != nil {
 		return false
 	}
-	req.Header.Set("X-MOHAMMED-CHECK", "continue")
+	// CRITICAL: the request must actually be routed THROUGH the proxy, so we
+	// configure the transport with http.ProxyURL. The previous implementation
+	// used a plain client and never touched the proxy at all.
+	client := &http.Client{
+		Timeout: 4 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(pu),
+		},
+	}
+	req, err := http.NewRequest("GET", "http://detectportal.firefox.com/success.txt", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("X-MOHAMMED-CHECK", "1")
 	resp, err := client.Do(req)
 	if err != nil {
-		// If we get a connection refused to the proxy itself — not reachable
-		// If we get any response (even error from target) — proxy is alive
-		errStr := err.Error()
-		if strings.Contains(errStr, "connection refused") && strings.Contains(errStr, "proxy") {
+		// "connection refused" against the proxy address itself → Burp is down.
+		errStr := strings.ToLower(err.Error())
+		if strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "no such host") ||
+			strings.Contains(errStr, "timeout") ||
+			strings.Contains(errStr, "deadline exceeded") {
 			return false
 		}
-		// Any other error means proxy accepted the connection (target just didn't respond)
+		// Any other transport error means the proxy accepted the connection but
+		// the target misbehaved — Burp itself is alive.
 		return true
 	}
 	defer resp.Body.Close()

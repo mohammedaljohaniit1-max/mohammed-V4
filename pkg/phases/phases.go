@@ -8,47 +8,119 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
 	"github.com/mohammed-v3/core/pkg/runner"
 )
+
+// ═══════════════════════════════════════════════════════════════
+// Shared helpers used across all phases
+// ═══════════════════════════════════════════════════════════════
+
+// sanitizeName converts domain.com → domain_com for use in filenames.
+func sanitizeName(s string) string {
+	r := strings.NewReplacer(".", "_", "-", "_", "/", "_", ":", "_")
+	return r.Replace(s)
+}
+
+// fileHasContent returns (true, lineCount) if the file exists and has at least
+// one non-empty line. Used to guard tools that exit non-zero on empty input
+// (fixes BUG #5: gospider exit 1 on empty file).
+func fileHasContent(path string) (bool, int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, 0
+	}
+	n := 0
+	for _, l := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n > 0, n
+}
+
+// readNonEmptyLines returns all trimmed non-empty lines of a file.
+func readNonEmptyLines(path string) []string {
+	var out []string
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, l := range strings.Split(string(data), "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// writeLines writes a slice of strings to a file, one per line.
+func writeLines(path string, lines []string) {
+	_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 01: Scope Validation
 // ═══════════════════════════════════════════════════════════════
 type ScopeValidationPhase struct{}
 
-func (p *ScopeValidationPhase) Name() string        { return "Scope Validation" }
-func (p *ScopeValidationPhase) Description() string { return "Validates target domains, IPs, and scope rules" }
+func (p *ScopeValidationPhase) Name() string { return "Scope Validation" }
+func (p *ScopeValidationPhase) Description() string {
+	return "Validates target domains, IPs, and scope rules (deduplicated)"
+}
 func (p *ScopeValidationPhase) Execute(ctx context.Context, s *engine.State) error {
-	s.Printf("│  Domains: %d | IPs: %d | CIDRs: %d\n", len(s.Scope.Domains), len(s.Scope.IPs), len(s.Scope.CIDRs))
+	s.Printf("│  Domains: %d | IPs: %d | CIDRs: %d | Excludes: %d\n",
+		len(s.Scope.Domains), len(s.Scope.IPs), len(s.Scope.CIDRs), len(s.Scope.ExcludeDomains))
+
 	for _, d := range s.Scope.Domains {
 		s.Printf("│    ✔ Target Scope: %s\n", d)
 	}
+
+	// Warn if we have subdomains but their apex is missing from scope — this
+	// changes how passive enum tools are routed (BUG #2 context).
+	apexes := config.ExtractApexDomains(s.Scope.Domains)
+	inScope := make(map[string]bool)
+	for _, d := range s.Scope.Domains {
+		inScope[d] = true
+	}
+	for _, apex := range apexes {
+		if !inScope[apex] {
+			s.Printf("│    ⚠  Apex '%s' not explicitly in scope but derived from subdomains — used for passive enum only\n", apex)
+		}
+	}
+	s.Printf("│  Apex/root domains for passive enum: %s\n", strings.Join(apexes, ", "))
 	return nil
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Phase 02: OSINT Intelligence Gathering (With API Keys Support)
+// Phase 02: OSINT Intelligence Gathering (apex domains only)
 // ═══════════════════════════════════════════════════════════════
 type OSINTPhase struct{}
 
-func (p *OSINTPhase) Name() string        { return "OSINT Intelligence Gathering" }
-func (p *OSINTPhase) Description() string { return "Queries Shodan, VirusTotal, SecurityTrails, AlienVault, GitHub & crt.sh APIs" }
+func (p *OSINTPhase) Name() string { return "OSINT Intelligence Gathering" }
+func (p *OSINTPhase) Description() string {
+	return "Shodan, VirusTotal, SecurityTrails, AlienVault, crt.sh, RapidDNS, BufferOver, HackerTarget"
+}
 func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 	allSubs := make(map[string]bool)
 	keys := s.Config.APIKeys
 
-	for _, domain := range s.Scope.Domains {
+	// OSINT sources operate on registrable/apex domains only — querying a
+	// subdomain like www.whatnot.com wastes calls and returns nothing useful.
+	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
+
+	for _, domain := range apexDomains {
 		// 1. Shodan API
 		if keys.Shodan != "" {
 			url := fmt.Sprintf("https://api.shodan.io/dns/domain/%s?key=%s", domain, keys.Shodan)
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "15", url}, nil)
-			if res.Err == nil && res.Stdout != "" {
+			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "20", url}, nil)
+			if res.OK() && res.Stdout != "" {
 				var shodanRes map[string]interface{}
 				if json.Unmarshal([]byte(res.Stdout), &shodanRes) == nil {
 					if subs, ok := shodanRes["subdomains"].([]interface{}); ok {
 						for _, sub := range subs {
-							allSubs[fmt.Sprintf("%s.%s", sub, domain)] = true
+							allSubs[fmt.Sprintf("%v.%s", sub, domain)] = true
 						}
 						s.Printf("│  Shodan API [%s]: %d subdomains\n", domain, len(subs))
 					}
@@ -59,15 +131,15 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 		// 2. VirusTotal API
 		if keys.VirusTotal != "" {
 			url := fmt.Sprintf("https://www.virustotal.com/api/v3/domains/%s/subdomains?limit=40", domain)
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "15", "-H", "x-apikey: " + keys.VirusTotal, url}, nil)
-			if res.Err == nil && res.Stdout != "" {
+			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "20", "-H", "x-apikey: " + keys.VirusTotal, url}, nil)
+			if res.OK() && res.Stdout != "" {
 				var vtRes map[string]interface{}
 				if json.Unmarshal([]byte(res.Stdout), &vtRes) == nil {
 					if data, ok := vtRes["data"].([]interface{}); ok {
 						for _, item := range data {
 							if itemMap, ok := item.(map[string]interface{}); ok {
 								if id, ok := itemMap["id"].(string); ok {
-									allSubs[id] = true
+									allSubs[strings.ToLower(id)] = true
 								}
 							}
 						}
@@ -80,13 +152,13 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 		// 3. SecurityTrails API
 		if keys.SecurityTrails != "" {
 			url := fmt.Sprintf("https://api.securitytrails.com/v1/domain/%s/subdomains?children_only=false", domain)
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "15", "-H", "APIKEY: " + keys.SecurityTrails, url}, nil)
-			if res.Err == nil && res.Stdout != "" {
+			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "20", "-H", "APIKEY: " + keys.SecurityTrails, url}, nil)
+			if res.OK() && res.Stdout != "" {
 				var stRes map[string]interface{}
 				if json.Unmarshal([]byte(res.Stdout), &stRes) == nil {
 					if subs, ok := stRes["subdomains"].([]interface{}); ok {
 						for _, sub := range subs {
-							allSubs[fmt.Sprintf("%s.%s", sub, domain)] = true
+							allSubs[fmt.Sprintf("%v.%s", sub, domain)] = true
 						}
 						s.Printf("│  SecurityTrails [%s]: %d subdomains\n", domain, len(subs))
 					}
@@ -95,19 +167,20 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 
 		// 4. AlienVault OTX
-		url := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", domain)
-		headers := []string{"-s", "-m", "15", url}
+		otxURL := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", domain)
+		otxArgs := []string{"-s", "-m", "20", otxURL}
 		if keys.AlienVault != "" {
-			headers = append([]string{"-H", "X-OTX-API-KEY: " + keys.AlienVault}, headers...)
+			otxArgs = append([]string{"-H", "X-OTX-API-KEY: " + keys.AlienVault}, otxArgs...)
 		}
-		res := runner.RunTool(ctx, "curl", headers, nil)
-		if res.Err == nil && res.Stdout != "" {
+		res := runner.RunTool(ctx, "curl", otxArgs, nil)
+		if res.OK() && res.Stdout != "" {
 			var otxData map[string]interface{}
 			if json.Unmarshal([]byte(res.Stdout), &otxData) == nil {
 				if records, ok := otxData["passive_dns"].([]interface{}); ok {
 					for _, r := range records {
 						if rec, ok := r.(map[string]interface{}); ok {
 							if hostname, ok := rec["hostname"].(string); ok {
+								hostname = strings.ToLower(strings.TrimSpace(hostname))
 								if strings.HasSuffix(hostname, domain) {
 									allSubs[hostname] = true
 								}
@@ -120,14 +193,14 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 
 		// 5. crt.sh
-		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain)}, nil)
-		if res.Err == nil && res.Stdout != "" {
+		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "40", fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain)}, nil)
+		if res.OK() && res.Stdout != "" {
 			var certs []map[string]interface{}
 			if json.Unmarshal([]byte(res.Stdout), &certs) == nil {
 				for _, c := range certs {
 					if name, ok := c["name_value"].(string); ok {
 						for _, n := range strings.Split(name, "\n") {
-							n = strings.TrimSpace(strings.TrimPrefix(n, "*."))
+							n = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(n, "*.")))
 							if n != "" && strings.HasSuffix(n, domain) {
 								allSubs[n] = true
 							}
@@ -138,14 +211,59 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 			}
 		}
 
-		// 6. HackerTarget
+		// 6. RapidDNS (no key required)
+		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://rapiddns.io/subdomain/%s?full=1", domain)}, nil)
+		if res.OK() && res.Stdout != "" {
+			count := 0
+			for _, line := range strings.Split(res.Stdout, "\n") {
+				// Naively extract host-looking tokens ending in the domain.
+				for _, tok := range strings.FieldsFunc(line, func(r rune) bool {
+					return r == '<' || r == '>' || r == '"' || r == ' ' || r == '\t'
+				}) {
+					tok = strings.ToLower(strings.TrimSpace(tok))
+					if strings.HasSuffix(tok, "."+domain) && !strings.ContainsAny(tok, "/=") {
+						if !allSubs[tok] {
+							allSubs[tok] = true
+							count++
+						}
+					}
+				}
+			}
+			s.Printf("│  RapidDNS [%s]: %d hosts\n", domain, count)
+		}
+
+		// 7. BufferOver (no key required)
+		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://dns.bufferover.run/dns?q=.%s", domain)}, nil)
+		if res.OK() && res.Stdout != "" {
+			var bo map[string]interface{}
+			count := 0
+			if json.Unmarshal([]byte(res.Stdout), &bo) == nil {
+				for _, key := range []string{"FDNS_A", "RDNS"} {
+					if arr, ok := bo[key].([]interface{}); ok {
+						for _, entry := range arr {
+							if es, ok := entry.(string); ok {
+								parts := strings.Split(es, ",")
+								host := strings.ToLower(strings.TrimSpace(parts[len(parts)-1]))
+								if strings.HasSuffix(host, domain) && !allSubs[host] {
+									allSubs[host] = true
+									count++
+								}
+							}
+						}
+					}
+				}
+			}
+			s.Printf("│  BufferOver [%s]: %d hosts\n", domain, count)
+		}
+
+		// 8. HackerTarget
 		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://api.hackertarget.com/hostsearch/?q=%s", domain)}, nil)
-		if res.Err == nil && res.Stdout != "" {
+		if res.OK() && res.Stdout != "" {
 			count := 0
 			for _, line := range strings.Split(res.Stdout, "\n") {
 				parts := strings.Split(line, ",")
 				if len(parts) >= 1 {
-					h := strings.TrimSpace(parts[0])
+					h := strings.ToLower(strings.TrimSpace(parts[0]))
 					if h != "" && strings.HasSuffix(h, domain) {
 						allSubs[h] = true
 						count++
@@ -161,34 +279,44 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 	for sub := range allSubs {
 		lines = append(lines, sub)
 	}
-	os.WriteFile(osintFile, []byte(strings.Join(lines, "\n")), 0644)
+	writeLines(osintFile, lines)
 	s.Printf("│  OSINT Total Unique: %d\n", len(allSubs))
 	return nil
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 03: Passive Subdomain Enumeration
-// Runs all tools across ALL domains in scope (not just Domains[0])
-// Each tool shows exact count, not just "OK"
+//
+// BUG #2 FIX: amass / bbot / findomain run on APEX domains ONLY. Running them
+// on subdomains (www./api.) gives exit-status 2 or 0 results and wastes time.
+// subfinder + assetfinder handle both apex and subdomain inputs gracefully so
+// they run against every scope entry.
 // ═══════════════════════════════════════════════════════════════
 type SubdomainPassivePhase struct{}
 
-func (p *SubdomainPassivePhase) Name() string        { return "Passive Subdomain Enumeration" }
-func (p *SubdomainPassivePhase) Description() string { return "subfinder, amass, bbot, findomain, assetfinder + OSINT merge" }
+func (p *SubdomainPassivePhase) Name() string { return "Passive Subdomain Enumeration" }
+func (p *SubdomainPassivePhase) Description() string {
+	return "subfinder+assetfinder (all) · amass+bbot+findomain (apex only) · OSINT merge"
+}
 func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(s.Scope.Domains) == 0 {
 		return fmt.Errorf("no domains in scope")
 	}
 
 	found := make(map[string]bool)
+	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
+	apexSet := make(map[string]bool)
+	for _, a := range apexDomains {
+		apexSet[a] = true
+	}
 
-	// Run for each domain in scope (not just Domains[0])
+	// ── Tools that accept ANY host (apex or subdomain) ────────────────
 	for _, domain := range s.Scope.Domains {
 		found[domain] = true
-		s.Printf("│  [Domain: %s]\n", domain)
+		s.Printf("│  [Enumerating: %s]\n", domain)
 		keys := s.Config.APIKeys
 
-		// ── 1. Subfinder ──────────────────────────────────────
+		// subfinder — handles subdomains fine, run on everything.
 		sfOut := filepath.Join(s.OutputFolder, fmt.Sprintf("subfinder_%s.txt", sanitizeName(domain)))
 		env := make(map[string]string)
 		if keys.Shodan != "" {
@@ -196,11 +324,10 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		}
 		sfCount := 0
 		res := runner.RunTool(ctx, "subfinder", []string{"-d", domain, "-all", "-o", sfOut, "-silent"}, env)
-		if res.Err == nil {
-			data, _ := os.ReadFile(sfOut)
-			for _, l := range strings.Split(string(data), "\n") {
-				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && !found[l] {
+		if res.OK() {
+			for _, l := range readNonEmptyLines(sfOut) {
+				l = strings.ToLower(l)
+				if !found[l] {
 					found[l] = true
 					sfCount++
 				}
@@ -210,58 +337,13 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 			s.Printf("│    subfinder: SKIP (%v)\n", res.Err)
 		}
 
-		// ── 2. Amass passive (timeout: 4 minutes via runner) ──
-		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
-		amCount := 0
-		res = runner.RunTool(ctx, "amass", []string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "3"}, nil)
-		if res.Err == nil {
-			data, _ := os.ReadFile(amOut)
-			for _, l := range strings.Split(string(data), "\n") {
-				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && strings.HasSuffix(l, domain) && !found[l] {
-					found[l] = true
-					amCount++
-				}
-			}
-			s.Printf("│    amass: %d subdomains\n", amCount)
-		} else {
-			s.Printf("│    amass: SKIP (%v)\n", res.Err)
-		}
-
-		// ── 3. BBOT (timeout: 3 minutes via runner) ───────────
-		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
-		res = runner.RunTool(ctx, "bbot", []string{
-			"-t", domain, "-p", "subdomain-enum", "-f", "passive",
-			"-o", bbotOutDir, "-y", "--force",
-		}, nil)
-		if res.Err == nil {
-			bbotCount := 0
-			filepath.Walk(bbotOutDir, func(path string, info os.FileInfo, err error) error {
-				if err == nil && !info.IsDir() && strings.HasSuffix(path, ".txt") {
-					if data, err := os.ReadFile(path); err == nil {
-						for _, l := range strings.Split(string(data), "\n") {
-							l = strings.TrimSpace(strings.ToLower(l))
-							if l != "" && strings.HasSuffix(l, domain) && len(l) < 255 && !found[l] {
-								found[l] = true
-								bbotCount++
-							}
-						}
-					}
-				}
-				return nil
-			})
-			s.Printf("│    bbot: %d subdomains\n", bbotCount)
-		} else {
-			s.Printf("│    bbot: SKIP (%v)\n", res.Err)
-		}
-
-		// ── 4. Assetfinder ────────────────────────────────────
+		// assetfinder — handles subdomain inputs gracefully.
 		afCount := 0
 		res = runner.RunTool(ctx, "assetfinder", []string{"--subs-only", domain}, nil)
-		if res.Err == nil {
+		if res.OK() {
 			for _, l := range strings.Split(res.Stdout, "\n") {
 				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && strings.HasSuffix(l, domain) && !found[l] {
+				if l != "" && strings.HasSuffix(l, "."+config.ApexOf(domain)) && !found[l] {
 					found[l] = true
 					afCount++
 				}
@@ -270,16 +352,81 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		} else {
 			s.Printf("│    assetfinder: SKIP (%v)\n", res.Err)
 		}
+	}
 
-		// ── 5. Findomain ─────────────────────────────────────
+	// ── Tools that require APEX/root domains ONLY (BUG #2) ────────────
+	for _, domain := range apexDomains {
+		s.Printf("│  [Apex passive enum: %s]\n", domain)
+
+		// amass — apex only. -timeout is in MINUTES.
+		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
+		amCount := 0
+		res := runner.RunTool(ctx, "amass",
+			[]string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}, nil)
+		if res.OK() {
+			for _, l := range readNonEmptyLines(amOut) {
+				l = strings.ToLower(l)
+				if strings.HasSuffix(l, domain) && !found[l] {
+					found[l] = true
+					amCount++
+				}
+			}
+			s.Printf("│    amass: %d subdomains\n", amCount)
+		} else if res.TimedOut {
+			s.Printf("│    amass: partial (timed out) — parsing any output\n")
+			for _, l := range readNonEmptyLines(amOut) {
+				l = strings.ToLower(l)
+				if strings.HasSuffix(l, domain) && !found[l] {
+					found[l] = true
+				}
+			}
+		} else {
+			s.Printf("│    amass: SKIP (%v)\n", res.Err)
+		}
+
+		// bbot — apex only, 8-minute timeout via runner (BUG #2).
+		// Flags per prompt: -t <domain> -p subdomain-enum -f passive --force -y
+		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
+		res = runner.RunTool(ctx, "bbot", []string{
+			"-t", domain, "-p", "subdomain-enum", "-f", "passive",
+			"-o", bbotOutDir, "--force", "-y",
+		}, nil)
+		if res.OK() || res.TimedOut {
+			bbotCount := 0
+			_ = filepath.Walk(bbotOutDir, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info == nil || info.IsDir() {
+					return nil
+				}
+				base := strings.ToLower(filepath.Base(path))
+				if !strings.HasSuffix(base, ".txt") {
+					return nil
+				}
+				for _, l := range readNonEmptyLines(path) {
+					l = strings.ToLower(l)
+					if strings.HasSuffix(l, domain) && len(l) < 255 && !found[l] {
+						found[l] = true
+						bbotCount++
+					}
+				}
+				return nil
+			})
+			status := "OK"
+			if res.TimedOut {
+				status = "partial (timeout)"
+			}
+			s.Printf("│    bbot: %d subdomains [%s]\n", bbotCount, status)
+		} else {
+			s.Printf("│    bbot: SKIP (%v)\n", res.Err)
+		}
+
+		// findomain — apex only.
 		fdOut := filepath.Join(s.OutputFolder, fmt.Sprintf("findomain_%s.txt", sanitizeName(domain)))
 		fdCount := 0
 		res = runner.RunTool(ctx, "findomain", []string{"-t", domain, "-u", fdOut, "-q"}, nil)
-		if res.Err == nil {
-			data, _ := os.ReadFile(fdOut)
-			for _, l := range strings.Split(string(data), "\n") {
-				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && strings.HasSuffix(l, domain) && !found[l] {
+		if res.OK() {
+			for _, l := range readNonEmptyLines(fdOut) {
+				l = strings.ToLower(l)
+				if strings.HasSuffix(l, domain) && !found[l] {
 					found[l] = true
 					fdCount++
 				}
@@ -290,102 +437,177 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		}
 	}
 
-	// ── Merge OSINT results from Phase 02 ─────────────────
+	// ── Merge OSINT results from Phase 02 ─────────────────────────────
 	osintFile := filepath.Join(s.OutputFolder, "osint_subdomains.txt")
 	osintCount := 0
-	if data, err := os.ReadFile(osintFile); err == nil {
-		for _, l := range strings.Split(string(data), "\n") {
-			l = strings.TrimSpace(strings.ToLower(l))
-			if l != "" && !found[l] {
-				found[l] = true
-				osintCount++
-			}
+	for _, l := range readNonEmptyLines(osintFile) {
+		l = strings.ToLower(l)
+		if !found[l] {
+			found[l] = true
+			osintCount++
 		}
+	}
+	if osintCount > 0 {
 		s.Printf("│  OSINT merge: +%d unique subdomains\n", osintCount)
 	}
 
-	// ── Write final merged subdomains.txt ─────────────────
+	// ── Write final merged subdomains.txt ─────────────────────────────
 	for sub := range found {
 		s.Subdomains = append(s.Subdomains, sub)
 	}
 	subFile := filepath.Join(s.OutputFolder, "subdomains.txt")
-	os.WriteFile(subFile, []byte(strings.Join(s.Subdomains, "\n")), 0644)
+	writeLines(subFile, s.Subdomains)
 	s.Printf("│  Total Passive Subdomains: %d\n", len(s.Subdomains))
 	return nil
 }
 
-// sanitizeName converts domain.com → domain_com for use in filenames
-func sanitizeName(s string) string {
-	r := strings.NewReplacer(".", "_", "-", "_", "/", "_", ":", "_")
-	return r.Replace(s)
-}
-
 // ═══════════════════════════════════════════════════════════════
 // Phase 04: Active Subdomain Bruteforce
+//
+// BUG #3 FIX: puredns needs a resolvers file (--resolvers) AND massdns; the
+// output flag is --write (NOT -w, which is the wordlist). If puredns is
+// unavailable, fall back to dnsx brute force.
 // ═══════════════════════════════════════════════════════════════
 type SubdomainActivePhase struct{}
 
-func (p *SubdomainActivePhase) Name() string        { return "Active Subdomain Bruteforce" }
-func (p *SubdomainActivePhase) Description() string { return "puredns bruteforce + dnsgen permutations" }
+func (p *SubdomainActivePhase) Name() string { return "Active Subdomain Bruteforce" }
+func (p *SubdomainActivePhase) Description() string {
+	return "puredns bruteforce (auto resolvers) → dnsx fallback + dnsgen permutations"
+}
 func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(s.Scope.Domains) == 0 {
 		return nil
 	}
-	domain := s.Scope.Domains[0]
+	domain := config.ApexOf(s.Scope.Domains[0])
 	subFile := filepath.Join(s.OutputFolder, "subdomains.txt")
 	activeOut := filepath.Join(s.OutputFolder, "subdomains_brute.txt")
 
-	// puredns bruteforce — wordlist paths in priority order
-	wordlist := ""
-	for _, wl := range []string{
+	// Resolve a DNS wordlist.
+	wordlist := firstExisting([]string{
 		"/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
 		"/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",
 		"/usr/share/wordlists/dnsmap.txt",
-	} {
-		if _, err := os.Stat(wl); err == nil {
-			wordlist = wl
-			break
+	})
+
+	// Ensure a resolvers file exists (BUG #3 root cause: missing --resolvers).
+	resolverFile := ensureResolvers(s)
+
+	existing := make(map[string]bool)
+	for _, sub := range s.Subdomains {
+		existing[sub] = true
+	}
+	added := 0
+
+	purednsOK := false
+	if wordlist != "" {
+		// puredns REQUIRES massdns to be on PATH; guard for it.
+		if _, err := runner.ResolveToolPath("massdns"); err != nil {
+			s.Printf("│  puredns: massdns not installed → using dnsx fallback\n")
+		} else {
+			// Correct syntax: puredns bruteforce <wordlist> <domain>
+			//   --resolvers <file> --write <out> --rate-limit 150
+			args := []string{"bruteforce", wordlist, domain,
+				"--resolvers", resolverFile, "--write", activeOut,
+				"--rate-limit", "150", "-q"}
+			res := runner.RunTool(ctx, "puredns", args, nil)
+			if res.OK() {
+				for _, l := range readNonEmptyLines(activeOut) {
+					l = strings.ToLower(l)
+					if !existing[l] {
+						existing[l] = true
+						s.Subdomains = append(s.Subdomains, l)
+						added++
+					}
+				}
+				purednsOK = true
+				s.Printf("│  puredns bruteforce: +%d new subdomains\n", added)
+			} else {
+				s.Printf("│  puredns: failed (%v) → dnsx fallback\n", res.Err)
+			}
 		}
+	} else {
+		s.Printf("│  puredns: SKIP (no DNS wordlist found)\n")
 	}
 
-	if wordlist != "" {
-		res := runner.RunTool(ctx, "puredns", []string{"bruteforce", wordlist, domain, "-w", activeOut, "--rate-limit", "150"}, nil)
-		if res.Err == nil {
-			data, _ := os.ReadFile(activeOut)
-			added := 0
-			existing := make(map[string]bool)
-			for _, sub := range s.Subdomains {
-				existing[sub] = true
-			}
-			for _, l := range strings.Split(string(data), "\n") {
-				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && !existing[l] {
+	// ── dnsx brute-force fallback (BUG #3) ────────────────────────────
+	if !purednsOK && wordlist != "" {
+		dnsxOut := filepath.Join(s.OutputFolder, "dnsx_brute.txt")
+		// dnsx -d <domain> -w <wordlist> -a -resp-only -o <out>
+		args := []string{"-d", domain, "-w", wordlist, "-a", "-resp-only",
+			"-o", dnsxOut, "-silent", "-r", resolverFile}
+		res := runner.RunTool(ctx, "dnsx", args, nil)
+		if res.OK() {
+			for _, l := range readNonEmptyLines(dnsxOut) {
+				l = strings.ToLower(strings.Fields(l)[0])
+				if !existing[l] {
+					existing[l] = true
 					s.Subdomains = append(s.Subdomains, l)
 					added++
 				}
 			}
-			s.Printf("│  puredns bruteforce: +%d new subdomains\n", added)
+			s.Printf("│  dnsx brute (fallback): +%d new subdomains\n", added)
 		} else {
-			s.Printf("│  puredns: SKIP (%v)\n", res.Err)
+			s.Printf("│  dnsx brute: SKIP (%v)\n", res.Err)
 		}
-	} else {
-		s.Printf("│  puredns: SKIP (no wordlist found)\n")
 	}
 
-	// dnsgen permutations
-	dnsgenOut := filepath.Join(s.OutputFolder, "dnsgen_perms.txt")
-	res := runner.RunTool(ctx, "dnsgen", []string{subFile}, nil)
-	if res.Err == nil && res.Stdout != "" {
-		os.WriteFile(dnsgenOut, []byte(res.Stdout), 0644)
-		lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
-		s.Printf("│  dnsgen: %d permutations generated\n", len(lines))
-	} else {
-		s.Printf("│  dnsgen: SKIP\n")
+	// dnsgen permutations (best-effort).
+	if _, err := runner.ResolveToolPath("dnsgen"); err == nil {
+		dnsgenOut := filepath.Join(s.OutputFolder, "dnsgen_perms.txt")
+		res := runner.RunTool(ctx, "dnsgen", []string{subFile}, nil)
+		if res.OK() && res.Stdout != "" {
+			_ = os.WriteFile(dnsgenOut, []byte(res.Stdout), 0644)
+			lines := strings.Split(strings.TrimSpace(res.Stdout), "\n")
+			s.Printf("│  dnsgen: %d permutations generated\n", len(lines))
+		} else {
+			s.Printf("│  dnsgen: SKIP\n")
+		}
 	}
 
-	os.WriteFile(subFile, []byte(strings.Join(s.Subdomains, "\n")), 0644)
+	writeLines(subFile, s.Subdomains)
 	s.Printf("│  Total After Active Bruteforce: %d\n", len(s.Subdomains))
 	return nil
+}
+
+// firstExisting returns the first path that exists on disk, or "".
+func firstExisting(paths []string) string {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// ensureResolvers returns a path to a DNS resolvers file, creating a hard-coded
+// fallback at /tmp/mohammed_resolvers.txt if none of the standard files exist.
+// Fixes BUG #3 (puredns exit 1 due to missing --resolvers input).
+func ensureResolvers(s *engine.State) string {
+	candidates := []string{
+		"/usr/share/seclists/Miscellaneous/dns-resolvers.txt",
+		"/opt/mohammed-tools/resolvers.txt",
+		filepath.Join(os.Getenv("HOME"), ".config", "puredns", "resolvers.txt"),
+	}
+	if p := firstExisting(candidates); p != "" {
+		return p
+	}
+	fallback := "/tmp/mohammed_resolvers.txt"
+	if _, err := os.Stat(fallback); err == nil {
+		return fallback
+	}
+	resolvers := strings.Join([]string{
+		"1.1.1.1", "1.0.0.1",
+		"8.8.8.8", "8.8.4.4",
+		"9.9.9.9", "149.112.112.112",
+		"208.67.222.222", "208.67.220.220",
+		"64.6.64.6", "64.6.65.6",
+	}, "\n")
+	if err := os.WriteFile(fallback, []byte(resolvers), 0644); err != nil {
+		s.Printf("│  ⚠ could not write fallback resolvers: %v\n", err)
+	} else {
+		s.Printf("│  Wrote fallback resolvers → %s\n", fallback)
+	}
+	return fallback
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -393,97 +615,275 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 // ═══════════════════════════════════════════════════════════════
 type DNSResolvePhase struct{}
 
-func (p *DNSResolvePhase) Name() string        { return "DNS Resolution & Enrichment" }
-func (p *DNSResolvePhase) Description() string { return "Resolves live hosts via dnsx, filters wildcards" }
+func (p *DNSResolvePhase) Name() string { return "DNS Resolution & Enrichment" }
+func (p *DNSResolvePhase) Description() string {
+	return "Resolves live hosts via dnsx (deduplicated), filters wildcards"
+}
 func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 	subFile := filepath.Join(s.OutputFolder, "subdomains.txt")
-	dnsxOut := filepath.Join(s.OutputFolder, "live_dns.txt")
 
-	res := runner.RunTool(ctx, "dnsx", []string{"-l", subFile, "-o", dnsxOut, "-silent", "-rl", "150", "-resp"}, nil)
-	if res.Err == nil {
-		data, _ := os.ReadFile(dnsxOut)
-		for _, l := range strings.Split(string(data), "\n") {
-			l = strings.TrimSpace(l)
-			if l != "" {
-				parts := strings.Fields(l)
-				s.LiveHosts = append(s.LiveHosts, parts[0])
+	// Deduplicate the input before resolving.
+	seen := make(map[string]bool)
+	var deduped []string
+	for _, l := range readNonEmptyLines(subFile) {
+		l = strings.ToLower(l)
+		if !seen[l] {
+			seen[l] = true
+			deduped = append(deduped, l)
+		}
+	}
+	writeLines(subFile, deduped)
+
+	dnsxOut := filepath.Join(s.OutputFolder, "live_dns.txt")
+	resolverFile := ensureResolvers(s)
+
+	// -wd <apex> enables wildcard elimination.
+	apex := ""
+	if len(s.Scope.Domains) > 0 {
+		apex = config.ApexOf(s.Scope.Domains[0])
+	}
+	args := []string{"-l", subFile, "-o", dnsxOut, "-silent", "-rl", "150",
+		"-a", "-resp-only", "-r", resolverFile}
+	if apex != "" {
+		args = append(args, "-wd", apex)
+	}
+
+	res := runner.RunTool(ctx, "dnsx", args, nil)
+	liveSet := make(map[string]bool)
+	if res.OK() {
+		for _, l := range readNonEmptyLines(dnsxOut) {
+			host := strings.Fields(l)[0]
+			if !liveSet[host] {
+				liveSet[host] = true
+				s.LiveHosts = append(s.LiveHosts, host)
 			}
 		}
 		s.Printf("│  dnsx: %d live hosts resolved\n", len(s.LiveHosts))
 	} else {
-		// Fallback: use subdomains as-is
-		s.LiveHosts = s.Subdomains
-		s.Printf("│  dnsx: SKIP — fallback to %d subdomains\n", len(s.LiveHosts))
+		s.LiveHosts = append(s.LiveHosts, deduped...)
+		s.Printf("│  dnsx: SKIP (%v) — fallback to %d subdomains\n", res.Err, len(s.LiveHosts))
 	}
+	// Persist a clean, deduplicated live host list for downstream phases.
+	writeLines(dnsxOut, s.LiveHosts)
 	return nil
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Phase 06: Subdomain Takeover Check
+// Phase 06: Subdomain Takeover Check (with HTTP confirmation)
+//
+// BUG #8 FIX: subzy over-reports. After subzy flags a host, we perform a
+// second-stage HTTP fingerprint confirmation and (optionally) AI triage. Only
+// confirmed takeovers stay Critical; the rest are demoted to Info.
 // ═══════════════════════════════════════════════════════════════
 type TakeoverPhase struct{}
 
-func (p *TakeoverPhase) Name() string        { return "Subdomain Takeover Check" }
-func (p *TakeoverPhase) Description() string { return "Checks dangling CNAMEs via subzy" }
+func (p *TakeoverPhase) Name() string { return "Subdomain Takeover Check" }
+func (p *TakeoverPhase) Description() string {
+	return "subzy detection + HTTP fingerprint confirmation (false-positive reduction)"
+}
+
+// takeoverFingerprints maps provider response bodies that indicate a genuine
+// dangling resource available for takeover.
+var takeoverFingerprints = []string{
+	"NoSuchBucket",
+	"The specified bucket does not exist",
+	"There isn't a GitHub Pages site here",
+	"There is no app configured at that hostname",
+	"no such app",
+	"herokucdn.com/error-pages/no-such-app.html",
+	"The request could not be satisfied",
+	"Fastly error: unknown domain",
+	"The feed has not been found",
+	"project not found",
+	"Repository not found",
+	"Sorry, this shop is currently unavailable",
+	"do not have access to this domain",
+	"is not a registered InCloud YouTrack",
+	"Domain uses DO name servers with no records in DO",
+	"Not Found - Request ID",
+	"The gods are wise, but do not know of the site which you seek",
+}
+
+// confirmTakeover fetches http(s)://domain and reports whether any known
+// takeover fingerprint appears in the body.
+func confirmTakeover(ctx context.Context, domain string) (bool, string) {
+	for _, scheme := range []string{"https://", "http://"} {
+		res := runner.RunTool(ctx, "curl",
+			[]string{"-s", "-L", "-m", "12", "-A", "Mozilla/5.0", scheme + domain}, nil)
+		if !res.OK() || res.Stdout == "" {
+			continue
+		}
+		for _, fp := range takeoverFingerprints {
+			if strings.Contains(res.Stdout, fp) {
+				return true, fmt.Sprintf("fingerprint matched: %q", fp)
+			}
+		}
+	}
+	return false, "no takeover fingerprint in HTTP body"
+}
+
 func (p *TakeoverPhase) Execute(ctx context.Context, s *engine.State) error {
 	subFile := filepath.Join(s.OutputFolder, "subdomains.txt")
 	takeoverOut := filepath.Join(s.OutputFolder, "takeover_results.txt")
 
-	res := runner.RunTool(ctx, "subzy", []string{"run", "--targets", subFile, "--output", takeoverOut, "--concurrency", "20"}, nil)
-	if res.Err == nil {
-		if data, err := os.ReadFile(takeoverOut); err == nil {
-			count := 0
-			for _, l := range strings.Split(string(data), "\n") {
-				if strings.Contains(l, "VULNERABLE") || strings.Contains(l, "vulnerable") {
-					count++
-					s.Findings = append(s.Findings, map[string]interface{}{
-						"title": "Subdomain Takeover", "severity": "Critical",
-						"url": l, "tool": "subzy", "evidence": l,
-					})
+	ok, _ := fileHasContent(subFile)
+	if !ok {
+		s.Printf("│  subzy: SKIP (no subdomains to check)\n")
+		return nil
+	}
+
+	res := runner.RunTool(ctx, "subzy",
+		[]string{"run", "--targets", subFile, "--output", takeoverOut,
+			"--concurrency", "20", "--hide_fails"}, nil)
+	if !res.OK() && !res.TimedOut {
+		s.Printf("│  subzy: SKIP (%v)\n", res.Err)
+		return nil
+	}
+
+	// subzy writes JSON. Parse it; fall back to line scan if not JSON.
+	candidates := parseSubzyVulnerable(takeoverOut)
+	if len(candidates) == 0 {
+		s.Printf("│  subzy: 0 candidate takeovers\n")
+		return nil
+	}
+	s.Printf("│  subzy: %d candidate(s) — running HTTP confirmation…\n", len(candidates))
+
+	confirmed := 0
+	for _, host := range candidates {
+		httpConfirmed, evidence := confirmTakeover(ctx, host)
+		f := map[string]interface{}{
+			"title": "Subdomain Takeover", "url": host,
+			"tool": "subzy+http-confirm", "evidence": evidence,
+		}
+		if httpConfirmed {
+			f["severity"] = "Critical"
+			// Second gate: AI triage before we commit to Critical.
+			s.Triage(ctx, "Subdomain Takeover", host, evidence, f)
+			confirmed++
+		} else {
+			// Not confirmed by HTTP → Info, but keep for the record.
+			f["severity"] = "Info"
+			f["ai_verdict"] = "unconfirmed_by_http"
+			s.AddFinding(f)
+		}
+		s.Governor.Throttle()
+	}
+	s.Printf("│  Takeover: %d candidate(s), %d HTTP-confirmed Critical\n", len(candidates), confirmed)
+	return nil
+}
+
+// parseSubzyVulnerable extracts subdomains subzy flagged as VULNERABLE from its
+// output file, supporting both JSON and plain-text formats.
+func parseSubzyVulnerable(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]bool)
+
+	// Try JSON array form first.
+	var arr []map[string]interface{}
+	if json.Unmarshal(data, &arr) == nil && len(arr) > 0 {
+		for _, item := range arr {
+			state := strings.ToUpper(fmt.Sprintf("%v", item["vulnerable"]))
+			statusStr := strings.ToUpper(fmt.Sprintf("%v", item["status"]))
+			if state == "TRUE" || strings.Contains(statusStr, "VULNERABLE") {
+				if sub, ok := item["subdomain"].(string); ok && !seen[sub] {
+					seen[sub] = true
+					out = append(out, sub)
 				}
 			}
-			s.Printf("│  subzy: %d vulnerable subdomains\n", count)
 		}
-	} else {
-		s.Printf("│  subzy: SKIP (%v)\n", res.Err)
+		if len(out) > 0 {
+			return out
+		}
 	}
-	return nil
+
+	// Fallback: line scan.
+	for _, l := range strings.Split(string(data), "\n") {
+		if strings.Contains(strings.ToUpper(l), "VULNERABLE") {
+			for _, tok := range strings.Fields(l) {
+				tok = strings.Trim(tok, "[]\"',")
+				if strings.Contains(tok, ".") && !strings.HasPrefix(tok, "http") && !seen[tok] {
+					seen[tok] = true
+					out = append(out, tok)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 07: HTTP Probing & Tech Fingerprinting
+//
+// BUG #1 FIX: through Burp, route ONLY via httpx's -http-proxy flag (httpx
+// tolerates the proxy's self-signed CA by default; it has NO -insecure flag).
+// We deliberately do NOT also set HTTP(S)_PROXY env vars — double-proxying was
+// a cause of dropped connections. Output is JSONL for reliable parsing.
 // ═══════════════════════════════════════════════════════════════
 type HTTPProbePhase struct{}
 
-func (p *HTTPProbePhase) Name() string        { return "HTTP Probing & Tech Fingerprinting" }
-func (p *HTTPProbePhase) Description() string { return "httpx: status codes, titles, tech detect, CDN" }
+func (p *HTTPProbePhase) Name() string { return "HTTP Probing & Tech Fingerprinting" }
+func (p *HTTPProbePhase) Description() string {
+	return "httpx: status codes, titles, tech detect, CDN (Burp-aware routing)"
+}
 func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 	hostsFile := filepath.Join(s.OutputFolder, "live_dns.txt")
-	if _, err := os.Stat(hostsFile); err != nil {
+	if ok, _ := fileHasContent(hostsFile); !ok {
 		hostsFile = filepath.Join(s.OutputFolder, "subdomains.txt")
 	}
-	httpxOut := filepath.Join(s.OutputFolder, "http_live.txt")
+	if ok, _ := fileHasContent(hostsFile); !ok {
+		s.Printf("│  httpx: SKIP (no hosts to probe)\n")
+		return nil
+	}
 
-	args := []string{"-l", hostsFile, "-o", httpxOut, "-silent", "-rl", "150",
-		"-sc", "-title", "-tech-detect", "-cdn", "-follow-redirects",
-		"-threads", fmt.Sprintf("%d", s.Config.Threads)}
+	httpxOut := filepath.Join(s.OutputFolder, "http_live.txt")
+	httpxJSON := filepath.Join(s.OutputFolder, "http_live.json")
+
+	args := []string{"-l", hostsFile, "-o", httpxOut, "-silent", "-nc",
+		"-rl", "150", "-sc", "-title", "-td", "-cdn", "-fr",
+		"-threads", fmt.Sprintf("%d", s.Config.Threads),
+		"-json", "-srd", filepath.Join(s.OutputFolder, "httpx_responses")}
+	// Write the JSONL stream to a dedicated file via -o only accepts one path,
+	// so we run a second pass is avoided: httpx -json writes JSONL to -o. We
+	// keep a plain list separately by parsing. To preserve both, request JSON
+	// to a distinct file:
+	_ = httpxJSON
+
 	if s.Proxy.Active {
+		// BUG #1: the ONLY correct way to route httpx through Burp.
 		args = append(args, "-http-proxy", s.Proxy.ProxyURL)
 	}
 
-	res := runner.RunTool(ctx, "httpx", args, s.Proxy.GetEnv())
-	if res.Err == nil {
-		data, _ := os.ReadFile(httpxOut)
-		for _, l := range strings.Split(string(data), "\n") {
-			l = strings.TrimSpace(l)
-			if l != "" {
-				parts := strings.Fields(l)
-				if len(parts) > 0 {
-					s.URLs = append(s.URLs, parts[0])
+	// When proxy is active we must NOT pass proxy env vars (double routing);
+	// httpx handles it via -http-proxy. Pass nil env.
+	res := runner.RunTool(ctx, "httpx", args, nil)
+
+	urlSet := make(map[string]bool)
+	if res.OK() || res.TimedOut {
+		// httpx -json writes JSONL lines to the -o file. Parse each line.
+		for _, l := range readNonEmptyLines(httpxOut) {
+			var rec map[string]interface{}
+			if json.Unmarshal([]byte(l), &rec) == nil {
+				if u, ok := rec["url"].(string); ok && u != "" && !urlSet[u] {
+					urlSet[u] = true
+					s.URLs = append(s.URLs, u)
 				}
+				continue
+			}
+			// Fallback: plain-text line "URL [200] [title] ..."
+			parts := strings.Fields(l)
+			if len(parts) > 0 && strings.HasPrefix(parts[0], "http") && !urlSet[parts[0]] {
+				urlSet[parts[0]] = true
+				s.URLs = append(s.URLs, parts[0])
 			}
 		}
-		s.Printf("│  httpx: %d live endpoints\n", len(s.URLs))
+		s.Printf("│  httpx: %d live endpoints\n", len(urlSet))
+		if len(urlSet) == 0 && s.Proxy.Active {
+			s.Printf("│  ⚠ 0 endpoints via Burp — verify Burp is running and the CA is trusted\n")
+		}
 	} else {
 		s.Printf("│  httpx: SKIP (%v)\n", res.Err)
 	}
@@ -495,21 +895,28 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 // ═══════════════════════════════════════════════════════════════
 type TLSAnalysisPhase struct{}
 
-func (p *TLSAnalysisPhase) Name() string        { return "TLS/SSL Analysis" }
-func (p *TLSAnalysisPhase) Description() string { return "Certificate analysis via tlsx — expired, self-signed, mismatched" }
+func (p *TLSAnalysisPhase) Name() string { return "TLS/SSL Analysis" }
+func (p *TLSAnalysisPhase) Description() string {
+	return "Certificate analysis via tlsx — expired, self-signed, mismatched"
+}
 func (p *TLSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 	hostsFile := filepath.Join(s.OutputFolder, "live_dns.txt")
+	if ok, _ := fileHasContent(hostsFile); !ok {
+		s.Printf("│  tlsx: SKIP (no hosts)\n")
+		return nil
+	}
 	tlsOut := filepath.Join(s.OutputFolder, "tls_results.txt")
 
-	res := runner.RunTool(ctx, "tlsx", []string{"-l", hostsFile, "-o", tlsOut, "-silent", "-expired", "-self-signed", "-mismatched"}, nil)
-	if res.Err == nil {
-		data, _ := os.ReadFile(tlsOut)
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	res := runner.RunTool(ctx, "tlsx",
+		[]string{"-l", hostsFile, "-o", tlsOut, "-silent", "-expired", "-self-signed", "-mismatched"}, nil)
+	if res.OK() || res.TimedOut {
+		lines := readNonEmptyLines(tlsOut)
 		issues := 0
 		for _, l := range lines {
-			if strings.Contains(l, "expired") || strings.Contains(l, "self-signed") || strings.Contains(l, "mismatched") {
+			ll := strings.ToLower(l)
+			if strings.Contains(ll, "expired") || strings.Contains(ll, "self-signed") || strings.Contains(ll, "mismatched") {
 				issues++
-				s.Findings = append(s.Findings, map[string]interface{}{
+				s.AddFinding(map[string]interface{}{
 					"title": "TLS Issue", "severity": "Medium", "url": l, "tool": "tlsx", "evidence": l,
 				})
 			}
@@ -523,21 +930,34 @@ func (p *TLSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 09: Port Scanning
+//
+// BUG #4 FIX: force TCP Connect scan with "-scan-type c" so naabu works
+// without root/CAP_NET_RAW (default SYN scan exits with status 2 unprivileged).
+// The old code used "-connect-scan", which is NOT a valid naabu flag.
 // ═══════════════════════════════════════════════════════════════
 type PortScanPhase struct{}
 
-func (p *PortScanPhase) Name() string        { return "Port Scanning" }
-func (p *PortScanPhase) Description() string { return "naabu top-1000 ports on live hosts (connect scan, no sudo needed)" }
+func (p *PortScanPhase) Name() string { return "Port Scanning" }
+func (p *PortScanPhase) Description() string {
+	return "naabu top-1000 ports, TCP connect scan (-scan-type c, no root needed)"
+}
 func (p *PortScanPhase) Execute(ctx context.Context, s *engine.State) error {
 	hostsFile := filepath.Join(s.OutputFolder, "live_dns.txt")
+	if ok, _ := fileHasContent(hostsFile); !ok {
+		s.Printf("│  naabu: SKIP (no hosts)\n")
+		return nil
+	}
 	portsOut := filepath.Join(s.OutputFolder, "ports.txt")
 
-	// -connect-scan avoids need for sudo/root (no SYN scan)
-	res := runner.RunTool(ctx, "naabu", []string{"-l", hostsFile, "-o", portsOut, "-silent",
-		"-top-ports", "1000", "-rate", "150", "-c", "25", "-connect-scan"}, nil)
-	if res.Err == nil {
-		data, _ := os.ReadFile(portsOut)
-		lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// -scan-type c == CONNECT scan (unprivileged). -Pn skips host discovery
+	// which also needs raw sockets.
+	res := runner.RunTool(ctx, "naabu", []string{
+		"-list", hostsFile, "-o", portsOut, "-silent",
+		"-top-ports", "1000", "-scan-type", "c", "-Pn",
+		"-rate", "1000", "-c", "25",
+	}, nil)
+	if res.OK() || res.TimedOut {
+		lines := readNonEmptyLines(portsOut)
 		s.Printf("│  naabu: %d open port entries\n", len(lines))
 	} else {
 		s.Printf("│  naabu: SKIP (%v)\n", res.Err)
@@ -547,34 +967,47 @@ func (p *PortScanPhase) Execute(ctx context.Context, s *engine.State) error {
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 10: Wayback & Historical URL Mining
+//
+// BUG #10 FIX: give gau explicit providers + retries + subs so a root domain
+// actually returns URLs instead of 0.
 // ═══════════════════════════════════════════════════════════════
 type WaybackPhase struct{}
 
-func (p *WaybackPhase) Name() string        { return "Wayback & Historical URL Mining" }
-func (p *WaybackPhase) Description() string { return "gau + waybackurls for historical URL discovery" }
+func (p *WaybackPhase) Name() string { return "Wayback & Historical URL Mining" }
+func (p *WaybackPhase) Description() string {
+	return "gau (multi-provider) + waybackurls for historical URL discovery"
+}
 func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 	allURLs := make(map[string]bool)
+	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
 
-	for _, domain := range s.Scope.Domains {
-		res := runner.RunTool(ctx, "gau", []string{domain, "--threads", "5", "--subs"}, s.Proxy.GetEnv())
-		if res.Err == nil {
+	for _, domain := range apexDomains {
+		// gau: providers + threads + retries + subs (BUG #10).
+		gauArgs := []string{
+			"--threads", "5", "--retries", "3", "--subs",
+			"--providers", "wayback,commoncrawl,otx,urlscan", domain,
+		}
+		res := runner.RunTool(ctx, "gau", gauArgs, nil)
+		if res.OK() || res.TimedOut {
 			gauCount := 0
 			for _, l := range strings.Split(res.Stdout, "\n") {
 				l = strings.TrimSpace(l)
-				if l != "" {
+				if strings.HasPrefix(l, "http") && !allURLs[l] {
 					allURLs[l] = true
 					gauCount++
 				}
 			}
 			s.Printf("│  gau [%s]: %d URLs\n", domain, gauCount)
+		} else {
+			s.Printf("│  gau [%s]: SKIP (%v)\n", domain, res.Err)
 		}
 
-		res = runner.RunTool(ctx, "waybackurls", []string{domain}, s.Proxy.GetEnv())
-		if res.Err == nil {
+		res = runner.RunTool(ctx, "waybackurls", []string{domain}, nil)
+		if res.OK() || res.TimedOut {
 			wbCount := 0
 			for _, l := range strings.Split(res.Stdout, "\n") {
 				l = strings.TrimSpace(l)
-				if l != "" {
+				if strings.HasPrefix(l, "http") && !allURLs[l] {
 					allURLs[l] = true
 					wbCount++
 				}
@@ -588,7 +1021,7 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 		lines = append(lines, u)
 	}
 	archiveFile := filepath.Join(s.OutputFolder, "urls_archive.txt")
-	os.WriteFile(archiveFile, []byte(strings.Join(lines, "\n")), 0644)
+	writeLines(archiveFile, lines)
 	s.URLs = append(s.URLs, lines...)
 	s.Printf("│  Total Archive URLs: %d\n", len(allURLs))
 	return nil
@@ -596,31 +1029,49 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 11: Web Crawling & Spidering
+//
+// BUG #5 FIX: gospider needs a non-empty input file (exits 1 otherwise) and
+// -k to ignore TLS errors behind Burp. katana routes via -proxy (it has no
+// -insecure/-ssl-no-verify flag) and uses -nc for clean output.
 // ═══════════════════════════════════════════════════════════════
 type CrawlPhase struct{}
 
-func (p *CrawlPhase) Name() string        { return "Web Crawling & Spidering" }
-func (p *CrawlPhase) Description() string { return "katana + gospider deep crawl on live endpoints" }
+func (p *CrawlPhase) Name() string { return "Web Crawling & Spidering" }
+func (p *CrawlPhase) Description() string {
+	return "katana + gospider deep crawl on live endpoints (empty-input guarded)"
+}
 func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 	urlsFile := filepath.Join(s.OutputFolder, "http_live.txt")
-	if _, err := os.Stat(urlsFile); err != nil {
-		s.Printf("│  Crawl: SKIP (no http_live.txt found)\n")
+	ok, n := fileHasContent(urlsFile)
+	if !ok {
+		s.Printf("│  Crawl: SKIP (http_live.txt empty — httpx found 0 endpoints)\n")
+		return nil
+	}
+	s.Printf("│  Crawl input: %d live endpoints\n", n)
+
+	// http_live.txt may contain JSONL when proxy is active; extract plain URLs
+	// into a dedicated seed file for the crawlers.
+	seeds := extractURLsFromHTTPX(urlsFile)
+	seedFile := filepath.Join(s.OutputFolder, "crawl_seeds.txt")
+	writeLines(seedFile, seeds)
+	if len(seeds) == 0 {
+		s.Printf("│  Crawl: SKIP (no usable seed URLs)\n")
 		return nil
 	}
 
 	crawlURLs := make(map[string]bool)
 
+	// ── katana ────────────────────────────────────────────────────────
 	katOut := filepath.Join(s.OutputFolder, "katana_raw.txt")
-	args := []string{"-list", urlsFile, "-o", katOut, "-silent", "-d", "3", "-rl", "150", "-jc"}
+	katArgs := []string{"-list", seedFile, "-o", katOut, "-silent", "-nc",
+		"-d", "3", "-rl", "150", "-jc"}
 	if s.Proxy.Active {
-		args = append(args, "-proxy", s.Proxy.ProxyURL)
+		katArgs = append(katArgs, "-proxy", s.Proxy.ProxyURL)
 	}
-	res := runner.RunTool(ctx, "katana", args, s.Proxy.GetEnv())
-	if res.Err == nil {
-		data, _ := os.ReadFile(katOut)
-		for _, l := range strings.Split(string(data), "\n") {
-			l = strings.TrimSpace(l)
-			if l != "" {
+	res := runner.RunTool(ctx, "katana", katArgs, nil)
+	if res.OK() || res.TimedOut {
+		for _, l := range readNonEmptyLines(katOut) {
+			if strings.HasPrefix(l, "http") {
 				crawlURLs[l] = true
 			}
 		}
@@ -629,24 +1080,32 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 		s.Printf("│  katana: SKIP (%v)\n", res.Err)
 	}
 
-	goOut := filepath.Join(s.OutputFolder, "gospider_raw.txt")
-	res = runner.RunTool(ctx, "gospider", []string{"-S", urlsFile, "-o", goOut, "-d", "2", "-c", "10", "--sitemap", "--robots"}, s.Proxy.GetEnv())
-	if res.Err == nil {
-		data, _ := os.ReadFile(goOut)
-		goCount := 0
-		for _, l := range strings.Split(string(data), "\n") {
-			if strings.Contains(l, "http") {
+	// ── gospider (empty-input guarded + -k for TLS) ────────────────────
+	if ok, _ := fileHasContent(seedFile); ok {
+		goOut := filepath.Join(s.OutputFolder, "gospider_raw.txt")
+		goArgs := []string{"-S", seedFile, "-o", goOut, "-d", "2", "-c", "10",
+			"-k", "--sitemap", "--robots", "-q"}
+		if s.Proxy.Active {
+			goArgs = append(goArgs, "-p", s.Proxy.ProxyURL)
+		}
+		res = runner.RunTool(ctx, "gospider", goArgs, nil)
+		if res.OK() || res.TimedOut {
+			goCount := 0
+			// gospider prints to stdout and to files under goOut (a dir).
+			for _, l := range strings.Split(res.Stdout, "\n") {
 				for _, part := range strings.Fields(l) {
-					if strings.HasPrefix(part, "http") {
+					if strings.HasPrefix(part, "http") && !crawlURLs[part] {
 						crawlURLs[part] = true
 						goCount++
 					}
 				}
 			}
+			s.Printf("│  gospider: +%d URLs\n", goCount)
+		} else {
+			s.Printf("│  gospider: SKIP (%v)\n", res.Err)
 		}
-		s.Printf("│  gospider: +%d URLs\n", goCount)
 	} else {
-		s.Printf("│  gospider: SKIP (%v)\n", res.Err)
+		s.Printf("│  gospider: SKIP (empty seed file)\n")
 	}
 
 	var lines []string
@@ -654,10 +1113,33 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 		lines = append(lines, u)
 	}
 	crawlFile := filepath.Join(s.OutputFolder, "urls_crawled.txt")
-	os.WriteFile(crawlFile, []byte(strings.Join(lines, "\n")), 0644)
+	writeLines(crawlFile, lines)
 	s.URLs = append(s.URLs, lines...)
 	s.Printf("│  Total Crawled URLs: %d\n", len(crawlURLs))
 	return nil
+}
+
+// extractURLsFromHTTPX returns plain URLs from an httpx output file that may be
+// either JSONL (proxy mode) or plain "URL [code] ..." text.
+func extractURLsFromHTTPX(path string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, l := range readNonEmptyLines(path) {
+		var rec map[string]interface{}
+		if json.Unmarshal([]byte(l), &rec) == nil {
+			if u, ok := rec["url"].(string); ok && u != "" && !seen[u] {
+				seen[u] = true
+				out = append(out, u)
+			}
+			continue
+		}
+		parts := strings.Fields(l)
+		if len(parts) > 0 && strings.HasPrefix(parts[0], "http") && !seen[parts[0]] {
+			seen[parts[0]] = true
+			out = append(out, parts[0])
+		}
+	}
+	return out
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -665,8 +1147,10 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 // ═══════════════════════════════════════════════════════════════
 type JSAnalysisPhase struct{}
 
-func (p *JSAnalysisPhase) Name() string        { return "JS Analysis & Secret Extraction" }
-func (p *JSAnalysisPhase) Description() string { return "Extract JS files, scan for API keys/tokens/secrets" }
+func (p *JSAnalysisPhase) Name() string { return "JS Analysis & Secret Extraction" }
+func (p *JSAnalysisPhase) Description() string {
+	return "Extract JS files, scan for API keys/tokens/secrets"
+}
 func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 	jsURLs := make(map[string]bool)
 	for _, u := range s.URLs {
@@ -675,44 +1159,69 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 	}
 
+	// getJS to discover additional JS references from live endpoints.
+	seedFile := filepath.Join(s.OutputFolder, "crawl_seeds.txt")
+	if ok, _ := fileHasContent(seedFile); ok {
+		res := runner.RunTool(ctx, "getJS", []string{"--input", seedFile, "--complete"}, nil)
+		if res.OK() || res.TimedOut {
+			for _, l := range strings.Split(res.Stdout, "\n") {
+				l = strings.TrimSpace(l)
+				if strings.HasPrefix(l, "http") && (strings.HasSuffix(l, ".js") || strings.Contains(l, ".js?")) {
+					jsURLs[l] = true
+				}
+			}
+			s.Printf("│  getJS: JS links discovered\n")
+		} else {
+			s.Printf("│  getJS: SKIP (%v)\n", res.Err)
+		}
+	}
+
 	jsFile := filepath.Join(s.OutputFolder, "js_files.txt")
 	var jsLines []string
 	for u := range jsURLs {
 		jsLines = append(jsLines, u)
 	}
-	os.WriteFile(jsFile, []byte(strings.Join(jsLines, "\n")), 0644)
+	writeLines(jsFile, jsLines)
 	s.Printf("│  JS files found: %d\n", len(jsURLs))
 
-	urlsFile := filepath.Join(s.OutputFolder, "http_live.txt")
-	if _, err := os.Stat(urlsFile); err == nil {
-		res := runner.RunTool(ctx, "getJS", []string{"--input", urlsFile, "--complete"}, nil)
-		if res.Err == nil {
-			for _, l := range strings.Split(res.Stdout, "\n") {
-				l = strings.TrimSpace(l)
-				if l != "" && strings.HasSuffix(l, ".js") {
-					jsURLs[l] = true
-				}
-			}
-			s.Printf("│  getJS: OK (+extra JS links)\n")
-		}
-	}
-
-	secretPatterns := []string{
-		"api[_-]?key", "api[_-]?secret", "access[_-]?token", "auth[_-]?token",
-		"client[_-]?secret", "password", "aws[_-]?access", "private[_-]?key",
-		"bearer", "authorization", "secret[_-]?key", "firebase",
+	secretPatterns := map[string]string{
+		"aws_access_key":  `AKIA[0-9A-Z]{16}`,
+		"google_api":      "AIza",
+		"slack_token":     "xox",
+		"firebase":        "firebaseio.com",
+		"authorization":   "authorization",
+		"bearer_token":    "bearer ",
+		"private_key":     "-----BEGIN",
+		"api_key_generic": "api_key",
+		"secret_generic":  "client_secret",
 	}
 	secretsFound := 0
+	count := 0
 	for u := range jsURLs {
-		res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "10", u}, nil)
-		if res.Err == nil && res.Stdout != "" {
-			lowerBody := strings.ToLower(res.Stdout)
-			for _, pattern := range secretPatterns {
-				if strings.Contains(lowerBody, pattern) {
+		if count >= 60 { // cap network work
+			break
+		}
+		count++
+		args := []string{"-s", "-m", "12", "-A", "Mozilla/5.0", u}
+		if s.Proxy.Active {
+			args = append([]string{"-x", s.Proxy.ProxyURL, "-k"}, args...)
+		}
+		res := runner.RunTool(ctx, "curl", args, nil)
+		if res.OK() && res.Stdout != "" {
+			body := res.Stdout
+			lowerBody := strings.ToLower(body)
+			for label, pattern := range secretPatterns {
+				match := false
+				if strings.HasPrefix(pattern, "AKIA") || strings.HasPrefix(pattern, "-----") {
+					match = strings.Contains(body, pattern) // case-sensitive
+				} else {
+					match = strings.Contains(lowerBody, strings.ToLower(pattern))
+				}
+				if match {
 					secretsFound++
-					s.Findings = append(s.Findings, map[string]interface{}{
+					s.AddFinding(map[string]interface{}{
 						"title": "Potential Secret in JS", "severity": "High",
-						"url": u, "tool": "js_scanner", "evidence": "Pattern: " + pattern,
+						"url": u, "tool": "js_scanner", "evidence": "pattern: " + label,
 					})
 					break
 				}
@@ -720,77 +1229,84 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  JS secrets found: %d\n", secretsFound)
+	s.Printf("│  JS secrets flagged: %d\n", secretsFound)
 	return nil
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Phase 13: Parameter Discovery
+//
+// BUG #6 FIX: paramspider uses --domain / --output (a file path). The output
+// is then read and merged into params. arjun uses -oJ per URL.
 // ═══════════════════════════════════════════════════════════════
 type ParamDiscoveryPhase struct{}
 
-func (p *ParamDiscoveryPhase) Name() string        { return "Parameter Discovery" }
-func (p *ParamDiscoveryPhase) Description() string { return "paramspider + arjun + URL param extraction" }
+func (p *ParamDiscoveryPhase) Name() string { return "Parameter Discovery" }
+func (p *ParamDiscoveryPhase) Description() string {
+	return "paramspider + arjun + URL param extraction"
+}
 func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(s.Scope.Domains) == 0 {
 		return nil
 	}
-	domain := s.Scope.Domains[0]
 	paramURLs := make(map[string]bool)
 
-	// Extract parameterized URLs already found
+	// Params already found in crawl/archive URLs.
 	for _, u := range s.URLs {
-		if strings.Contains(u, "=") {
+		if strings.Contains(u, "?") && strings.Contains(u, "=") {
 			paramURLs[u] = true
 		}
 	}
 	s.Printf("│  Params from crawl/archive: %d\n", len(paramURLs))
 
-	// paramspider — write to output folder explicitly
-	paramOut := filepath.Join(s.OutputFolder, fmt.Sprintf("paramspider_%s.txt", sanitizeName(domain)))
-	res := runner.RunTool(ctx, "paramspider", []string{"-d", domain, "--output", paramOut}, nil)
-	if res.Err == nil {
-		if data, err := os.ReadFile(paramOut); err == nil {
-			count := 0
-			for _, l := range strings.Split(string(data), "\n") {
-				l = strings.TrimSpace(l)
-				if l != "" {
-					paramURLs[l] = true
-					count++
-				}
-			}
-			s.Printf("│  paramspider: %d param URLs\n", count)
-		} else {
-			// Fallback: try default output location that paramspider uses
-			defaultOut := filepath.Join("output", domain+".txt")
-			if data2, err2 := os.ReadFile(defaultOut); err2 == nil {
-				count := 0
-				for _, l := range strings.Split(string(data2), "\n") {
-					l = strings.TrimSpace(l)
-					if l != "" {
+	// paramspider — run per apex domain.
+	for _, domain := range config.ExtractApexDomains(s.Scope.Domains) {
+		paramOut := filepath.Join(s.OutputFolder, fmt.Sprintf("paramspider_%s.txt", sanitizeName(domain)))
+		res := runner.RunTool(ctx, "paramspider",
+			[]string{"--domain", domain, "--output", paramOut}, nil)
+		if res.OK() || res.TimedOut {
+			// paramspider (devanshbatham) historically wrote to results/<domain>.txt.
+			readInto := func(path string) int {
+				c := 0
+				for _, l := range readNonEmptyLines(path) {
+					if strings.HasPrefix(l, "http") && !paramURLs[l] {
 						paramURLs[l] = true
-						count++
+						c++
 					}
 				}
-				s.Printf("│  paramspider: %d param URLs (fallback path)\n", count)
-			} else {
-				s.Printf("│  paramspider: ran but output not found\n")
+				return c
 			}
+			c := readInto(paramOut)
+			if c == 0 {
+				// Try known default locations.
+				for _, alt := range []string{
+					filepath.Join("results", domain+".txt"),
+					filepath.Join(s.OutputFolder, domain+".txt"),
+				} {
+					c += readInto(alt)
+				}
+			}
+			s.Printf("│  paramspider [%s]: %d param URLs\n", domain, c)
+		} else {
+			s.Printf("│  paramspider [%s]: SKIP (%v)\n", domain, res.Err)
 		}
-	} else {
-		s.Printf("│  paramspider: SKIP (%v)\n", res.Err)
 	}
 
-	// arjun — scan top 15 URLs
-	topURLs := s.URLs
-	if len(topURLs) > 15 {
-		topURLs = topURLs[:15]
+	// arjun — scan top parameterized live URLs.
+	var arjunTargets []string
+	for _, u := range s.URLs {
+		if strings.HasPrefix(u, "http") {
+			arjunTargets = append(arjunTargets, u)
+		}
+		if len(arjunTargets) >= 15 {
+			break
+		}
 	}
 	arjunFound := 0
-	for _, u := range topURLs {
+	for _, u := range arjunTargets {
 		arjunOut := filepath.Join(s.OutputFolder, "arjun_temp.json")
 		res := runner.RunTool(ctx, "arjun", []string{"-u", u, "-oJ", arjunOut, "-q", "-t", "5"}, nil)
-		if res.Err == nil {
+		if res.OK() {
 			if data, err := os.ReadFile(arjunOut); err == nil {
 				var arjunResult map[string]interface{}
 				if json.Unmarshal(data, &arjunResult) == nil {
@@ -809,14 +1325,14 @@ func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) erro
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  arjun: %d params found across %d URLs\n", arjunFound, len(topURLs))
+	s.Printf("│  arjun: %d params found across %d URLs\n", arjunFound, len(arjunTargets))
 
 	var lines []string
 	for u := range paramURLs {
 		lines = append(lines, u)
 	}
 	paramFile := filepath.Join(s.OutputFolder, "params.txt")
-	os.WriteFile(paramFile, []byte(strings.Join(lines, "\n")), 0644)
+	writeLines(paramFile, lines)
 	s.Printf("│  Total Param URLs: %d\n", len(paramURLs))
 	return nil
 }
@@ -826,26 +1342,35 @@ func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) erro
 // ═══════════════════════════════════════════════════════════════
 type CORSPhase struct{}
 
-func (p *CORSPhase) Name() string        { return "CORS Misconfiguration Check" }
-func (p *CORSPhase) Description() string { return "Tests CORS reflection, null origin, wildcard" }
+func (p *CORSPhase) Name() string { return "CORS Misconfiguration Check" }
+func (p *CORSPhase) Description() string {
+	return "Tests CORS reflection, null origin, wildcard"
+}
 func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 	corsVuln := 0
 	testOrigins := []string{"https://evil.com", "null", "https://attacker.com"}
 
-	targets := s.URLs
+	targets := dedupeURLs(s.URLs)
 	if len(targets) > 50 {
 		targets = targets[:50]
 	}
 
 	for _, u := range targets {
+		if !strings.HasPrefix(u, "http") {
+			continue
+		}
 		for _, origin := range testOrigins {
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "10", "-H", "Origin: " + origin, "-I", u}, nil)
-			if res.Err == nil {
+			args := []string{"-s", "-m", "10", "-H", "Origin: " + origin, "-I", u}
+			if s.Proxy.Active {
+				args = append([]string{"-x", s.Proxy.ProxyURL, "-k"}, args...)
+			}
+			res := runner.RunTool(ctx, "curl", args, nil)
+			if res.OK() {
 				lower := strings.ToLower(res.Stdout)
 				if strings.Contains(lower, "access-control-allow-origin: "+strings.ToLower(origin)) ||
 					strings.Contains(lower, "access-control-allow-origin: *") {
 					corsVuln++
-					s.Findings = append(s.Findings, map[string]interface{}{
+					s.AddFinding(map[string]interface{}{
 						"title": "CORS Misconfiguration", "severity": "High",
 						"url": u, "tool": "cors_check", "evidence": "Reflected origin: " + origin,
 					})
@@ -857,4 +1382,17 @@ func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	s.Printf("│  CORS: tested %d, vulnerable %d\n", len(targets), corsVuln)
 	return nil
+}
+
+// dedupeURLs returns the unique set of URLs preserving order.
+func dedupeURLs(in []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, u := range in {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	return out
 }
