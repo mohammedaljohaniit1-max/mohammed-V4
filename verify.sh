@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════
-# MOHAMMED v3 — verify.sh
-# Fast verification that all phases, files, and tools are working.
+# MOHAMMED v4 — verify.sh
+# Fast verification that all phases, files, tools, AI triage, and the
+# root-cause bug fixes are wired correctly.
 # Usage: bash verify.sh [output_folder]
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -20,7 +21,7 @@ OUTPUT_DIR="${1:-output}"
 
 echo -e "${BOLD}"
 echo "╔═══════════════════════════════════════════════════╗"
-echo "║     MOHAMMED v3 — Verification Suite              ║"
+echo "║     MOHAMMED v4 — Verification Suite              ║"
 echo "╚═══════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -58,20 +59,27 @@ check_file "pkg/runner/runner.go"
 check_file "pkg/phases/phases.go"
 check_file "pkg/phases/phases_vuln.go"
 check_file "pkg/config/config.go"
+check_file "pkg/ai/triage.go"
 check_file "config.yaml"
 check_file "scope.txt"
 check_file "setup.sh"
+check_file "install_path.sh"
+check_file "README.md"
 
 # ── Section 3: Go Build ──────────────────────────────────────────────
 hdr "3. Go Build Test"
 
 if command -v go &>/dev/null; then
     info "Go version: $(go version)"
-    if go build -o /tmp/mohammed_test ./cmd/mohammed 2>&1; then
-        pass "go build succeeded"
-        rm -f /tmp/mohammed_test
+    if go build ./... 2>&1; then
+        pass "go build ./... succeeded (whole module compiles)"
     else
-        fail "go build FAILED — fix compile errors"
+        fail "go build ./... FAILED — fix compile errors"
+    fi
+    if go vet ./... 2>&1; then
+        pass "go vet ./... clean"
+    else
+        warn "go vet reported issues (non-fatal)"
     fi
 else
     fail "go not found in PATH"
@@ -249,11 +257,100 @@ else
     fail "phases_vuln.go: using raw fmt.Printf (not thread-safe)"
 fi
 
-if grep -q "\-\-output.*paramOut\|--output.*OutputFolder" pkg/phases/phases.go 2>/dev/null; then
-    pass "phases.go: paramspider uses explicit output path"
+if grep -q '"--domain", domain, "--output", paramOut' pkg/phases/phases.go 2>/dev/null; then
+    pass "phases.go: paramspider uses --domain/--output (BUG #6 fix)"
 else
     warn "phases.go: paramspider output path may not be set correctly"
 fi
+
+# ── Section 12: Root-cause Bug Fixes (code checks) ───────────────────
+hdr "12. Confirmed Bug Fixes"
+
+check_grep() { # <file> <pattern> <pass_msg> <fail_msg>
+    if grep -qE "$2" "$1" 2>/dev/null; then pass "$3"; else fail "$4"; fi
+}
+
+# BUG #2 — amass/bbot routed on apex only + apex helpers exist
+check_grep pkg/config/config.go 'func ExtractApexDomains' \
+    "config.go: ExtractApexDomains present (BUG #2 apex routing)" \
+    "config.go: ExtractApexDomains MISSING (BUG #2)"
+check_grep pkg/config/config.go 'func .*IsApexDomain' \
+    "config.go: IsApexDomain present" \
+    "config.go: IsApexDomain MISSING"
+
+# BUG #3 — puredns --write + ensureResolvers
+check_grep pkg/phases/phases.go '"--write"' \
+    "phases.go: puredns uses --write, not -w (BUG #3)" \
+    "phases.go: puredns --write MISSING (BUG #3)"
+check_grep pkg/phases/phases.go 'func ensureResolvers' \
+    "phases.go: ensureResolvers helper present (BUG #3)" \
+    "phases.go: ensureResolvers MISSING (BUG #3)"
+
+# BUG #4 — naabu connect scan
+check_grep pkg/phases/phases.go '"-scan-type", ?"c"|"-scan-type",\s*"c"' \
+    "phases.go: naabu uses -scan-type c (BUG #4)" \
+    "phases.go: naabu -scan-type c MISSING (BUG #4)"
+# Only flag a REGRESSION if -connect-scan appears as an actual argument
+# (inside a RunTool arg slice), not merely in an explanatory comment.
+if grep -vE '^\s*//' pkg/phases/phases.go | grep -q '"-connect-scan"' 2>/dev/null; then
+    fail "phases.go: invalid -connect-scan flag still used in code (BUG #4 regression)"
+else
+    pass "phases.go: invalid -connect-scan flag not used in code (BUG #4)"
+fi
+
+# BUG #1 — httpx routed via -http-proxy, no fabricated -insecure
+check_grep pkg/phases/phases.go '"-http-proxy"' \
+    "phases.go: httpx routes through -http-proxy (BUG #1)" \
+    "phases.go: httpx -http-proxy MISSING (BUG #1)"
+
+# BUG #8/#9 — subzy vulnerable parse + scope dedup
+check_grep pkg/phases/phases.go 'func parseSubzyVulnerable' \
+    "phases.go: parseSubzyVulnerable present (BUG #8)" \
+    "phases.go: parseSubzyVulnerable MISSING (BUG #8)"
+
+# BUG #10 — gau providers
+check_grep pkg/phases/phases.go '"--providers"|"--subs"' \
+    "phases.go: gau providers/subs flags present (BUG #10)" \
+    "phases.go: gau providers flags MISSING (BUG #10)"
+
+# ── Section 13: Ollama AI Triage Integration ─────────────────────────
+hdr "13. Ollama AI Triage Wiring"
+
+check_grep pkg/ai/triage.go 'func \(c \*Client\) TriageFinding' \
+    "triage.go: TriageFinding method present" \
+    "triage.go: TriageFinding MISSING"
+check_grep pkg/ai/triage.go '/api/generate' \
+    "triage.go: posts to /api/generate" \
+    "triage.go: /api/generate endpoint MISSING"
+check_grep pkg/ai/triage.go 'ollama_offline' \
+    "triage.go: fails OPEN (ollama_offline)" \
+    "triage.go: fail-open path MISSING"
+check_grep pkg/engine/engine.go 'ai\.NewClient' \
+    "engine.go: constructs ai.Client" \
+    "engine.go: ai.Client NOT constructed"
+check_grep pkg/engine/engine.go 'func \(s \*State\) Triage' \
+    "engine.go: State.Triage method present" \
+    "engine.go: State.Triage MISSING"
+if grep -q 's.Triage' pkg/phases/phases_vuln.go 2>/dev/null; then
+    pass "phases_vuln.go: calls s.Triage on findings"
+else
+    fail "phases_vuln.go: s.Triage NOT called"
+fi
+
+# ── Section 14: DNS Resolvers Availability ───────────────────────────
+hdr "14. DNS Resolvers (puredns/dnsx input)"
+
+RES_FOUND=0
+for rp in /usr/share/seclists/Miscellaneous/dns-resolvers.txt \
+          /opt/mohammed-tools/resolvers.txt \
+          "$HOME/.config/puredns/resolvers.txt" \
+          /tmp/mohammed_resolvers.txt; do
+    if [ -s "$rp" ]; then
+        pass "resolvers present: $rp ($(wc -l < "$rp") entries)"
+        RES_FOUND=1
+    fi
+done
+[ "$RES_FOUND" -eq 0 ] && warn "No resolvers file found — puredns/dnsx will use built-in fallback (run setup.sh)"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

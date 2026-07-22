@@ -28,7 +28,7 @@ const banner = `
 `
 
 const helpText = `
-MOHAMMED v3 — Ultimate Security Reconnaissance & Vulnerability Discovery Framework
+MOHAMMED v4 — Ultimate Security Reconnaissance & Vulnerability Discovery Framework
 
 USAGE:
   ./mohammed <command> [flags]
@@ -85,14 +85,14 @@ var allTools = []string{
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Print(banner)
-		fmt.Println(helpText)
+		fmt.Print(helpText)
 		os.Exit(0)
 	}
 
 	switch os.Args[1] {
 	case "help", "--help", "-h":
 		fmt.Print(banner)
-		fmt.Println(helpText)
+		fmt.Print(helpText)
 
 	case "doctor":
 		fmt.Print(banner)

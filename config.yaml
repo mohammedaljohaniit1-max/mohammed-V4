@@ -19,7 +19,7 @@ ollama:
   endpoint: "http://127.0.0.1:11434"
   model: "gemma:2b"    # Lightweight Google model — fast responses
   temperature: 0.2
-  timeout: 60
+  timeout: 15          # seconds — AI triage fails open (assumes REAL) if exceeded
 
 # ── Proxy & WAF Evasion ──────────────────────────────────────────────────────
 proxy:
