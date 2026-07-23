@@ -3,9 +3,11 @@
 **Ultimate Security Reconnaissance & Vulnerability Discovery Framework**
 
 A single Go binary that orchestrates 38+ best-in-class recon and vulnerability
-tools across **29 sequential phases** — from passive OSINT and subdomain
-enumeration to active fuzzing, injection testing, request smuggling, and an
-AI-assisted false-positive triage layer powered by a local Ollama model.
+tools across **30 sequential phases** — from parallel passive OSINT, apex-only
+subdomain enumeration and zero-login deep external recon to active fuzzing,
+injection testing, request smuggling, and an AI-assisted false-positive triage
+layer powered by a local Ollama model. Interrupted scans **resume from a
+checkpoint** so no progress is ever lost.
 
 Module: `github.com/mohammed-v3/core` · Branch: `main` · Go 1.22+
 
@@ -153,25 +155,47 @@ bash verify.sh                # build + vet + tool + AI + bug-fix code checks
 
 # Passive only (safe OSINT, no active payloads)
 ./mohammed scan -s scope.txt -c config.yaml --profile passive
+
+# Resume an interrupted scan — auto-detect the most recent scan under output/
+./mohammed scan -s scope.txt --profile large --resume auto
+
+# Resume from an explicit checkpoint file
+./mohammed scan -s scope.txt --profile large --resume output/whatnot_com/checkpoint.json
 ```
 
 **Scan flags:** `-s/--scope` (required) · `-c/--config` (default `config.yaml`) ·
-`--profile` · `--burp <url>` · `--skip <phase#>` · `--threads` · `--rate` · `--output`.
+`--profile` · `--burp <url>` · `--resume auto|<path>` · `--skip <phase#>` ·
+`--threads` · `--rate` · `--output`.
+
+### Resume & checkpointing
+
+After **every** phase, the full scan state (subdomains, live hosts, URLs,
+parameters, findings, and the list of completed phases) is written atomically to
+`{output}/{target}/checkpoint.json`. If a scan is interrupted (Ctrl-C, crash,
+timeout), re-run with `--resume`:
+
+* `--resume auto` picks the most-recently-modified `checkpoint.json` under `output/`.
+* `--resume <path>` loads a specific checkpoint.
+
+Completed phases are **skipped** (their data restored from the checkpoint) and
+the scan continues from the first unfinished phase — turning a failed 40-minute
+run into a few-second resume.
 
 ---
 
-## 4. The 29 Phases
+## 4. The 30 Phases
 
 | # | Phase | Primary tools | What it does |
 |---|-------|---------------|--------------|
 | 01 | Scope Validation | (internal) | Parses/dedupes scope, reports apex domains, warns on missing apex |
-| 02 | OSINT | curl → crt.sh, RapidDNS, BufferOver, HackerTarget, Shodan, VT, SecurityTrails, OTX | Passive subdomain harvest (apex-only queries) |
-| 03 | Subdomain Passive | subfinder, assetfinder (all), amass, bbot, findomain (apex-only) | Passive enumeration; amass/bbot routed to apex only (BUG #2) |
+| 02 | OSINT | **parallel** curl → crt.sh, HackerTarget, RapidDNS, BufferOver, **AnubisDB, ThreatMiner, Certspotter**, OTX, **URLScan** + keyed Shodan, VT, SecurityTrails, **Chaos** | Passive subdomain harvest, all sources fanned out concurrently (apex-only) |
+| 03 | Subdomain Passive | subfinder, assetfinder, amass, bbot, findomain (**all apex-only**) | Passive enumeration; every tool runs **once per apex root**, never per subdomain (FLAW #1) |
 | 04 | Subdomain Active | puredns (`--write` + resolvers), massdns, dnsx, dnsgen | DNS bruteforce + permutations (BUG #3 resolvers) |
 | 05 | DNS Resolve | dnsx | Resolve/dedupe to live A records |
 | 06 | Takeover | subzy + HTTP fingerprint confirm + AI triage | Subdomain takeover, confirmed not just flagged (BUG #8) |
 | 07 | HTTP Probe | httpx (`-json`, `-http-proxy` when Burp active) | Live host detection, titles, status, tech (BUG #1) |
 | 08 | TLS Analysis | tlsx | Certificate / TLS metadata |
+| 08b | **Deep External Recon** | curl + stdlib (no new binaries) | **Zero-login** attack-surface expansion: security.txt (RFC 9116), SPF/DMARC vendor chain, favicon **mmh3** hash for Shodan `http.favicon.hash` pivots, ASN/netblock mapping |
 | 09 | Port Scan | naabu (`-scan-type c`), nmap | Top-1000 TCP connect scan, no root (BUG #4) |
 | 10 | Wayback | gau (`--providers`, `--subs`), waybackurls | Archived URL harvest (BUG #10) |
 | 11 | Crawl | katana (`-proxy`), gospider | Active crawl seeded from live hosts (BUG #5 empty-input guard) |
@@ -194,8 +218,10 @@ bash verify.sh                # build + vet + tool + AI + bug-fix code checks
 | 28 | Prototype Pollution | nuclei | Client/server prototype pollution |
 | 29 | Report | (internal) | Writes `final_report.md` + `final_report.json` with AI verdicts |
 
-> Profiles select a subset of phases: `passive` ≈ 01–13 passive-only,
-> `small`/`medium`/`large` progressively enable active + vuln phases.
+> Profiles select a subset of phases **by name** (robust to reordering):
+> `passive` = OSINT + apex enum + DNS + HTTP + TLS + Deep External Recon +
+> Wayback + Crawl + JS + Email + Report; `small`/`medium`/`large` progressively
+> enable active + vuln phases. Deep External Recon runs in **all** profiles.
 
 ---
 

@@ -62,6 +62,7 @@ SCAN FLAGS:
   -c, --config    string   Path to config.yaml file with API keys (default: config.yaml)
   --profile       string   Scan profile: small | medium | large | passive (default: medium)
   --burp          string   Burp Suite proxy URL (e.g. http://172.30.48.1:8080)
+  --resume        string   Resume an interrupted scan: 'auto' (latest in output/) or path to checkpoint.json
   --skip          int      Skip to phase number (0 = start from beginning)
   --threads       int      Global thread count (default: 30)
   --rate          int      Requests per minute (default: 150)
@@ -169,6 +170,7 @@ func runScan(args []string) {
 	threads := fs.Int("threads", 30, "Thread count")
 	rate := fs.Int("rate", 150, "Rate limit (req/min)")
 	output := fs.String("output", "output", "Output directory")
+	resume := fs.String("resume", "", "Resume an interrupted scan: 'auto' (latest in output/) or a path to checkpoint.json")
 	fs.Parse(args)
 
 	if *scopeFile == "" {
@@ -205,6 +207,29 @@ func runScan(args []string) {
 	config.EnsureDir(*output)
 
 	state := engine.NewState(cfg, scope)
+
+	// ── RESUME: load a checkpoint and restore progress (FLAW #2) ──────────────
+	if *resume != "" {
+		cpPath := *resume
+		if strings.EqualFold(*resume, "auto") {
+			cpPath = engine.FindLatestCheckpoint(*output)
+			if cpPath == "" {
+				fmt.Printf("[!] --resume auto: no checkpoint.json found under %s/ — starting fresh\n", *output)
+			}
+		}
+		if cpPath != "" {
+			cp, err := engine.LoadCheckpoint(cpPath)
+			if err != nil {
+				fmt.Printf("[!] Failed to load checkpoint %s: %v — starting fresh\n", cpPath, err)
+			} else {
+				cp.RestoreInto(state)
+				fmt.Printf("[+] Resumed from checkpoint: %s\n", cpPath)
+				fmt.Printf("    Completed phases: %d | Subdomains: %d | Live: %d | URLs: %d | Findings: %d\n",
+					len(cp.CompletedPhases), len(state.Subdomains), len(state.LiveHosts), len(state.URLs), len(state.Findings))
+			}
+		}
+	}
+
 	orch := engine.NewOrchestrator(state)
 
 	allPhases := []engine.Phase{
@@ -216,6 +241,7 @@ func runScan(args []string) {
 		&phases.TakeoverPhase{},           // 06
 		&phases.HTTPProbePhase{},          // 07
 		&phases.TLSAnalysisPhase{},        // 08
+		&phases.DeepReconPhase{},          // 08b: zero-login deep external recon
 		&phases.PortScanPhase{},           // 09
 		&phases.WaybackPhase{},            // 10
 		&phases.CrawlPhase{},              // 11
@@ -244,6 +270,25 @@ func runScan(args []string) {
 		activeProfile = "large"
 	}
 
+	// Profile membership is keyed by phase Name() (not slice index) so adding
+	// or reordering phases can never silently corrupt a profile — a lesson from
+	// the old fragile map[int]bool that broke whenever a phase was inserted.
+	smallPhases := map[string]bool{
+		"Scope Validation": true, "Passive Subdomain Enumeration": true,
+		"DNS Resolution & Enrichment": true, "HTTP Probing & Tech Fingerprinting": true,
+		"TLS/SSL Analysis": true, "Deep External Recon": true,
+		"JS Analysis & Secret Extraction": true, "Directory & Content Fuzzing": true,
+		"Git & Sensitive File Exposure": true, "Final Report Generation": true,
+	}
+	passivePhases := map[string]bool{
+		"Scope Validation": true, "OSINT Intelligence Gathering": true,
+		"Passive Subdomain Enumeration": true, "DNS Resolution & Enrichment": true,
+		"HTTP Probing & Tech Fingerprinting": true, "TLS/SSL Analysis": true,
+		"Deep External Recon": true, "Wayback & Historical URL Mining": true,
+		"Web Crawling & Spidering": true, "JS Analysis & Secret Extraction": true,
+		"Email Security Verification": true, "Final Report Generation": true,
+	}
+
 	for i, p := range allPhases {
 		if i < *skip {
 			continue
@@ -252,11 +297,9 @@ func runScan(args []string) {
 		include := true
 		switch activeProfile {
 		case "small":
-			smallPhases := map[int]bool{0: true, 2: true, 4: true, 6: true, 7: true, 11: true, 16: true, 25: true, 28: true}
-			include = smallPhases[i]
+			include = smallPhases[p.Name()]
 		case "passive":
-			passivePhases := map[int]bool{0: true, 1: true, 2: true, 4: true, 6: true, 7: true, 9: true, 11: true, 12: true, 26: true, 28: true}
-			include = passivePhases[i]
+			include = passivePhases[p.Name()]
 		case "medium", "large", "full":
 			include = true
 		}

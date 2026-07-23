@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
@@ -100,188 +101,347 @@ type OSINTPhase struct{}
 
 func (p *OSINTPhase) Name() string { return "OSINT Intelligence Gathering" }
 func (p *OSINTPhase) Description() string {
-	return "Shodan, VirusTotal, SecurityTrails, AlienVault, crt.sh, RapidDNS, BufferOver, HackerTarget"
+	return "Parallel harvest: crt.sh·HackerTarget·RapidDNS·BufferOver·AnubisDB·ThreatMiner·Certspotter·OTX·URLScan + Shodan·VT·SecurityTrails·Chaos"
 }
 func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
-	allSubs := make(map[string]bool)
 	keys := s.Config.APIKeys
 
 	// OSINT sources operate on registrable/apex domains only — querying a
 	// subdomain like www.whatnot.com wastes calls and returns nothing useful.
 	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
 
-	for _, domain := range apexDomains {
-		// 1. Shodan API
-		if keys.Shodan != "" {
-			url := fmt.Sprintf("https://api.shodan.io/dns/domain/%s?key=%s", domain, keys.Shodan)
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "20", url}, nil)
-			if res.OK() && res.Stdout != "" {
-				var shodanRes map[string]interface{}
-				if json.Unmarshal([]byte(res.Stdout), &shodanRes) == nil {
-					if subs, ok := shodanRes["subdomains"].([]interface{}); ok {
-						for _, sub := range subs {
-							allSubs[fmt.Sprintf("%v.%s", sub, domain)] = true
-						}
-						s.Printf("│  Shodan API [%s]: %d subdomains\n", domain, len(subs))
-					}
-				}
-			}
-		}
+	// ── FLAW #3 FIX: parallel async harvester ────────────────────────────────
+	// The old code queried 8 sources STRICTLY SEQUENTIALLY inside a domain loop,
+	// so one slow source (crt.sh, 40s) stalled everything. We now fan every
+	// (source × apex) query out into its own goroutine, collect results through
+	// a mutex-guarded set, and add AnubisDB / ThreatMiner / Certspotter /
+	// URLScan on top of the original sources.
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		allSubs = make(map[string]bool)
+	)
 
-		// 2. VirusTotal API
-		if keys.VirusTotal != "" {
-			url := fmt.Sprintf("https://www.virustotal.com/api/v3/domains/%s/subdomains?limit=40", domain)
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "20", "-H", "x-apikey: " + keys.VirusTotal, url}, nil)
-			if res.OK() && res.Stdout != "" {
-				var vtRes map[string]interface{}
-				if json.Unmarshal([]byte(res.Stdout), &vtRes) == nil {
-					if data, ok := vtRes["data"].([]interface{}); ok {
-						for _, item := range data {
-							if itemMap, ok := item.(map[string]interface{}); ok {
-								if id, ok := itemMap["id"].(string); ok {
-									allSubs[strings.ToLower(id)] = true
-								}
-							}
-						}
-						s.Printf("│  VirusTotal API [%s]: %d subdomains\n", domain, len(data))
-					}
-				}
+	// addAll merges a harvester's hosts into the shared set (thread-safe) and
+	// returns how many were NEW. Only hosts under `apex` are accepted.
+	addAll := func(apex string, hosts []string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, h := range hosts {
+			h = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h, "*.")))
+			h = strings.TrimSuffix(h, ".")
+			if h == "" || strings.ContainsAny(h, " /=\"<>") {
+				continue
+			}
+			if h != apex && !strings.HasSuffix(h, "."+apex) {
+				continue
+			}
+			if !allSubs[h] {
+				allSubs[h] = true
+				n++
 			}
 		}
-
-		// 3. SecurityTrails API
-		if keys.SecurityTrails != "" {
-			url := fmt.Sprintf("https://api.securitytrails.com/v1/domain/%s/subdomains?children_only=false", domain)
-			res := runner.RunTool(ctx, "curl", []string{"-s", "-m", "20", "-H", "APIKEY: " + keys.SecurityTrails, url}, nil)
-			if res.OK() && res.Stdout != "" {
-				var stRes map[string]interface{}
-				if json.Unmarshal([]byte(res.Stdout), &stRes) == nil {
-					if subs, ok := stRes["subdomains"].([]interface{}); ok {
-						for _, sub := range subs {
-							allSubs[fmt.Sprintf("%v.%s", sub, domain)] = true
-						}
-						s.Printf("│  SecurityTrails [%s]: %d subdomains\n", domain, len(subs))
-					}
-				}
-			}
-		}
-
-		// 4. AlienVault OTX
-		otxURL := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", domain)
-		otxArgs := []string{"-s", "-m", "20", otxURL}
-		if keys.AlienVault != "" {
-			otxArgs = append([]string{"-H", "X-OTX-API-KEY: " + keys.AlienVault}, otxArgs...)
-		}
-		res := runner.RunTool(ctx, "curl", otxArgs, nil)
-		if res.OK() && res.Stdout != "" {
-			var otxData map[string]interface{}
-			if json.Unmarshal([]byte(res.Stdout), &otxData) == nil {
-				if records, ok := otxData["passive_dns"].([]interface{}); ok {
-					for _, r := range records {
-						if rec, ok := r.(map[string]interface{}); ok {
-							if hostname, ok := rec["hostname"].(string); ok {
-								hostname = strings.ToLower(strings.TrimSpace(hostname))
-								if strings.HasSuffix(hostname, domain) {
-									allSubs[hostname] = true
-								}
-							}
-						}
-					}
-					s.Printf("│  AlienVault OTX [%s]: %d records\n", domain, len(records))
-				}
-			}
-		}
-
-		// 5. crt.sh
-		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "40", fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain)}, nil)
-		if res.OK() && res.Stdout != "" {
-			var certs []map[string]interface{}
-			if json.Unmarshal([]byte(res.Stdout), &certs) == nil {
-				for _, c := range certs {
-					if name, ok := c["name_value"].(string); ok {
-						for _, n := range strings.Split(name, "\n") {
-							n = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(n, "*.")))
-							if n != "" && strings.HasSuffix(n, domain) {
-								allSubs[n] = true
-							}
-						}
-					}
-				}
-				s.Printf("│  crt.sh [%s]: %d certificates\n", domain, len(certs))
-			}
-		}
-
-		// 6. RapidDNS (no key required)
-		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://rapiddns.io/subdomain/%s?full=1", domain)}, nil)
-		if res.OK() && res.Stdout != "" {
-			count := 0
-			for _, line := range strings.Split(res.Stdout, "\n") {
-				// Naively extract host-looking tokens ending in the domain.
-				for _, tok := range strings.FieldsFunc(line, func(r rune) bool {
-					return r == '<' || r == '>' || r == '"' || r == ' ' || r == '\t'
-				}) {
-					tok = strings.ToLower(strings.TrimSpace(tok))
-					if strings.HasSuffix(tok, "."+domain) && !strings.ContainsAny(tok, "/=") {
-						if !allSubs[tok] {
-							allSubs[tok] = true
-							count++
-						}
-					}
-				}
-			}
-			s.Printf("│  RapidDNS [%s]: %d hosts\n", domain, count)
-		}
-
-		// 7. BufferOver (no key required)
-		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://dns.bufferover.run/dns?q=.%s", domain)}, nil)
-		if res.OK() && res.Stdout != "" {
-			var bo map[string]interface{}
-			count := 0
-			if json.Unmarshal([]byte(res.Stdout), &bo) == nil {
-				for _, key := range []string{"FDNS_A", "RDNS"} {
-					if arr, ok := bo[key].([]interface{}); ok {
-						for _, entry := range arr {
-							if es, ok := entry.(string); ok {
-								parts := strings.Split(es, ",")
-								host := strings.ToLower(strings.TrimSpace(parts[len(parts)-1]))
-								if strings.HasSuffix(host, domain) && !allSubs[host] {
-									allSubs[host] = true
-									count++
-								}
-							}
-						}
-					}
-				}
-			}
-			s.Printf("│  BufferOver [%s]: %d hosts\n", domain, count)
-		}
-
-		// 8. HackerTarget
-		res = runner.RunTool(ctx, "curl", []string{"-s", "-m", "30", fmt.Sprintf("https://api.hackertarget.com/hostsearch/?q=%s", domain)}, nil)
-		if res.OK() && res.Stdout != "" {
-			count := 0
-			for _, line := range strings.Split(res.Stdout, "\n") {
-				parts := strings.Split(line, ",")
-				if len(parts) >= 1 {
-					h := strings.ToLower(strings.TrimSpace(parts[0]))
-					if h != "" && strings.HasSuffix(h, domain) {
-						allSubs[h] = true
-						count++
-					}
-				}
-			}
-			s.Printf("│  HackerTarget [%s]: %d hosts\n", domain, count)
-		}
+		return n
 	}
+
+	// run launches a named harvester goroutine.
+	run := func(source, apex string, fn func() []string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hosts := fn()
+			added := addAll(apex, hosts)
+			s.Printf("│  %-14s [%s]: +%d\n", source, apex, added)
+		}()
+	}
+
+	for _, domain := range apexDomains {
+		domain := domain // capture
+
+		// ── API-KEY SOURCES (only if key configured) ────────────────────────
+		if keys.Shodan != "" {
+			run("Shodan", domain, func() []string {
+				u := fmt.Sprintf("https://api.shodan.io/dns/domain/%s?key=%s", domain, keys.Shodan)
+				return harvestShodan(ctx, domain, u)
+			})
+		}
+		if keys.VirusTotal != "" {
+			run("VirusTotal", domain, func() []string {
+				u := fmt.Sprintf("https://www.virustotal.com/api/v3/domains/%s/subdomains?limit=40", domain)
+				return harvestVirusTotal(ctx, u, keys.VirusTotal)
+			})
+		}
+		if keys.SecurityTrails != "" {
+			run("SecurityTrails", domain, func() []string {
+				u := fmt.Sprintf("https://api.securitytrails.com/v1/domain/%s/subdomains?children_only=false", domain)
+				return harvestSecurityTrails(ctx, domain, u, keys.SecurityTrails)
+			})
+		}
+		if keys.Chaos != "" {
+			run("Chaos", domain, func() []string {
+				u := fmt.Sprintf("https://dns.projectdiscovery.io/dns/%s/subdomains", domain)
+				return harvestChaos(ctx, domain, u, keys.Chaos)
+			})
+		}
+
+		// ── ZERO-KEY SOURCES (always) ────────────────────────────────────────
+		run("crt.sh", domain, func() []string { return harvestCrtSh(ctx, domain) })
+		run("HackerTarget", domain, func() []string { return harvestHackerTarget(ctx, domain) })
+		run("RapidDNS", domain, func() []string { return harvestRapidDNS(ctx, domain) })
+		run("BufferOver", domain, func() []string { return harvestBufferOver(ctx, domain) })
+		run("AnubisDB", domain, func() []string { return harvestAnubis(ctx, domain) })
+		run("ThreatMiner", domain, func() []string { return harvestThreatMiner(ctx, domain) })
+		run("Certspotter", domain, func() []string { return harvestCertspotter(ctx, domain) })
+		run("AlienVaultOTX", domain, func() []string { return harvestOTX(ctx, domain, keys.AlienVault) })
+		run("URLScan", domain, func() []string { return harvestURLScan(ctx, domain) })
+	}
+
+	wg.Wait()
 
 	osintFile := filepath.Join(s.OutputFolder, "osint_subdomains.txt")
 	var lines []string
+	mu.Lock()
 	for sub := range allSubs {
 		lines = append(lines, sub)
 	}
+	total := len(allSubs)
+	mu.Unlock()
 	writeLines(osintFile, lines)
-	s.Printf("│  OSINT Total Unique: %d\n", len(allSubs))
+	s.Printf("│  OSINT Total Unique: %d\n", total)
 	return nil
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OSINT harvesters — each returns a flat list of candidate hosts.
+// All are stdlib+curl based, honor ctx timeouts (via runner per-tool
+// timeout), and NEVER panic on malformed JSON (they just return nil).
+// Host-suffix filtering is applied centrally by addAll().
+// ═══════════════════════════════════════════════════════════════
+
+// curlGet is a small helper: GET url (optionally with extra args/headers)
+// and return the body, or "" on any failure.
+func curlGet(ctx context.Context, url string, extraArgs ...string) string {
+	args := append([]string{"-s", "-m", "30"}, extraArgs...)
+	args = append(args, url)
+	res := runner.RunTool(ctx, "curl", args, nil)
+	if res.OK() {
+		return res.Stdout
+	}
+	return ""
+}
+
+func harvestShodan(ctx context.Context, domain, url string) []string {
+	body := curlGet(ctx, url)
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if subs, ok := m["subdomains"].([]interface{}); ok {
+			for _, sub := range subs {
+				out = append(out, fmt.Sprintf("%v.%s", sub, domain))
+			}
+		}
+	}
+	return out
+}
+
+func harvestVirusTotal(ctx context.Context, url, key string) []string {
+	body := curlGet(ctx, url, "-H", "x-apikey: "+key)
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if data, ok := m["data"].([]interface{}); ok {
+			for _, item := range data {
+				if im, ok := item.(map[string]interface{}); ok {
+					if id, ok := im["id"].(string); ok {
+						out = append(out, id)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func harvestSecurityTrails(ctx context.Context, domain, url, key string) []string {
+	body := curlGet(ctx, url, "-H", "APIKEY: "+key)
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if subs, ok := m["subdomains"].([]interface{}); ok {
+			for _, sub := range subs {
+				out = append(out, fmt.Sprintf("%v.%s", sub, domain))
+			}
+		}
+	}
+	return out
+}
+
+// harvestChaos queries ProjectDiscovery Chaos (requires key header).
+func harvestChaos(ctx context.Context, domain, url, key string) []string {
+	body := curlGet(ctx, url, "-H", "Authorization: "+key)
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if subs, ok := m["subdomains"].([]interface{}); ok {
+			for _, sub := range subs {
+				out = append(out, fmt.Sprintf("%v.%s", sub, domain))
+			}
+		}
+	}
+	return out
+}
+
+func harvestCrtSh(ctx context.Context, domain string) []string {
+	body := curlGet(ctx, fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain), "-m", "40")
+	var out []string
+	var certs []map[string]interface{}
+	if json.Unmarshal([]byte(body), &certs) == nil {
+		for _, c := range certs {
+			if name, ok := c["name_value"].(string); ok {
+				out = append(out, strings.Split(name, "\n")...)
+			}
+		}
+	}
+	return out
+}
+
+func harvestHackerTarget(ctx context.Context, domain string) []string {
+	body := curlGet(ctx, fmt.Sprintf("https://api.hackertarget.com/hostsearch/?q=%s", domain))
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		parts := strings.Split(line, ",")
+		if len(parts) >= 1 {
+			out = append(out, parts[0])
+		}
+	}
+	return out
+}
+
+func harvestRapidDNS(ctx context.Context, domain string) []string {
+	body := curlGet(ctx, fmt.Sprintf("https://rapiddns.io/subdomain/%s?full=1", domain))
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		for _, tok := range strings.FieldsFunc(line, func(r rune) bool {
+			return r == '<' || r == '>' || r == '"' || r == ' ' || r == '\t'
+		}) {
+			if strings.HasSuffix(strings.ToLower(tok), "."+domain) {
+				out = append(out, tok)
+			}
+		}
+	}
+	return out
+}
+
+func harvestBufferOver(ctx context.Context, domain string) []string {
+	body := curlGet(ctx, fmt.Sprintf("https://dns.bufferover.run/dns?q=.%s", domain))
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		for _, key := range []string{"FDNS_A", "RDNS"} {
+			if arr, ok := m[key].([]interface{}); ok {
+				for _, entry := range arr {
+					if es, ok := entry.(string); ok {
+						parts := strings.Split(es, ",")
+						out = append(out, parts[len(parts)-1])
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// harvestAnubis — AnubisDB (jldc.me) returns a plain JSON array of hosts.
+func harvestAnubis(ctx context.Context, domain string) []string {
+	body := curlGet(ctx, fmt.Sprintf("https://jldc.me/anubis/subdomains/%s", domain))
+	var out []string
+	_ = json.Unmarshal([]byte(body), &out)
+	return out
+}
+
+// harvestThreatMiner — ThreatMiner passive DNS (rt=5 → subdomains list).
+func harvestThreatMiner(ctx context.Context, domain string) []string {
+	body := curlGet(ctx, fmt.Sprintf("https://api.threatminer.org/v2/domain.php?q=%s&rt=5", domain))
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if results, ok := m["results"].([]interface{}); ok {
+			for _, r := range results {
+				if hs, ok := r.(string); ok {
+					out = append(out, hs)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// harvestCertspotter — Certspotter CT log API (dns_names array per issuance).
+func harvestCertspotter(ctx context.Context, domain string) []string {
+	url := fmt.Sprintf("https://api.certspotter.com/v1/issuances?domain=%s&include_subdomains=true&expand=dns_names", domain)
+	body := curlGet(ctx, url)
+	var out []string
+	var arr []map[string]interface{}
+	if json.Unmarshal([]byte(body), &arr) == nil {
+		for _, item := range arr {
+			if names, ok := item["dns_names"].([]interface{}); ok {
+				for _, n := range names {
+					if ns, ok := n.(string); ok {
+						out = append(out, ns)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// harvestOTX — AlienVault OTX passive DNS (key optional).
+func harvestOTX(ctx context.Context, domain, key string) []string {
+	url := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", domain)
+	var body string
+	if key != "" {
+		body = curlGet(ctx, url, "-H", "X-OTX-API-KEY: "+key)
+	} else {
+		body = curlGet(ctx, url)
+	}
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if records, ok := m["passive_dns"].([]interface{}); ok {
+			for _, r := range records {
+				if rec, ok := r.(map[string]interface{}); ok {
+					if h, ok := rec["hostname"].(string); ok {
+						out = append(out, h)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// harvestURLScan — urlscan.io search API; page.domain fields hold hosts.
+func harvestURLScan(ctx context.Context, domain string) []string {
+	url := fmt.Sprintf("https://urlscan.io/api/v1/search/?q=domain:%s&size=100", domain)
+	body := curlGet(ctx, url)
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if results, ok := m["results"].([]interface{}); ok {
+			for _, r := range results {
+				if rec, ok := r.(map[string]interface{}); ok {
+					if page, ok := rec["page"].(map[string]interface{}); ok {
+						if d, ok := page["domain"].(string); ok {
+							out = append(out, d)
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -296,7 +456,7 @@ type SubdomainPassivePhase struct{}
 
 func (p *SubdomainPassivePhase) Name() string { return "Passive Subdomain Enumeration" }
 func (p *SubdomainPassivePhase) Description() string {
-	return "subfinder+assetfinder (all) · amass+bbot+findomain (apex only) · OSINT merge"
+	return "subfinder+assetfinder+amass+bbot+findomain (APEX-ONLY, once per root) · OSINT merge"
 }
 func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(s.Scope.Domains) == 0 {
@@ -305,18 +465,28 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 
 	found := make(map[string]bool)
 	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
-	apexSet := make(map[string]bool)
-	for _, a := range apexDomains {
-		apexSet[a] = true
+
+	// Every in-scope entry (apex AND subdomain) is a valid known host and is
+	// seeded into `found` so it is never re-discovered as "new". But the
+	// enumeration TOOLS below run on APEX domains ONLY — see FLAW #1.
+	for _, d := range s.Scope.Domains {
+		found[strings.ToLower(d)] = true
 	}
 
-	// ── Tools that accept ANY host (apex or subdomain) ────────────────
-	for _, domain := range s.Scope.Domains {
-		found[domain] = true
-		s.Printf("│  [Enumerating: %s]\n", domain)
+	// ── FLAW #1 FIX: Passive enumerators run ONCE PER APEX, never per subdomain
+	// ──────────────────────────────────────────────────────────────────────
+	// The old code looped `for _, domain := range s.Scope.Domains`, so with a
+	// scope of {whatnot.com, www.whatnot.com, api.whatnot.com,
+	// live-service.whatnot.com, auction-service.whatnot.com} it ran subfinder &
+	// assetfinder FIVE times. Four of those runs query subdomains of an already
+	// leaf host (`subfinder -d api.whatnot.com`) → 0 results, pure wasted
+	// minutes. subfinder/assetfinder enumerate the WHOLE apex zone in one call,
+	// so running them once on `whatnot.com` already covers every subdomain.
+	for _, domain := range apexDomains {
+		s.Printf("│  [Apex Domain: %s]\n", domain)
 		keys := s.Config.APIKeys
 
-		// subfinder — handles subdomains fine, run on everything.
+		// subfinder — enumerates the full apex zone in a single call.
 		sfOut := filepath.Join(s.OutputFolder, fmt.Sprintf("subfinder_%s.txt", sanitizeName(domain)))
 		env := make(map[string]string)
 		if keys.Shodan != "" {
@@ -337,13 +507,13 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 			s.Printf("│    subfinder: SKIP (%v)\n", res.Err)
 		}
 
-		// assetfinder — handles subdomain inputs gracefully.
+		// assetfinder — apex only; filters to hosts under this apex.
 		afCount := 0
 		res = runner.RunTool(ctx, "assetfinder", []string{"--subs-only", domain}, nil)
 		if res.OK() {
 			for _, l := range strings.Split(res.Stdout, "\n") {
 				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && strings.HasSuffix(l, "."+config.ApexOf(domain)) && !found[l] {
+				if l != "" && (l == domain || strings.HasSuffix(l, "."+domain)) && !found[l] {
 					found[l] = true
 					afCount++
 				}
@@ -1085,10 +1255,16 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 		goOut := filepath.Join(s.OutputFolder, "gospider_raw.txt")
 		goArgs := []string{"-S", seedFile, "-o", goOut, "-d", "2", "-c", "10",
 			"-k", "--sitemap", "--robots", "-q"}
+		// FLAW #5: gospider takes an explicit -p proxy flag AND we export the
+		// HTTP(S)_PROXY env vars so any internal client that ignores -p still
+		// routes through Burp. GetEnv() returns nil when no proxy is set, so
+		// this is a no-op without --burp (no double-proxy risk).
+		var goEnv map[string]string
 		if s.Proxy.Active {
 			goArgs = append(goArgs, "-p", s.Proxy.ProxyURL)
+			goEnv = s.Proxy.GetEnv()
 		}
-		res = runner.RunTool(ctx, "gospider", goArgs, nil)
+		res = runner.RunTool(ctx, "gospider", goArgs, goEnv)
 		if res.OK() || res.TimedOut {
 			goCount := 0
 			// gospider prints to stdout and to files under goOut (a dir).
