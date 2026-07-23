@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
@@ -293,14 +294,27 @@ func harvestChaos(ctx context.Context, domain, url, key string) []string {
 }
 
 func harvestCrtSh(ctx context.Context, domain string) []string {
-	body := curlGet(ctx, fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain), "-m", "40")
-	var out []string
+	// BUG #9 FIX: crt.sh frequently returns HTTP 200 with an empty body "[]"
+	// when momentarily rate-limited. Retry up to 3 times with a short backoff,
+	// and parse BOTH name_value and common_name fields.
+	url := fmt.Sprintf("https://crt.sh/?q=%%25.%s&output=json", domain)
 	var certs []map[string]interface{}
-	if json.Unmarshal([]byte(body), &certs) == nil {
-		for _, c := range certs {
-			if name, ok := c["name_value"].(string); ok {
-				out = append(out, strings.Split(name, "\n")...)
+	for attempt := 0; attempt < 3; attempt++ {
+		body := curlGet(ctx, url, "-m", "40")
+		if strings.TrimSpace(body) != "" && strings.TrimSpace(body) != "[]" {
+			if json.Unmarshal([]byte(body), &certs) == nil && len(certs) > 0 {
+				break
 			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	var out []string
+	for _, c := range certs {
+		if name, ok := c["name_value"].(string); ok {
+			out = append(out, strings.Split(name, "\n")...)
+		}
+		if cn, ok := c["common_name"].(string); ok && cn != "" {
+			out = append(out, cn)
 		}
 	}
 	return out
@@ -398,25 +412,39 @@ func harvestCertspotter(ctx context.Context, domain string) []string {
 }
 
 // harvestOTX — AlienVault OTX passive DNS (key optional).
+// BUG #10 FIX: the passive_dns endpoint paginates and caps records per page.
+// We request the maximum page size and follow pages while a full page keeps
+// coming back, so large domains return far more than the default ~20 records.
 func harvestOTX(ctx context.Context, domain, key string) []string {
-	url := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns", domain)
-	var body string
-	if key != "" {
-		body = curlGet(ctx, url, "-H", "X-OTX-API-KEY: "+key)
-	} else {
-		body = curlGet(ctx, url)
-	}
 	var out []string
-	var m map[string]interface{}
-	if json.Unmarshal([]byte(body), &m) == nil {
-		if records, ok := m["passive_dns"].([]interface{}); ok {
-			for _, r := range records {
-				if rec, ok := r.(map[string]interface{}); ok {
-					if h, ok := rec["hostname"].(string); ok {
-						out = append(out, h)
-					}
+	seen := make(map[string]bool)
+	for page := 1; page <= 10; page++ {
+		url := fmt.Sprintf("https://otx.alienvault.com/api/v1/indicators/domain/%s/passive_dns?page=%d&limit=200", domain, page)
+		var body string
+		if key != "" {
+			body = curlGet(ctx, url, "-H", "X-OTX-API-KEY: "+key)
+		} else {
+			body = curlGet(ctx, url)
+		}
+		var m map[string]interface{}
+		if json.Unmarshal([]byte(body), &m) != nil {
+			break
+		}
+		records, ok := m["passive_dns"].([]interface{})
+		if !ok || len(records) == 0 {
+			break
+		}
+		for _, r := range records {
+			if rec, ok := r.(map[string]interface{}); ok {
+				if h, ok := rec["hostname"].(string); ok && !seen[h] {
+					seen[h] = true
+					out = append(out, h)
 				}
 			}
+		}
+		// Stop when the page is not full (last page reached).
+		if len(records) < 200 {
+			break
 		}
 	}
 	return out
@@ -524,15 +552,24 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		}
 	}
 
+	// BUG #4 FIX: amass passive silently returns nothing without a config file
+	// that enables data sources. Generate a minimal one at the default path if
+	// the user has not provided their own, BEFORE amass runs.
+	amassCfg := ensureAmassConfig(s)
+
 	// ── Tools that require APEX/root domains ONLY (BUG #2) ────────────
 	for _, domain := range apexDomains {
 		s.Printf("│  [Apex passive enum: %s]\n", domain)
 
-		// amass — apex only. -timeout is in MINUTES.
+		// amass — apex only. -timeout is in MINUTES. -config points at the
+		// generated config so free sources are actually queried (BUG #4).
 		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
 		amCount := 0
-		res := runner.RunTool(ctx, "amass",
-			[]string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}, nil)
+		amArgs := []string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}
+		if amassCfg != "" {
+			amArgs = append(amArgs, "-config", amassCfg)
+		}
+		res := runner.RunTool(ctx, "amass", amArgs, nil)
 		if res.OK() {
 			for _, l := range readNonEmptyLines(amOut) {
 				l = strings.ToLower(l)
@@ -554,11 +591,16 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 			s.Printf("│    amass: SKIP (%v)\n", res.Err)
 		}
 
-		// bbot — apex only, 8-minute timeout via runner (BUG #2).
-		// Flags per prompt: -t <domain> -p subdomain-enum -f passive --force -y
+		// bbot — apex only (BUG #5 FIX). The old `-p subdomain-enum -f passive`
+		// preset pulls in slow modules (github_codesearch, certspotter, etc.)
+		// that routinely blow past 10 minutes, so bbot always hit the runner
+		// timeout with only partial output. We now EXCLUDE the slowest modules
+		// with -em and keep only fast passive sources; results are read from the
+		// output dir whether bbot finished or was still cut off.
 		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
 		res = runner.RunTool(ctx, "bbot", []string{
 			"-t", domain, "-p", "subdomain-enum", "-f", "passive",
+			"-em", "github_codesearch,dnsbrute,dnsbrute_mutations,dnscommonsrv,massdns",
 			"-o", bbotOutDir, "--force", "-y",
 		}, nil)
 		if res.OK() || res.TimedOut {
@@ -589,14 +631,21 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 			s.Printf("│    bbot: SKIP (%v)\n", res.Err)
 		}
 
-		// findomain — apex only.
+		// findomain — apex only (BUG #7). -t <domain> -u <out> -q. Some
+		// findomain builds write to the file, others only to stdout depending
+		// on version, so we parse BOTH the output file and stdout as a fallback.
 		fdOut := filepath.Join(s.OutputFolder, fmt.Sprintf("findomain_%s.txt", sanitizeName(domain)))
 		fdCount := 0
 		res = runner.RunTool(ctx, "findomain", []string{"-t", domain, "-u", fdOut, "-q"}, nil)
 		if res.OK() {
-			for _, l := range readNonEmptyLines(fdOut) {
-				l = strings.ToLower(l)
-				if strings.HasSuffix(l, domain) && !found[l] {
+			lines := readNonEmptyLines(fdOut)
+			if len(lines) == 0 && res.Stdout != "" {
+				// Fallback: parse stdout directly when the file came back empty.
+				lines = strings.Split(res.Stdout, "\n")
+			}
+			for _, l := range lines {
+				l = strings.ToLower(strings.TrimSpace(l))
+				if l != "" && strings.HasSuffix(l, domain) && !found[l] {
 					found[l] = true
 					fdCount++
 				}
@@ -652,12 +701,22 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 	subFile := filepath.Join(s.OutputFolder, "subdomains.txt")
 	activeOut := filepath.Join(s.OutputFolder, "subdomains_brute.txt")
 
-	// Resolve a DNS wordlist.
+	// Resolve a DNS wordlist (BUG #6). Prefer larger lists; fall back to a
+	// downloaded minimal list when none of the standard SecLists paths exist.
 	wordlist := firstExisting([]string{
-		"/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
+		"/usr/share/seclists/Discovery/DNS/bitquark-subdomains-top100000.txt",
 		"/usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt",
+		"/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt",
 		"/usr/share/wordlists/dnsmap.txt",
 	})
+	if wordlist == "" {
+		wordlist = ensureDNSWordlist(ctx, s)
+	}
+	if wordlist != "" {
+		if _, n := fileHasContent(wordlist); n > 0 {
+			s.Printf("│  DNS wordlist: %s (%d entries)\n", filepath.Base(wordlist), n)
+		}
+	}
 
 	// Ensure a resolvers file exists (BUG #3 root cause: missing --resolvers).
 	resolverFile := ensureResolvers(s)
@@ -739,6 +798,26 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 	return nil
 }
 
+// ensureDNSWordlist downloads a minimal DNS wordlist to /tmp when none of the
+// standard SecLists paths exist (BUG #6). Uses the canonical SecLists
+// top-5000 list. Returns the path, or "" on failure.
+func ensureDNSWordlist(ctx context.Context, s *engine.State) string {
+	dst := "/tmp/mohammed_dns_top5000.txt"
+	if ok, _ := fileHasContent(dst); ok {
+		return dst
+	}
+	url := "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt"
+	res := runner.RunTool(ctx, "curl", []string{"-s", "-L", "-m", "60", "-o", dst, url}, nil)
+	if res.OK() {
+		if ok, _ := fileHasContent(dst); ok {
+			s.Printf("│  downloaded DNS wordlist → %s\n", dst)
+			return dst
+		}
+	}
+	s.Printf("│  ⚠ could not obtain a DNS wordlist (no SecLists, download failed)\n")
+	return ""
+}
+
 // firstExisting returns the first path that exists on disk, or "".
 func firstExisting(paths []string) string {
 	for _, p := range paths {
@@ -780,6 +859,58 @@ func ensureResolvers(s *engine.State) string {
 	return fallback
 }
 
+// ensureAmassConfig makes sure amass has a config file that enables data
+// sources (BUG #4). If the user already has ~/.config/amass/config.ini we do
+// not touch it; otherwise we write a minimal one that turns on all free,
+// key-less sources. Returns the config path, or "" if it could not be created
+// (amass then runs with its own defaults).
+func ensureAmassConfig(s *engine.State) string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	// Respect an existing user config — never overwrite it.
+	for _, existing := range []string{
+		filepath.Join(home, ".config", "amass", "config.ini"),
+		filepath.Join(home, ".config", "amass", "config.yaml"),
+	} {
+		if _, err := os.Stat(existing); err == nil {
+			return existing
+		}
+	}
+	dir := filepath.Join(home, ".config", "amass")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return ""
+	}
+	cfgPath := filepath.Join(dir, "config.ini")
+	// Minimal config: scope left open, all free data sources enabled. amass
+	// treats a data source with no api key as free/enabled when present here.
+	content := `# Auto-generated by MOHAMMED (BUG #4 fix) — enables free data sources.
+[scope]
+
+[data_sources]
+minimum_ttl = 1440
+
+[data_sources.Crtsh]
+[data_sources.HackerTarget]
+[data_sources.RapidDNS]
+[data_sources.AnubisDB]
+[data_sources.ThreatMiner]
+[data_sources.Certspotter]
+[data_sources.AlienVault]
+[data_sources.DNSDumpster]
+[data_sources.Wayback]
+[data_sources.CommonCrawl]
+[data_sources.Riddler]
+[data_sources.SiteDossier]
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		return ""
+	}
+	s.Printf("│  amass: wrote minimal free-source config → %s\n", cfgPath)
+	return cfgPath
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Phase 05: DNS Resolution & Enrichment
 // ═══════════════════════════════════════════════════════════════
@@ -807,32 +938,72 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 	dnsxOut := filepath.Join(s.OutputFolder, "live_dns.txt")
 	resolverFile := ensureResolvers(s)
 
-	// -wd <apex> enables wildcard elimination.
 	apex := ""
 	if len(s.Scope.Domains) > 0 {
 		apex = config.ApexOf(s.Scope.Domains[0])
 	}
-	args := []string{"-l", subFile, "-o", dnsxOut, "-silent", "-rl", "150",
-		"-a", "-resp-only", "-r", resolverFile}
-	if apex != "" {
-		args = append(args, "-wd", apex)
-	}
 
-	res := runner.RunTool(ctx, "dnsx", args, nil)
-	liveSet := make(map[string]bool)
-	if res.OK() {
+	inputN := len(deduped)
+	s.Printf("│  dnsx input: %d unique hosts to resolve\n", inputN)
+
+	// runDnsx resolves subFile through dnsx and returns the deduped host list.
+	// withWildcard toggles the -wd wildcard-elimination pass.
+	runDnsx := func(withWildcard bool) ([]string, *runner.Result) {
+		// NOTE: previous code used "-resp-only" which prints the RESOLVED IP,
+		// not the hostname, then took Fields[0] — collapsing many distinct
+		// hostnames onto shared CDN IPs and destroying the host list. That,
+		// combined with aggressive -wd wildcard filtering, is the root cause of
+		// the 232→32 regression (BUG #2). We drop -resp-only so dnsx emits the
+		// input HOSTNAMES that resolve, one per line.
+		args := []string{"-l", subFile, "-o", dnsxOut, "-silent", "-rl", "150",
+			"-a", "-r", resolverFile}
+		if withWildcard && apex != "" {
+			args = append(args, "-wd", apex)
+		}
+		res := runner.RunTool(ctx, "dnsx", args, nil)
+		set := make(map[string]bool)
+		var hosts []string
 		for _, l := range readNonEmptyLines(dnsxOut) {
-			host := strings.Fields(l)[0]
-			if !liveSet[host] {
-				liveSet[host] = true
-				s.LiveHosts = append(s.LiveHosts, host)
+			fields := strings.Fields(l)
+			if len(fields) == 0 {
+				continue
+			}
+			host := strings.ToLower(fields[0])
+			if !set[host] {
+				set[host] = true
+				hosts = append(hosts, host)
 			}
 		}
-		s.Printf("│  dnsx: %d live hosts resolved\n", len(s.LiveHosts))
-	} else {
-		s.LiveHosts = append(s.LiveHosts, deduped...)
-		s.Printf("│  dnsx: SKIP (%v) — fallback to %d subdomains\n", res.Err, len(s.LiveHosts))
+		return hosts, res
 	}
+
+	hosts, res := runDnsx(true)
+
+	if !res.OK() {
+		// dnsx failed entirely — fall back to the full subdomain list so the
+		// pipeline is not starved (IMPROVEMENT #6).
+		s.LiveHosts = append(s.LiveHosts, deduped...)
+		s.Printf("│  dnsx: FAILED (%v) — fallback to %d subdomains\n", res.Err, len(s.LiveHosts))
+		writeLines(dnsxOut, s.LiveHosts)
+		return nil
+	}
+
+	// ── IMPROVEMENT #2 + BUG #2 safeguard ──────────────────────────────────
+	// If wildcard elimination nuked more than 85% of the input, it is almost
+	// certainly over-filtering legitimate hosts (a real regression symptom).
+	// Re-run WITHOUT -wd and keep whichever pass yielded more live hosts.
+	if inputN > 0 && len(hosts)*100 < inputN*15 {
+		s.Printf("│  ⚠ WARNING: dnsx resolved only %d/%d (<15%%) with wildcard filter — retrying without -wd\n", len(hosts), inputN)
+		noWildHosts, res2 := runDnsx(false)
+		if res2.OK() && len(noWildHosts) > len(hosts) {
+			s.Printf("│  no-wildcard retry recovered %d hosts (was %d)\n", len(noWildHosts), len(hosts))
+			hosts = noWildHosts
+		}
+	}
+
+	s.LiveHosts = append(s.LiveHosts, hosts...)
+	s.Printf("│  dnsx: %d live hosts resolved (from %d input)\n", len(s.LiveHosts), inputN)
+
 	// Persist a clean, deduplicated live host list for downstream phases.
 	writeLines(dnsxOut, s.LiveHosts)
 	return nil
@@ -1004,36 +1175,34 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 	if ok, _ := fileHasContent(hostsFile); !ok {
 		hostsFile = filepath.Join(s.OutputFolder, "subdomains.txt")
 	}
-	if ok, _ := fileHasContent(hostsFile); !ok {
+	ok, inputN := fileHasContent(hostsFile)
+	if !ok {
 		s.Printf("│  httpx: SKIP (no hosts to probe)\n")
 		return nil
 	}
+	s.Printf("│  httpx input: %d hosts (%s)\n", inputN, filepath.Base(hostsFile))
 
 	httpxOut := filepath.Join(s.OutputFolder, "http_live.txt")
-	httpxJSON := filepath.Join(s.OutputFolder, "http_live.json")
 
+	// -timeout 10 prevents hanging on slow hosts; -json writes JSONL to -o.
 	args := []string{"-l", hostsFile, "-o", httpxOut, "-silent", "-nc",
-		"-rl", "150", "-sc", "-title", "-td", "-cdn", "-fr",
+		"-rl", "150", "-timeout", "10", "-sc", "-title", "-td", "-cdn", "-fr",
 		"-threads", fmt.Sprintf("%d", s.Config.Threads),
 		"-json", "-srd", filepath.Join(s.OutputFolder, "httpx_responses")}
-	// Write the JSONL stream to a dedicated file via -o only accepts one path,
-	// so we run a second pass is avoided: httpx -json writes JSONL to -o. We
-	// keep a plain list separately by parsing. To preserve both, request JSON
-	// to a distinct file:
-	_ = httpxJSON
 
+	// BUG #1: only route through Burp when the proxy is ACTIVE. engine.Run now
+	// forcibly sets Proxy.Active=false when Burp's connectivity test fails, so
+	// reaching this branch means Burp really is up. This is the ONLY correct
+	// way to route httpx through a proxy (it has no -insecure flag; it tolerates
+	// the proxy CA by default).
 	if s.Proxy.Active {
-		// BUG #1: the ONLY correct way to route httpx through Burp.
 		args = append(args, "-http-proxy", s.Proxy.ProxyURL)
 	}
 
-	// When proxy is active we must NOT pass proxy env vars (double routing);
-	// httpx handles it via -http-proxy. Pass nil env.
 	res := runner.RunTool(ctx, "httpx", args, nil)
 
 	urlSet := make(map[string]bool)
 	if res.OK() || res.TimedOut {
-		// httpx -json writes JSONL lines to the -o file. Parse each line.
 		for _, l := range readNonEmptyLines(httpxOut) {
 			var rec map[string]interface{}
 			if json.Unmarshal([]byte(l), &rec) == nil {
@@ -1051,13 +1220,111 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 			}
 		}
 		s.Printf("│  httpx: %d live endpoints\n", len(urlSet))
-		if len(urlSet) == 0 && s.Proxy.Active {
-			s.Printf("│  ⚠ 0 endpoints via Burp — verify Burp is running and the CA is trusted\n")
-		}
 	} else {
-		s.Printf("│  httpx: SKIP (%v)\n", res.Err)
+		s.Printf("│  httpx: FAILED (%v)\n", res.Err)
+		if s.Config.Debug && res.Stderr != "" {
+			s.Printf("│  [DEBUG] httpx stderr: %s\n", strings.TrimSpace(firstN(res.Stderr, 500)))
+		}
+	}
+
+	// ── IMPROVEMENT #2 + #4: sanity check + direct fallback ────────────────
+	// httpx finding 0 endpoints from N resolved hosts is a red flag. Rather
+	// than silently break every downstream phase, probe the hosts directly
+	// (scheme-prefixed) so the pipeline always has URLs when hosts are live.
+	if len(urlSet) == 0 && inputN > 0 {
+		s.Printf("│  ⚠ WARNING: httpx found 0 endpoints from %d hosts — running direct fallback probe\n", inputN)
+		if s.Config.Debug {
+			s.Printf("│  [DEBUG] httpx cmd was: httpx %s\n", strings.Join(args, " "))
+		}
+		fallback := directProbe(ctx, s, readNonEmptyLines(hostsFile))
+		for _, u := range fallback {
+			if !urlSet[u] {
+				urlSet[u] = true
+				s.URLs = append(s.URLs, u)
+			}
+		}
+		if len(fallback) > 0 {
+			writeLines(httpxOut, appendUnique(readNonEmptyLines(httpxOut), fallback))
+			s.Printf("│  direct fallback: recovered %d live endpoints\n", len(fallback))
+		} else {
+			s.Printf("│  direct fallback: still 0 — hosts may be firewalled or non-HTTP\n")
+		}
 	}
 	return nil
+}
+
+// directProbe is the IMPROVEMENT #4 / #6 cascading fallback: when httpx yields
+// nothing, hit each host directly with curl on https then http and keep the
+// ones that answer. Bounded to the first 200 hosts to stay fast. Honors an
+// active proxy so it still works behind a reachable Burp.
+func directProbe(ctx context.Context, s *engine.State, hosts []string) []string {
+	var (
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		alive []string
+		sem   = make(chan struct{}, 30)
+	)
+	limit := len(hosts)
+	if limit > 200 {
+		limit = 200
+	}
+	for _, h := range hosts[:limit] {
+		fields := strings.Fields(h)
+		if len(fields) == 0 {
+			continue
+		}
+		h = strings.TrimSpace(fields[0])
+		if h == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(host string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			for _, scheme := range []string{"https://", "http://"} {
+				curlArgs := []string{"-s", "-o", "/dev/null", "-w", "%{http_code}",
+					"-m", "10", "-L", "-A", "Mozilla/5.0", "-k"}
+				if s.Proxy.Active {
+					curlArgs = append(curlArgs, "-x", s.Proxy.ProxyURL)
+				}
+				curlArgs = append(curlArgs, scheme+host)
+				res := runner.RunTool(ctx, "curl", curlArgs, nil)
+				code := strings.TrimSpace(res.Stdout)
+				if res.OK() && code != "" && code != "000" {
+					mu.Lock()
+					alive = append(alive, scheme+host)
+					mu.Unlock()
+					return // first working scheme wins
+				}
+			}
+		}(h)
+	}
+	wg.Wait()
+	return alive
+}
+
+// firstN returns the first n bytes of s (for bounded debug output).
+func firstN(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// appendUnique merges b into a, dropping duplicates, preserving order.
+func appendUnique(a, b []string) []string {
+	seen := make(map[string]bool, len(a))
+	for _, x := range a {
+		seen[x] = true
+	}
+	for _, x := range b {
+		if !seen[x] {
+			seen[x] = true
+			a = append(a, x)
+		}
+	}
+	return a
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1149,17 +1416,29 @@ func (p *WaybackPhase) Description() string {
 }
 func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 	allURLs := make(map[string]bool)
-	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
 
-	for _, domain := range apexDomains {
-		// gau: providers + threads + retries + subs (BUG #10).
+	// ── BUG #3 (CRITICAL REGRESSION) FIX ───────────────────────────────────
+	// The previous version ran gau/waybackurls on APEX DOMAINS ONLY. The
+	// Wayback Machine/CommonCrawl index specific paths on SUBDOMAINS (e.g.
+	// api.whatnot.com), not bare apexes — so `gau whatnot.com` returned 0 while
+	// the old per-subdomain runs found 63 URLs. The apex-only optimisation was
+	// correct for PASSIVE SUBDOMAIN ENUM but WRONG for URL archive mining.
+	//
+	// We now query EVERY in-scope domain individually, PLUS each apex with
+	// --subs so historical subdomains are covered too. The target set is the
+	// union of scope entries and derived apexes, de-duplicated.
+	targets := waybackTargets(s.Scope.Domains)
+
+	for _, domain := range targets {
+		// gau: providers + threads + retries + subs (BUG #10). --subs makes
+		// gau expand to subdomains, which is where the archives actually live.
 		gauArgs := []string{
 			"--threads", "5", "--retries", "3", "--subs",
 			"--providers", "wayback,commoncrawl,otx,urlscan", domain,
 		}
 		res := runner.RunTool(ctx, "gau", gauArgs, nil)
+		gauCount := 0
 		if res.OK() || res.TimedOut {
-			gauCount := 0
 			for _, l := range strings.Split(res.Stdout, "\n") {
 				l = strings.TrimSpace(l)
 				if strings.HasPrefix(l, "http") && !allURLs[l] {
@@ -1186,15 +1465,114 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 	}
 
+	// ── IMPROVEMENT #5: direct multi-source URL enrichment (no external
+	// binaries) — query URLScan and the CommonCrawl CDX index over HTTP so we
+	// still gather URLs even if gau/waybackurls are missing or blocked. ─────
+	for _, apex := range config.ExtractApexDomains(s.Scope.Domains) {
+		before := len(allURLs)
+		for _, u := range harvestURLScanURLs(ctx, apex) {
+			if strings.HasPrefix(u, "http") && !allURLs[u] {
+				allURLs[u] = true
+			}
+		}
+		for _, u := range harvestCommonCrawlURLs(ctx, apex) {
+			if strings.HasPrefix(u, "http") && !allURLs[u] {
+				allURLs[u] = true
+			}
+		}
+		if added := len(allURLs) - before; added > 0 {
+			s.Printf("│  URLScan+CommonCrawl [%s]: +%d URLs\n", apex, added)
+		}
+	}
+
+	// ── IMPROVEMENT #4/#6: guarantee non-empty s.URLs when hosts are live ──
+	// If archive mining produced nothing but we DO have live hosts, seed the
+	// URL set from the live HTTP endpoints so downstream phases (crawl, params,
+	// nuclei…) still have something to work on.
+	if len(allURLs) == 0 && len(s.URLs) > 0 {
+		for _, u := range s.URLs {
+			allURLs[u] = true
+		}
+		s.Printf("│  archive empty — seeded %d URLs from live HTTP endpoints\n", len(allURLs))
+	}
+
 	var lines []string
 	for u := range allURLs {
 		lines = append(lines, u)
 	}
 	archiveFile := filepath.Join(s.OutputFolder, "urls_archive.txt")
 	writeLines(archiveFile, lines)
-	s.URLs = append(s.URLs, lines...)
+	s.URLs = appendUnique(s.URLs, lines)
 	s.Printf("│  Total Archive URLs: %d\n", len(allURLs))
 	return nil
+}
+
+// waybackTargets builds the URL-archive query set for BUG #3: the union of
+// every in-scope domain (so per-subdomain archives like api.whatnot.com are
+// covered) PLUS each derived apex (queried with --subs). Deduplicated,
+// lower-cased, order-preserving. This is the regression guard against the
+// apex-only mistake that returned 0 URLs.
+func waybackTargets(scope []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(d string) {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d != "" && !seen[d] {
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	for _, d := range scope {
+		add(d)
+	}
+	for _, a := range config.ExtractApexDomains(scope) {
+		add(a)
+	}
+	return out
+}
+
+// harvestURLScanURLs pulls full result page URLs from urlscan.io (IMPROVEMENT
+// #5). Distinct from harvestURLScan which only extracts hostnames.
+func harvestURLScanURLs(ctx context.Context, domain string) []string {
+	url := fmt.Sprintf("https://urlscan.io/api/v1/search/?q=domain:%s&size=100", domain)
+	body := curlGet(ctx, url)
+	var out []string
+	var m map[string]interface{}
+	if json.Unmarshal([]byte(body), &m) == nil {
+		if results, ok := m["results"].([]interface{}); ok {
+			for _, r := range results {
+				if rec, ok := r.(map[string]interface{}); ok {
+					if page, ok := rec["page"].(map[string]interface{}); ok {
+						if u, ok := page["url"].(string); ok {
+							out = append(out, u)
+						}
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// harvestCommonCrawlURLs queries the CommonCrawl CDX index directly for every
+// captured URL under a domain (IMPROVEMENT #5). Uses the latest stable index.
+func harvestCommonCrawlURLs(ctx context.Context, domain string) []string {
+	url := fmt.Sprintf("https://index.commoncrawl.org/CC-MAIN-2024-33-index?url=*.%s&output=json&limit=500", domain)
+	body := curlGet(ctx, url, "-m", "40")
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec map[string]interface{}
+		if json.Unmarshal([]byte(line), &rec) == nil {
+			if u, ok := rec["url"].(string); ok {
+				out = append(out, u)
+			}
+		}
+	}
+	return out
 }
 
 // ═══════════════════════════════════════════════════════════════

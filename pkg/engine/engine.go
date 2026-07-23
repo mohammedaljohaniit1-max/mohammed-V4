@@ -214,12 +214,21 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// ── Burp Suite connectivity check ────────────────────
+	//
+	// BUG #1 (CATASTROPHIC) FIX: the old code printed "Not reachable" but NEVER
+	// changed o.State.Proxy.Active. Every downstream phase (httpx, katana,
+	// gospider, ffuf, nuclei…) then kept routing through the dead proxy and got
+	// connection-refused → 0 results, silently breaking Phases 07 and 11-27.
+	// We now HARD-DISABLE the proxy in shared State the moment Burp is proven
+	// unreachable, so the whole pipeline falls back to direct networking.
 	if o.State.Proxy.Active {
 		fmt.Printf("[*] Checking Burp Suite connectivity at %s ... ", o.State.Proxy.ProxyURL)
 		if checkBurp(o.State.Proxy.ProxyURL) {
 			fmt.Printf("✅ Connected — traffic will be intercepted\n")
 		} else {
-			fmt.Printf("⚠️  Not reachable — scanning WITHOUT Burp (check proxy settings)\n")
+			fmt.Printf("⚠️  Not reachable — DISABLING proxy, scanning DIRECT (no Burp)\n")
+			o.State.Proxy.Active = false
+			o.State.Proxy.ProxyURL = ""
 		}
 	}
 	fmt.Println()
