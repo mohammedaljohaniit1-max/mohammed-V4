@@ -58,6 +58,8 @@ check_file "pkg/engine/engine.go"
 check_file "pkg/runner/runner.go"
 check_file "pkg/phases/phases.go"
 check_file "pkg/phases/phases_vuln.go"
+check_file "pkg/phases/phases_deeprecon.go"
+check_file "pkg/engine/checkpoint.go"
 check_file "pkg/config/config.go"
 check_file "pkg/ai/triage.go"
 check_file "config.yaml"
@@ -80,6 +82,13 @@ if command -v go &>/dev/null; then
         pass "go vet ./... clean"
     else
         warn "go vet reported issues (non-fatal)"
+    fi
+    if go test ./... 2>&1 | grep -qvE 'FAIL'; then
+        if go test ./... >/dev/null 2>&1; then
+            pass "go test ./... all unit tests pass"
+        else
+            fail "go test ./... has failing tests"
+        fi
     fi
 else
     fail "go not found in PATH"
@@ -183,6 +192,8 @@ else
 
     check_output "osint_subdomains.txt"    "02-OSINT"
     check_output "subdomains.txt"          "03-Passive"
+    check_output "deeprecon.txt"           "08b-DeepRecon"
+    check_output "checkpoint.json"         "checkpoint(resume)"
     check_output "live_dns.txt"            "05-DNS"
     check_output "http_live.txt"           "07-HTTP"
     check_output "tls_results.txt"         "08-TLS"
@@ -239,10 +250,19 @@ else
     fail "phases.go: sanitizeName NOT found"
 fi
 
-if grep -q "for _, domain := range s.Scope.Domains" pkg/phases/phases.go 2>/dev/null; then
-    pass "phases.go: Phase 03 iterates ALL domains (not just Domains[0])"
+# FLAW #1: Phase 03 passive enumerators MUST loop over apexDomains, NOT the
+# full scope list (which re-ran subfinder on every subdomain, wasting minutes).
+if grep -q "FLAW #1 FIX" pkg/phases/phases.go 2>/dev/null && \
+   grep -q "for _, domain := range apexDomains" pkg/phases/phases.go 2>/dev/null; then
+    pass "phases.go: Phase 03 runs passive tools APEX-ONLY (FLAW #1 fixed)"
 else
-    fail "phases.go: Phase 03 may only scan first domain"
+    fail "phases.go: Phase 03 apex-only passive loop MISSING (FLAW #1 regression)"
+fi
+# Guard against the OLD bug pattern re-appearing on the subfinder/assetfinder loop.
+if grep -q "subfinder — handles subdomains fine, run on everything" pkg/phases/phases.go 2>/dev/null; then
+    fail "phases.go: OLD per-subdomain subfinder comment present (FLAW #1 regressed)"
+else
+    pass "phases.go: no per-subdomain passive-enum loop (FLAW #1 stays fixed)"
 fi
 
 if grep -q "s.Printf" pkg/phases/phases.go 2>/dev/null; then
@@ -312,6 +332,55 @@ check_grep pkg/phases/phases.go 'func parseSubzyVulnerable' \
 check_grep pkg/phases/phases.go '"--providers"|"--subs"' \
     "phases.go: gau providers/subs flags present (BUG #10)" \
     "phases.go: gau providers flags MISSING (BUG #10)"
+
+# ── Section 12b: v4.1 Architectural Upgrades ─────────────────────────
+hdr "12b. v4.1 Upgrades (resume · parallel OSINT · deep recon)"
+
+# FLAW #2 — checkpoint / resume engine
+check_grep pkg/engine/checkpoint.go 'func \(s \*State\) SaveCheckpoint' \
+    "checkpoint.go: SaveCheckpoint present (FLAW #2)" \
+    "checkpoint.go: SaveCheckpoint MISSING (FLAW #2)"
+check_grep pkg/engine/checkpoint.go 'func LoadCheckpoint' \
+    "checkpoint.go: LoadCheckpoint present" \
+    "checkpoint.go: LoadCheckpoint MISSING"
+check_grep pkg/engine/checkpoint.go 'func FindLatestCheckpoint' \
+    "checkpoint.go: FindLatestCheckpoint (--resume auto) present" \
+    "checkpoint.go: FindLatestCheckpoint MISSING"
+check_grep pkg/engine/engine.go 'SaveCheckpoint\(\)' \
+    "engine.go: orchestrator saves checkpoint after each phase" \
+    "engine.go: per-phase checkpoint save MISSING"
+check_grep pkg/engine/engine.go 'IsComplete' \
+    "engine.go: skips completed phases on resume" \
+    "engine.go: resume-skip logic MISSING"
+check_grep cmd/mohammed/main.go '"resume"' \
+    "main.go: --resume flag wired" \
+    "main.go: --resume flag MISSING"
+
+# FLAW #3 — parallel OSINT harvester + new sources
+check_grep pkg/phases/phases.go 'sync.WaitGroup' \
+    "phases.go: OSINT uses parallel goroutines (FLAW #3)" \
+    "phases.go: OSINT parallelism MISSING (FLAW #3)"
+for src in harvestAnubis harvestThreatMiner harvestCertspotter harvestURLScan; do
+    check_grep pkg/phases/phases.go "func $src" \
+        "phases.go: OSINT source $src present" \
+        "phases.go: OSINT source $src MISSING"
+done
+
+# Deep External Recon phase (zero-login)
+check_grep pkg/phases/phases_deeprecon.go 'func murmur3Hash32' \
+    "phases_deeprecon.go: favicon MurmurHash3 present (Shodan pivot)" \
+    "phases_deeprecon.go: MurmurHash3 MISSING"
+check_grep pkg/phases/phases_deeprecon.go 'extractSPFVendors' \
+    "phases_deeprecon.go: SPF vendor-chain extraction present" \
+    "phases_deeprecon.go: SPF vendor extraction MISSING"
+check_grep cmd/mohammed/main.go 'DeepReconPhase' \
+    "main.go: DeepReconPhase registered" \
+    "main.go: DeepReconPhase NOT registered"
+
+# FLAW #5 — gospider proxy env inheritance
+check_grep pkg/phases/phases.go 's.Proxy.GetEnv\(\)' \
+    "phases.go: gospider inherits HTTP(S)_PROXY env (FLAW #5)" \
+    "phases.go: gospider proxy env MISSING (FLAW #5)"
 
 # ── Section 13: Ollama AI Triage Integration ─────────────────────────
 hdr "13. Ollama AI Triage Wiring"

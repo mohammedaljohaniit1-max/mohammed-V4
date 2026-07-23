@@ -42,12 +42,41 @@ type State struct {
 	OutputFolder string
 	StartTime    time.Time
 
+	// CompletedPhases records the Name() of every phase that finished
+	// successfully. It is serialized into checkpoint.json after each phase so
+	// an interrupted scan can be resumed with --resume (FLAW #2).
+	CompletedPhases []string
+
+	// completedSet mirrors CompletedPhases for O(1) skip lookups when resuming.
+	// It is populated from a loaded checkpoint; nil means "resume disabled".
+	completedSet map[string]bool
+
 	// PrintMu protects all fmt.Printf calls so the live timer line and
 	// phase output lines do not interleave and corrupt each other.
 	PrintMu sync.Mutex
 
 	// findingsMu protects concurrent AddFinding calls (phases may fan out).
 	findingsMu sync.Mutex
+}
+
+// MarkComplete records a finished phase (thread-safe) for checkpointing.
+func (s *State) MarkComplete(name string) {
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	for _, n := range s.CompletedPhases {
+		if n == name {
+			return
+		}
+	}
+	s.CompletedPhases = append(s.CompletedPhases, name)
+}
+
+// IsComplete reports whether a phase was already completed in a resumed scan.
+func (s *State) IsComplete(name string) bool {
+	if s.completedSet == nil {
+		return false
+	}
+	return s.completedSet[name]
 }
 
 func NewState(cfg *config.Config, scope *config.Scope) *State {
@@ -241,10 +270,25 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			cancelTicker()
+			// Persist progress so --resume can continue from here (FLAW #2):
+			// this is what makes the SIGINT "Saving progress..." message true.
+			if cpErr := o.State.SaveCheckpoint(); cpErr == nil {
+				fmt.Printf("\n[+] Progress saved to %s — resume with --resume\n", o.State.checkpointPath())
+			}
 			elapsed := time.Since(o.State.StartTime)
-			fmt.Printf("\n\n[!] Scan cancelled. Total elapsed: %v\n", elapsed.Round(time.Second))
+			fmt.Printf("\n[!] Scan cancelled. Total elapsed: %v\n", elapsed.Round(time.Second))
 			return fmt.Errorf("scan cancelled by user")
 		default:
+		}
+
+		// ── RESUME: skip phases already completed in a loaded checkpoint ──
+		if o.State.IsComplete(phase.Name()) {
+			o.State.PrintMu.Lock()
+			fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [RESUME]\n", i+1, len(o.Phases), phase.Name())
+			fmt.Printf("│  ⏭  already completed in checkpoint — skipping\n")
+			fmt.Printf("└─ ✔ Restored from checkpoint\n")
+			o.State.PrintMu.Unlock()
+			continue
 		}
 
 		phaseStart := time.Now()
@@ -267,6 +311,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 		phaseDur := time.Since(phaseStart)
 		totalElapsed := time.Since(o.State.StartTime)
+
+		// ── CHECKPOINT: record completion + persist state after EVERY phase ──
+		// Only mark complete on success so a failed/partial phase re-runs on
+		// resume. A checkpoint-write failure is logged but never aborts the scan.
+		if err == nil {
+			o.State.MarkComplete(phase.Name())
+		}
+		if cpErr := o.State.SaveCheckpoint(); cpErr != nil {
+			o.State.PrintMu.Lock()
+			fmt.Printf("\r\033[K│  ⚠️  checkpoint save failed: %v\n", cpErr)
+			o.State.PrintMu.Unlock()
+		}
 
 		o.State.PrintMu.Lock()
 		if err != nil {
