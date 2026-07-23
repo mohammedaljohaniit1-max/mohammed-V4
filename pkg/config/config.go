@@ -24,6 +24,7 @@ type Config struct {
 	RateLimit  int
 	SkipPhases int
 	Verbose    bool
+	Debug      bool
 	APIKeys    APIKeys
 	Ollama     OllamaConfig
 }

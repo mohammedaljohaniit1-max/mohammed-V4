@@ -164,8 +164,29 @@ bash verify.sh                # build + vet + tool + AI + bug-fix code checks
 ```
 
 **Scan flags:** `-s/--scope` (required) · `-c/--config` (default `config.yaml`) ·
-`--profile` · `--burp <url>` · `--resume auto|<path>` · `--skip <phase#>` ·
+`--profile` · `--burp <url>` · `--resume auto|<path>` · `--debug` · `--skip <phase#>` ·
 `--threads` · `--rate` · `--output`.
+
+### Burp / proxy behaviour
+
+When `--burp <url>` is supplied the engine performs a live reachability test
+**through** the proxy before the scan starts. If Burp is **not reachable** the
+proxy is **hard-disabled** for the whole run and every tool falls back to direct
+networking — the pipeline no longer routes `httpx`, `katana`, `gospider`, `ffuf`
+or `nuclei` through a dead proxy (which previously produced 0 results and broke
+half the phases). Run with `--debug` to print the exact command + input line
+counts for every tool call when a phase returns unexpectedly few results.
+
+### Resilience & fallbacks
+
+* **HTTP probing** — if `httpx` returns 0 endpoints from N resolved hosts it logs
+  a loud warning and runs a direct `curl` fallback probe so live hosts are still
+  captured.
+* **DNS resolution** — logs input vs. output host counts; if wildcard filtering
+  drops >85 % of hosts it automatically retries without `-wd`.
+* **URL mining** — `gau`/`waybackurls` run on **every in-scope domain** (not just
+  the apex), augmented by direct URLScan + CommonCrawl CDX queries, and seeded
+  from live HTTP endpoints when archives come back empty.
 
 ### Resume & checkpointing
 

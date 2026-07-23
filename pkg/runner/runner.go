@@ -7,9 +7,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
+
+// debugEnabled is toggled by SetDebug (wired from the --debug CLI flag). When
+// true, RunTool prints the EXACT resolved binary + args before every execution
+// so a 0-result phase can be diagnosed without guesswork (IMPROVEMENT #1).
+var debugEnabled atomic.Bool
+
+// SetDebug enables/disables verbose per-tool command logging.
+func SetDebug(on bool) { debugEnabled.Store(on) }
+
+// DebugEnabled reports the current debug state.
+func DebugEnabled() bool { return debugEnabled.Load() }
 
 // ─────────────────────────────────────────
 // Result holds the output of a tool run
@@ -154,6 +167,21 @@ func runToolInternal(ctx context.Context, toolName string, args []string, env ma
 			Duration: time.Since(start),
 			Err:      err,
 		}
+	}
+
+	// IMPROVEMENT #1: print the exact command (binary + all flags) and any
+	// environment overrides when --debug is active. This is what makes a
+	// "0 results" phase debuggable — you can copy/paste and re-run by hand.
+	if debugEnabled.Load() {
+		envNote := ""
+		if len(env) > 0 {
+			var kv []string
+			for k, v := range env {
+				kv = append(kv, k+"="+v)
+			}
+			envNote = "  [env: " + strings.Join(kv, " ") + "]"
+		}
+		fmt.Printf("│  [DEBUG] exec: %s %s%s\n", binaryPath, strings.Join(args, " "), envNote)
 	}
 
 	// Create a context with timeout layered on top of parent context

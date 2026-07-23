@@ -63,6 +63,7 @@ SCAN FLAGS:
   --profile       string   Scan profile: small | medium | large | passive (default: medium)
   --burp          string   Burp Suite proxy URL (e.g. http://172.30.48.1:8080)
   --resume        string   Resume an interrupted scan: 'auto' (latest in output/) or path to checkpoint.json
+  --debug         bool     Print the exact command + input/output line counts for every tool call
   --skip          int      Skip to phase number (0 = start from beginning)
   --threads       int      Global thread count (default: 30)
   --rate          int      Requests per minute (default: 150)
@@ -171,7 +172,11 @@ func runScan(args []string) {
 	rate := fs.Int("rate", 150, "Rate limit (req/min)")
 	output := fs.String("output", "output", "Output directory")
 	resume := fs.String("resume", "", "Resume an interrupted scan: 'auto' (latest in output/) or a path to checkpoint.json")
+	debug := fs.Bool("debug", false, "Debug mode: print the exact command + input/output for every tool call")
 	fs.Parse(args)
+
+	// IMPROVEMENT #1: enable verbose per-tool command logging in the runner.
+	runner.SetDebug(*debug)
 
 	if *scopeFile == "" {
 		fmt.Println("[!] Error: scope file required. Use -s scope.txt")
@@ -200,6 +205,7 @@ func runScan(args []string) {
 		OutputDir: *output,
 		Threads:   *threads,
 		RateLimit: *rate,
+		Debug:     *debug,
 		APIKeys:   yamlCfg.APIKeys,
 		Ollama:    yamlCfg.Ollama,
 	}

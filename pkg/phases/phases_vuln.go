@@ -101,9 +101,25 @@ func (p *CloudReconPhase) Execute(ctx context.Context, s *engine.State) error {
 		s.Printf("│  cloud_enum: SKIP (%v)\n", res.Err)
 	}
 
-	// s3scanner
-	res = runner.RunTool(ctx, "s3scanner", []string{"--bucket", keyword}, nil)
-	if res.OK() && res.Stdout != "" {
+	// ── s3scanner ──────────────────────────────────────────────────────────
+	// BUG #8 FIX: the old code printed "SKIP (<nil>)" whenever stdout was empty,
+	// even though s3scanner had run successfully (exit 0, Err==nil) — the guard
+	// `res.OK() && res.Stdout != ""` sent a *successful* run into the error
+	// branch and formatted a nil error as "<nil>". A clean run that simply
+	// found nothing is NOT a skip. We also fix the flag: s3scanner v2+ uses the
+	// `scan -bucket <name>` subcommand, not the removed `--bucket`.
+	if keyword == "" {
+		s.Printf("│  s3scanner: SKIP (no keyword derived from scope)\n")
+		return nil
+	}
+	res = runner.RunTool(ctx, "s3scanner", []string{"scan", "-bucket", keyword}, nil)
+	switch {
+	case !res.OK():
+		// Genuine failure (binary missing, cancelled, timeout).
+		s.Printf("│  s3scanner: SKIP (%v)\n", res.Err)
+	case res.Stdout == "":
+		s.Printf("│  s3scanner: no open buckets (empty result)\n")
+	default:
 		ll := strings.ToLower(res.Stdout)
 		if strings.Contains(ll, "open") || strings.Contains(ll, "exists") {
 			s.AddFinding(map[string]interface{}{
@@ -114,8 +130,6 @@ func (p *CloudReconPhase) Execute(ctx context.Context, s *engine.State) error {
 		} else {
 			s.Printf("│  s3scanner: no open buckets\n")
 		}
-	} else {
-		s.Printf("│  s3scanner: SKIP (%v)\n", res.Err)
 	}
 	return nil
 }
