@@ -21,11 +21,32 @@ ollama:
   temperature: 0.2
   timeout: 15          # seconds — AI triage fails open (assumes REAL) if exceeded
 
+# ── AI confirmation policy (Zero-FP, FIX #7) ─────────────────────────────────
+ai:
+  # When true, an unconfirmed Critical finding is auto-downgraded to
+  # "Unverified-Critical" Info if the one-time startup Ollama probe found the
+  # model offline. Nothing is reported as AI-confirmed without a REAL verdict.
+  require_confirmation_for_critical: true
+
+# ── Zero-FP Filtering (FIX #1/#2) ────────────────────────────────────────────
+filter:
+  # Strip Cloudflare challenge tokens (__cf_chl_rt_tk, cf_clearance, …) and
+  # analytics params (utm_*, fbclid, gclid, …) before any injection tool sees a
+  # URL; CF-challenge URLs are NEVER sent to sqlmap/dalfox/ghauri (FP #1).
+  strip_cloudflare_params: true
+  # Enforce scope on JavaScript secret scanning so squarespace/cloudfront CDN
+  # bundles are never mined for "secrets" (FP #2).
+  enforce_scope_on_js: true
+
 # ── Proxy & WAF Evasion ──────────────────────────────────────────────────────
 proxy:
   header_spoofing: true
   user_agent_rotation: true
   adaptive_throttling: true
+  # FIX #5 — Two-tier Burp routing. When true, high-volume discovery/fuzzing/
+  # crawling/archive-mining phases (Tier 1) run DIRECT and never flood Burp;
+  # only confirmed-evidence phases (Tier 2) are proxied through Burp.
+  selective_routing: true
 
 # ── Context Chain (Auto token propagation) ────────────────────────────────────
 context_chain:

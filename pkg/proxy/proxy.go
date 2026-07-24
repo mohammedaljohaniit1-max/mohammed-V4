@@ -10,7 +10,25 @@ import (
 type ProxyManager struct {
 	ProxyURL string
 	Active   bool
+
+	// Selective enables the two-tier routing model (FIX #5). When true, only
+	// Tier-2 (confirmed, high-value security) phases route through Burp; noisy
+	// discovery phases (Tier 1) always go direct. When false, the legacy
+	// behaviour applies (every proxy-aware phase uses Burp when Active).
+	Selective bool
 }
+
+// ProxyMode selects whether a given tool invocation routes through Burp.
+type ProxyMode int
+
+const (
+	// ProxyModeDirect never touches Burp — high-volume, low-signal discovery
+	// (subdomain enum, DNS, port scan, archive mining, crawling, fuzzing).
+	ProxyModeDirect ProxyMode = iota
+	// ProxyModeSelective routes through Burp only when the proxy is Active
+	// (targeted, confirmed security verification requests).
+	ProxyModeSelective
+)
 
 func NewProxyManager(proxyURL string) *ProxyManager {
 	if proxyURL == "" {
@@ -20,6 +38,34 @@ func NewProxyManager(proxyURL string) *ProxyManager {
 		ProxyURL: proxyURL,
 		Active:   true,
 	}
+}
+
+// For returns a ProxyManager view appropriate to the requested routing mode.
+//
+//   - ProxyModeDirect  → an inert manager (Active=false, no URL) so callers
+//     that gate on Active automatically bypass Burp. This is the Tier-1 path.
+//   - ProxyModeSelective → the real manager (Burp used when Active).
+//
+// When Selective routing is disabled in config, every mode returns the real
+// manager (legacy whole-scan proxying).
+func (p *ProxyManager) For(mode ProxyMode) *ProxyManager {
+	if p == nil {
+		return &ProxyManager{Active: false}
+	}
+	if !p.Selective {
+		return p // legacy: proxy everything that is proxy-aware
+	}
+	if mode == ProxyModeDirect {
+		return &ProxyManager{Active: false}
+	}
+	return p
+}
+
+// UseBurp is a convenience predicate: true when this manager is actively
+// routing through Burp for the given mode.
+func (p *ProxyManager) UseBurp(mode ProxyMode) bool {
+	eff := p.For(mode)
+	return eff.Active && eff.ProxyURL != ""
 }
 
 func (p *ProxyManager) TestConnection() error {

@@ -16,6 +16,7 @@ Module: `github.com/mohammed-v3/core` · Branch: `main` · Go 1.22+
 ## Table of Contents
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
+2a. [Zero False-Positive Architecture](#2a-zero-false-positive-architecture)
 3. [Installation Guide](#3-installation-guide)
 4. [The 29 Phases](#4-the-29-phases)
 5. [Configuration Schema (`config.yaml`)](#5-configuration-schema-configyaml)
@@ -97,7 +98,81 @@ Scan profiles (`--profile`): `small` · `medium` (default) · `large`/`bugbounty
 
 Supporting packages: `pkg/config` (scope + YAML, apex routing, dedup),
 `pkg/proxy` (Burp routing + env), `pkg/governor` (adaptive throttle / WAF
-backoff), `pkg/filter` (evidence hashing), `pkg/report` (report helpers).
+backoff), `pkg/filter` (scope enforcement, CF-param stripping, confidence
+scoring, evidence hashing), `pkg/report` (report helpers + tiered exporter).
+
+---
+
+## 2a. Zero False-Positive Architecture
+
+After a scan of `whatnot.com` produced **6 catastrophic false positives**,
+MOHAMMED v4 was re-architected around one rule: **only confirmed evidence is
+ever reported, and only confirmed evidence is ever routed to Burp.** High-volume
+discovery, fuzzing, crawling, and archive mining bypass Burp entirely.
+
+### The 6 confirmed false positives (and their fix)
+
+| # | False positive | Root cause | Fix |
+|---|----------------|-----------|-----|
+| 1 | SQLi on `__cf_chl_rt_tk` | Cloudflare challenge tokens fed to sqlmap | **FIX #1** — `StripNoisyParams` + `IsCloudflareChallenge`; CF-challenge URLs never reach sqlmap/dalfox/ghauri |
+| 2 | JS secrets from squarespace/cloudfront | Out-of-scope CDN bundles mined | **FIX #2** — `IsInScope`/`FilterInScopeURLs`; JS scan is scope-gated |
+| 3 | CORS on `www.grillservice-famholler.at` | Out-of-scope host tested | **FIX #8** — `s.LiveHosts` scope-filtered before CORS |
+| 4 | subzy takeover, AI offline | subzy trusted alone | **FIX #4/#7** — takeover requires HTTP fingerprint **and** AI REAL; AI-offline → Unverified-Critical Info |
+| 5 | Sensitive file "found" (HTTP 200) | 200 ≠ real file (CF error page) | **FIX #4** — `ValidateSensitiveFile` inspects body, rejects WAF/CF pages, requires file-specific markers |
+| 6 | Burp flooded with 15,000+ requests | Everything proxied | **FIX #5** — two-tier routing: only confirmed-evidence phases use Burp |
+
+### The 9 mandatory fixes
+
+- **FIX #1 — Noise stripper** (`pkg/filter/scope.go`): strips
+  `__cf_chl_rt_tk/__cf_chl_tk/__cf_bm/cf_clearance/__cfruid/…` and
+  `utm_*/fbclid/gclid/msclkid/_ga/_gl/ref/source/…`. If no meaningful param
+  remains, the URL is discarded. Auth params (`token/csrf/nonce/state`) are kept
+  on a separate list. Cloudflare-challenge URLs are never sent to injection
+  tools.
+- **FIX #2 — Absolute scope** (`pkg/filter/scope.go`): exact host match or a
+  verified subdomain of a scope apex. Applied before JS scanning, CORS,
+  SQLi/XSS, and takeover confirmation.
+- **FIX #3 — Confidence scoring** (`pkg/filter/confidence.go`): every finding
+  gets a `Confidence` (0-100): `+25` in-scope, `+20` HTTP-confirmed, `+20` AI
+  REAL, `+15` multi-tool, `+10` specific pattern, `+10` no WAF; `-20` AI offline.
+  `>=70` report · `40-69` downgrade to Info · `<40` discard. An unconfirmed
+  Critical with AI offline is auto-downgraded to **Unverified-Critical Info**.
+- **FIX #4 — Sensitive-file validator** (`pkg/phases/zerofp.go`):
+  `ValidateSensitiveFile` rejects bodies `<100` bytes, checks `Content-Type`,
+  rejects WAF/Cloudflare fingerprints (`"been blocked"`, `"Attention
+  Required!"`, `"Ray ID"`, `"cloudflare"`), and requires file-specific content
+  (`.svn`→`svn:`, `.git/config`→`[core]`, swagger→`swagger`/`openapi`).
+- **FIX #5 — Two-tier Burp routing** (`pkg/proxy/proxy.go` + `PhaseProxy`):
+  `ProxyModeDirect` (Tier 1, inert proxy — subdomains, DNS, port scan, wayback,
+  crawl, JS collection, fuzzing, full nuclei) vs `ProxyModeSelective` (Tier 2,
+  Burp — HTTP probe of confirmed hosts, SQLi, XSS, SSRF, redirect, bypass,
+  CRLF, smuggling, exposure, API, takeover confirm). Toggled by
+  `proxy.selective_routing`.
+- **FIX #6 — WAF-aware SQLi** (`pkg/phases/zerofp.go`): `DetectWAF` probes with
+  a benign `test=1` and skips WAF-fronted URLs; `PrepareSQLiURLs` CF-strips,
+  scope-filters, prioritizes real params (`id/user_id/product_id/order/search/…`)
+  and caps at **5 URLs**. `--waf-bypass` adds sqlmap tamper scripts.
+- **FIX #7 — AI at startup** (`pkg/ai/triage.go` `Ping` + `State.AIOnline`):
+  Ollama is probed **once** at launch. Offline → unconfirmed Critical becomes
+  Unverified-Critical Info and High JS secrets become Info. An explicit
+  `FALSE_POSITIVE` verdict is discarded and logged `│ AI: REJECTED`.
+- **FIX #8 — CORS scope** (`pkg/phases/phases.go`): live hosts are scope-filtered
+  before CORS testing (`│ CORS scope filter: N out-of-scope hosts removed`),
+  and a wildcard ACAO only reports when combined with ACA-Credentials.
+- **FIX #9 — Tiered export** (`pkg/report/exporter.go`): `CONFIRMED_VULNS.txt`
+  (Confidence `>=70` **and** AI REAL / HTTP-confirmed) and `MANUAL_REVIEW.txt`
+  (40-69, or AI offline). Nothing below the review floor is written.
+
+### Genius upgrades
+
+- **#1 Anti-honeypot** — `IsHoneypotOrSink` sends 3 probes; identical hashes → a
+  fake "everything-200" sink, skipped.
+- **#2 Behavioral dedup** — `DeduplicateByBehavior` / `ParamSignature` collapse
+  URLs that differ only by value.
+- **#3 Response fingerprinting** — `IsStaticAsset` skips CSS/img/font noise.
+- **#4 `--waf-bypass`** — enables sqlmap tamper scripts on demand.
+- **#5 Scope-drift capture** — out-of-scope crawl hits are written to
+  `out_of_scope_urls.txt` and never enter the scan corpus.
 
 ---
 
@@ -267,11 +342,22 @@ ollama:
   temperature: 0.2                    # low = deterministic verdicts
   timeout: 15                         # seconds; on timeout → fail open (REAL)
 
+# ── AI confirmation policy (Zero-FP, FIX #7) ──
+ai:
+  require_confirmation_for_critical: true  # AI-offline Critical → Unverified Info
+
+# ── Zero-FP filtering (FIX #1/#2) ──
+filter:
+  strip_cloudflare_params: true  # strip CF challenge + analytics params (FP #1)
+  enforce_scope_on_js: true      # never mine out-of-scope CDN JS (FP #2)
+
 # ── Proxy & WAF evasion ──
 proxy:
   header_spoofing: true
   user_agent_rotation: true
   adaptive_throttling: true
+  selective_routing: true        # FIX #5 — two-tier Burp routing (only confirmed
+                                 # evidence proxied; volume phases run direct)
 
 # ── Context chain (auto token propagation) ──
 context_chain:

@@ -173,6 +173,7 @@ func runScan(args []string) {
 	output := fs.String("output", "output", "Output directory")
 	resume := fs.String("resume", "", "Resume an interrupted scan: 'auto' (latest in output/) or a path to checkpoint.json")
 	debug := fs.Bool("debug", false, "Debug mode: print the exact command + input/output for every tool call")
+	wafBypass := fs.Bool("waf-bypass", false, "WAF bypass mode: add sqlmap tamper scripts + delays when a WAF is confirmed (Genius #4, off by default)")
 	fs.Parse(args)
 
 	// IMPROVEMENT #1: enable verbose per-tool command logging in the runner.
@@ -208,6 +209,14 @@ func runScan(args []string) {
 		Debug:     *debug,
 		APIKeys:   yamlCfg.APIKeys,
 		Ollama:    yamlCfg.Ollama,
+
+		// Zero-false-positive controls (default ON where the config is silent
+		// so a fresh install is safe-by-default; explicit false disables).
+		SelectiveProxyRouting:          yamlCfg.Proxy.SelectiveRouting,
+		StripCloudflareParams:          yamlCfg.Filter.StripCloudflareParams,
+		EnforceScopeOnJS:               yamlCfg.Filter.EnforceScopeOnJS,
+		RequireConfirmationForCritical: yamlCfg.AIExtra.RequireConfirmationForCritical,
+		WAFBypass:                      *wafBypass,
 	}
 
 	config.EnsureDir(*output)

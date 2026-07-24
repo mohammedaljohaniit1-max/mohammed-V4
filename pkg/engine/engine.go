@@ -42,6 +42,11 @@ type State struct {
 	OutputFolder string
 	StartTime    time.Time
 
+	// AIOnline records the result of the one-time startup Ollama connectivity
+	// probe (FIX #7). When false, findings that require AI confirmation are
+	// downgraded by the confidence policy rather than reported as confirmed.
+	AIOnline bool
+
 	// CompletedPhases records the Name() of every phase that finished
 	// successfully. It is serialized into checkpoint.json after each phase so
 	// an interrupted scan can be resumed with --resume (FLAW #2).
@@ -87,11 +92,15 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 	outDir := config.GetOutputFolder(target)
 	config.EnsureDir(outDir)
 
+	pm := proxy.NewProxyManager(cfg.BurpProxy)
+	// FIX #5: enable the two-tier (direct vs Burp) routing model.
+	pm.Selective = cfg.SelectiveProxyRouting
+
 	return &State{
 		Config:   cfg,
 		Scope:    scope,
 		Governor: governor.NewGovernor(cfg.Threads),
-		Proxy:    proxy.NewProxyManager(cfg.BurpProxy),
+		Proxy:    pm,
 		AI: ai.NewClient(
 			cfg.Ollama.Enabled,
 			cfg.Ollama.Endpoint,
@@ -115,21 +124,76 @@ func (s *State) AddFinding(f map[string]interface{}) {
 	s.Findings = append(s.Findings, f)
 }
 
+// PhaseProxy returns the proxy manager appropriate for a phase's routing tier
+// (FIX #5). Tier-1 (noisy discovery) phases call PhaseProxy(ProxyModeDirect)
+// and get an inert manager so they never flood Burp; Tier-2 (confirmed
+// security verification) phases call PhaseProxy(ProxyModeSelective).
+func (s *State) PhaseProxy(mode proxy.ProxyMode) *proxy.ProxyManager {
+	return s.Proxy.For(mode)
+}
+
 // Triage runs AI triage on a candidate finding and adds it with the verdict
 // recorded. When the model marks it a false positive, the severity is demoted
 // to "Info" (never dropped — we keep the evidence for the report) and an
 // "ai_verdict" field records the reason. Fails open when Ollama is offline.
+//
+// NOTE: this is the legacy always-store path. New zero-FP phases should prefer
+// TriageAndScore, which additionally applies the confidence policy and can
+// DISCARD a finding that cannot clear the confidence floor (FIX #3).
 func (s *State) Triage(ctx context.Context, findingType, target, evidence string, f map[string]interface{}) {
+	s.TriageVerdict(ctx, findingType, target, evidence, f)
+	s.AddFinding(f)
+}
+
+// TriageVerdict runs AI triage and records the verdict fields on f WITHOUT
+// storing it. When Ollama reports offline, ai_offline is set so the confidence
+// scorer can apply the FIX #7 penalty. Returns whether the model confirmed.
+func (s *State) TriageVerdict(ctx context.Context, findingType, target, evidence string, f map[string]interface{}) bool {
+	// FIX #7: if the startup probe found Ollama offline, skip the per-finding
+	// network round-trip entirely and treat it as offline (fail open).
+	if s.AI == nil || !s.AI.Enabled || !s.AIOnline {
+		f["ai_verdict"] = "ollama_offline"
+		f["ai_offline"] = true
+		return true
+	}
 	confirmed, reason := s.AI.TriageFinding(ctx, findingType, target, evidence)
 	f["ai_verdict"] = reason
+	offline := reason == "ollama_offline"
+	if offline {
+		f["ai_offline"] = true
+	}
 	if !confirmed {
 		f["ai_confirmed"] = false
-		f["original_severity"] = f["severity"]
-		f["severity"] = "Info"
-	} else {
+		if _, ok := f["original_severity"]; !ok {
+			f["original_severity"] = f["severity"]
+		}
+		// A model that explicitly says FALSE_POSITIVE demotes to Info.
+		if !offline {
+			f["severity"] = "Info"
+		}
+	} else if !offline {
 		f["ai_confirmed"] = true
 	}
+	// When the model explicitly rejected the finding, log it (FIX #7).
+	if !confirmed && !offline {
+		s.Printf("│  AI: REJECTED [%s] on %s — %s\n", findingType, target, reason)
+	}
+	return confirmed
+}
+
+// TriageAndScore triages a candidate finding, applies the confidence policy,
+// and stores it ONLY if the policy says keep. Returns true when the finding
+// was kept (possibly downgraded), false when it was discarded (FIX #3/#7).
+// scoreFn is the package-level filter.ApplyConfidencePolicy, injected to avoid
+// an import cycle (engine → filter → config, filter must not import engine).
+func (s *State) TriageAndScore(ctx context.Context, findingType, target, evidence string,
+	f map[string]interface{}, scoreFn func(map[string]interface{}) bool) bool {
+	s.TriageVerdict(ctx, findingType, target, evidence, f)
+	if scoreFn != nil && !scoreFn(f) {
+		return false // discarded — never stored
+	}
 	s.AddFinding(f)
+	return true
 }
 
 // ─────────────────────────────────────────
@@ -230,6 +294,27 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			o.State.Proxy.Active = false
 			o.State.Proxy.ProxyURL = ""
 		}
+	}
+
+	// ── Ollama (AI triage) connectivity check — ONCE at startup ──────────
+	//
+	// FIX #7: probe Ollama a single time here instead of discovering it is
+	// offline mid-scan on every finding. When AI is offline, the confidence
+	// policy downgrades unconfirmed Critical findings to Unverified-Critical
+	// Info and High JS secrets to Info — nothing is reported as AI-confirmed
+	// without a REAL verdict from the model.
+	if o.State.AI != nil && o.State.AI.Enabled {
+		fmt.Printf("[*] Checking Ollama (%s) at %s ... ", o.State.AI.Model, o.State.AI.Endpoint)
+		if o.State.AI.Ping(ctx) {
+			o.State.AIOnline = true
+			fmt.Printf("✅ Online — AI confirmation active\n")
+		} else {
+			o.State.AIOnline = false
+			fmt.Printf("⚠️  Offline — unconfirmed Critical/High findings will be downgraded (zero-FP)\n")
+		}
+	} else {
+		o.State.AIOnline = false
+		fmt.Printf("[*] Ollama: disabled — AI confirmation OFF (findings needing AI will be downgraded)\n")
 	}
 	fmt.Println()
 

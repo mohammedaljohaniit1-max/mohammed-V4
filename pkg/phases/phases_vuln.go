@@ -10,6 +10,9 @@ import (
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
+	"github.com/mohammed-v3/core/pkg/filter"
+	"github.com/mohammed-v3/core/pkg/proxy"
+	"github.com/mohammed-v3/core/pkg/report"
 	"github.com/mohammed-v3/core/pkg/runner"
 )
 
@@ -89,11 +92,15 @@ func (p *CloudReconPhase) Execute(ctx context.Context, s *engine.State) error {
 		for _, l := range readNonEmptyLines(cloudOut) {
 			ll := strings.ToLower(l)
 			if strings.Contains(ll, "open") || strings.Contains(ll, "public") || strings.Contains(ll, "exists") {
-				found++
-				s.AddFinding(map[string]interface{}{
+				f := map[string]interface{}{
 					"title": "Exposed Cloud Resource", "severity": "High",
 					"url": l, "tool": "cloud_enum", "evidence": l,
-				})
+					"http_confirmed": true, "specific_pattern": true,
+				}
+				if filter.ApplyConfidencePolicy(f, s.Scope) {
+					s.AddFinding(f)
+					found++
+				}
 			}
 		}
 		s.Printf("│  cloud_enum: %d exposed resources\n", found)
@@ -122,10 +129,15 @@ func (p *CloudReconPhase) Execute(ctx context.Context, s *engine.State) error {
 	default:
 		ll := strings.ToLower(res.Stdout)
 		if strings.Contains(ll, "open") || strings.Contains(ll, "exists") {
-			s.AddFinding(map[string]interface{}{
+			f := map[string]interface{}{
 				"title": "Exposed S3 Bucket", "severity": "High",
 				"url": keyword, "tool": "s3scanner", "evidence": strings.TrimSpace(res.Stdout),
-			})
+				"http_confirmed": true, "specific_pattern": true,
+			}
+			// Bucket names are not URLs so scope-host matching does not apply;
+			// still run the confidence gate for consistent policy handling.
+			f["confidence"] = 80
+			s.AddFinding(f)
 			s.Printf("│  s3scanner: exposed bucket found\n")
 		} else {
 			s.Printf("│  s3scanner: no open buckets\n")
@@ -171,6 +183,8 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 
 	fuzzOut := filepath.Join(s.OutputFolder, "fuzz_results.txt")
+	// FIX #5: Tier 1 DIRECT — never routes fuzzing through Burp.
+	px := s.PhaseProxy(proxy.ProxyModeDirect)
 	var allResults []string
 	hits := 0
 
@@ -184,8 +198,10 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 		args := []string{"-u", base + "/FUZZ", "-w", wordlist,
 			"-mc", "200,204,301,302,307,401,403", "-t", "20",
 			"-rate", "100", "-o", outFile, "-of", "json", "-s"}
-		if s.Proxy.Active {
-			args = append(args, "-x", s.Proxy.ProxyURL)
+		// FIX #5 (Tier 1 DIRECT): fuzzing is high-volume discovery noise and
+		// must NEVER flood Burp. px is inert under selective routing.
+		if px.Active {
+			args = append(args, "-x", px.ProxyURL)
 		}
 		res := runner.RunTool(ctx, "ffuf", args, nil)
 		if res.OK() || res.TimedOut {
@@ -225,6 +241,14 @@ func (p *VulnScanPhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(seeds) == 0 {
 		seeds = dedupeURLs(s.URLs)
 	}
+	// FIX #2: only scan in-scope live endpoints.
+	if s.Scope != nil {
+		var removed int
+		seeds, removed = filter.FilterInScopeURLs(seeds, s.Scope)
+		if removed > 0 {
+			s.Printf("│  nuclei scope filter: %d out-of-scope hosts removed\n", removed)
+		}
+	}
 	if len(seeds) == 0 {
 		s.Printf("│  nuclei: SKIP (no live endpoints)\n")
 		return nil
@@ -233,11 +257,13 @@ func (p *VulnScanPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	nucleiJSONL := filepath.Join(s.OutputFolder, "nuclei_results.jsonl")
 
+	// FIX #5: Tier 1 DIRECT — full template scan is high-volume; bypass Burp.
+	px := s.PhaseProxy(proxy.ProxyModeDirect)
 	args := []string{"-l", urlsFile, "-jsonl", "-o", nucleiJSONL,
 		"-silent", "-nc", "-rl", "150", "-c", "25",
 		"-severity", "critical,high,medium,low,info"}
-	if s.Proxy.Active {
-		args = append(args, "-proxy", s.Proxy.ProxyURL)
+	if px.Active {
+		args = append(args, "-proxy", px.ProxyURL)
 	}
 
 	res := runner.RunTool(ctx, "nuclei", args, nil)
@@ -275,20 +301,28 @@ func (p *VulnScanPhase) Execute(ctx context.Context, s *engine.State) error {
 		f := map[string]interface{}{
 			"title": templateID, "severity": severity,
 			"url": target, "tool": "nuclei", "evidence": evidence,
+			"http_confirmed": true, "specific_pattern": true,
 		}
-		// Only spend AI cycles on higher-severity findings; info/low are added directly.
+		// Only spend AI cycles on higher-severity findings; info/low are added directly
+		// after the confidence gate.
 		if severity == "Critical" || severity == "High" || severity == "Medium" {
 			before := f["severity"]
-			s.Triage(ctx, "Nuclei: "+templateID, target, evidence, f)
-			if f["severity"] != before {
+			kept := s.TriageAndScore(ctx, "Nuclei: "+templateID, target, evidence, f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) })
+			if !kept || f["severity"] != before {
 				demoted++
 			}
+			if kept {
+				count++
+			}
 		} else {
-			s.AddFinding(f)
+			if filter.ApplyConfidencePolicy(f, s.Scope) {
+				s.AddFinding(f)
+				count++
+			}
 		}
-		count++
 	}
-	s.Printf("│  nuclei: %d findings (%d demoted by AI triage)\n", count, demoted)
+	s.Printf("│  nuclei: %d findings kept (%d demoted/discarded by policy)\n", count, demoted)
 	return nil
 }
 
@@ -327,10 +361,21 @@ func (p *XSSPhase) Execute(ctx context.Context, s *engine.State) error {
 		return nil
 	}
 
+	// FIX #5: Tier 2 BURP — confirmed XSS probes are targeted and routed to Burp.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
+
 	// Build a filtered, deduplicated, capped target list.
 	targets := parameterizedURLs(readNonEmptyLines(paramsFile), 20)
+	// FIX #2: only test in-scope parameterized URLs.
+	if s.Scope != nil {
+		var removed int
+		targets, removed = filter.FilterInScopeURLs(targets, s.Scope)
+		if removed > 0 {
+			s.Printf("│  XSS scope filter: %d out-of-scope URLs removed\n", removed)
+		}
+	}
 	if len(targets) == 0 {
-		s.Printf("│  XSS: SKIP (no URLs with query parameters)\n")
+		s.Printf("│  XSS: SKIP (no in-scope URLs with query parameters)\n")
 		return nil
 	}
 	dalfoxIn := filepath.Join(s.OutputFolder, "xss_targets.txt")
@@ -355,23 +400,26 @@ func (p *XSSPhase) Execute(ctx context.Context, s *engine.State) error {
 	xssOut := filepath.Join(s.OutputFolder, "xss_results.txt")
 	args := []string{"file", dalfoxIn, "-o", xssOut, "--silence",
 		"-w", "10", "--timeout", "10", "--delay", "100"}
-	if s.Proxy.Active {
-		args = append(args, "--proxy", s.Proxy.ProxyURL, "--skip-bav")
+	if px.Active {
+		args = append(args, "--proxy", px.ProxyURL, "--skip-bav")
 	}
 	res = runner.RunTool(ctx, "dalfox", args, nil)
 	if res.OK() || res.TimedOut {
 		found := 0
 		for _, l := range readNonEmptyLines(xssOut) {
 			if strings.Contains(l, "POC") || strings.Contains(l, "[V]") || strings.Contains(strings.ToLower(l), "verified") {
-				found++
 				f := map[string]interface{}{
 					"title": "XSS Vulnerability", "severity": "High",
 					"url": l, "tool": "dalfox", "evidence": l,
+					"http_confirmed": true, "specific_pattern": true,
 				}
-				s.Triage(ctx, "Reflected XSS", l, l, f)
+				if s.TriageAndScore(ctx, "Reflected XSS", l, l, f,
+					func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+					found++
+				}
 			}
 		}
-		s.Printf("│  dalfox: %d XSS finding(s)\n", found)
+		s.Printf("│  dalfox: %d XSS finding(s) kept\n", found)
 	} else {
 		s.Printf("│  dalfox: SKIP (%v)\n", res.Err)
 	}
@@ -385,53 +433,91 @@ type SQLiPhase struct{}
 
 func (p *SQLiPhase) Name() string { return "SQL Injection Analysis" }
 func (p *SQLiPhase) Description() string {
-	return "sqlmap + ghauri on parameterized URLs (filtered, capped)"
+	return "sqlmap+ghauri: CF-stripped, in-scope, WAF-checked, ≤5 URLs (zero-FP)"
 }
 func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
+	// FIX #5 (Tier 2): only these targeted PoC injections reach Burp.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
+
 	paramsFile := filepath.Join(s.OutputFolder, "params.txt")
 	if ok, _ := fileHasContent(paramsFile); !ok {
 		s.Printf("│  SQLi: SKIP (no parameterized URLs)\n")
 		return nil
 	}
 
-	targets := parameterizedURLs(readNonEmptyLines(paramsFile), 10)
+	// FIX #1 + FIX #2 + FIX #6(step2/3): strip Cloudflare challenge/analytics
+	// params, drop URLs with no injectable parameter, keep only in-scope hosts,
+	// order by parameter priority, and cap at 5. This is what eliminates the
+	// __cf_chl_rt_tk "SQL injection" false positives entirely.
+	raw := readNonEmptyLines(paramsFile)
+	targets := PrepareSQLiURLs(raw, s.Scope, 5)
 	if len(targets) == 0 {
-		s.Printf("│  SQLi: SKIP (no URLs with query parameters)\n")
+		s.Printf("│  SQLi: SKIP (0 clean in-scope injectable URLs after CF/scope filter)\n")
 		return nil
 	}
+	s.Printf("│  SQLi: %d raw → %d clean in-scope candidates (cap 5)\n", len(raw), len(targets))
 
 	sqliOut := filepath.Join(s.OutputFolder, "sqli_results.txt")
 	var results []string
 	for _, u := range targets {
+		// FIX #6 step 1: WAF pre-check. A WAF-fronted endpoint gives sqlmap
+		// unstable responses that it misreads as injectable → skip it.
+		if DetectWAF(ctx, px, u) {
+			s.Printf("│  WAF detected on %s — skipping SQLi (would be false positive)\n", u)
+			continue
+		}
+		// Genius #1: skip non-reflective / honeypot endpoints.
+		if IsHoneypotOrSink(ctx, px, u) {
+			s.Printf("│  Non-reflective endpoint %s — skipping SQLi (honeypot/sink)\n", u)
+			continue
+		}
+
 		args := []string{"-u", u, "--batch", "--level", "2", "--risk", "1",
 			"--random-agent", "--output-dir", s.OutputFolder}
-		if s.Proxy.Active {
-			args = append(args, "--proxy", s.Proxy.ProxyURL)
+		if px.Active {
+			args = append(args, "--proxy", px.ProxyURL)
+		}
+		// Genius #4: WAF-bypass mode (opt-in) adds tamper scripts + delays.
+		if s.Config.WAFBypass {
+			args = append(args, "--tamper=space2comment,between,randomcase,charencode",
+				"--delay=2", "--timeout=30", "--retries=3")
 		}
 		res := runner.RunTool(ctx, "sqlmap", args, nil)
-		if res.OK() && strings.Contains(strings.ToLower(res.Stdout), "injectable") {
-			results = append(results, u)
-			f := map[string]interface{}{
-				"title": "SQL Injection", "severity": "Critical",
-				"url": u, "tool": "sqlmap", "evidence": "sqlmap reports parameter injectable",
-			}
-			s.Triage(ctx, "SQL Injection", u, "sqlmap reports parameter injectable", f)
-		} else {
-			// ghauri as a second opinion.
-			res = runner.RunTool(ctx, "ghauri", []string{"-u", u, "--batch", "--level", "2"}, nil)
-			if res.OK() && strings.Contains(strings.ToLower(res.Stdout), "injectable") {
-				results = append(results, u+" [ghauri]")
-				f := map[string]interface{}{
-					"title": "SQL Injection", "severity": "Critical",
-					"url": u, "tool": "ghauri", "evidence": "ghauri reports parameter injectable",
-				}
-				s.Triage(ctx, "SQL Injection", u, "ghauri reports parameter injectable", f)
-			}
+		sqlmapHit := res.OK() && strings.Contains(strings.ToLower(res.Stdout), "injectable")
+
+		// ghauri as an independent second opinion (multi-tool agreement).
+		ghauriRes := runner.RunTool(ctx, "ghauri", []string{"-u", u, "--batch", "--level", "2"}, nil)
+		ghauriHit := ghauriRes.OK() && strings.Contains(strings.ToLower(ghauriRes.Stdout), "injectable")
+
+		if !sqlmapHit && !ghauriHit {
+			s.Governor.Throttle()
+			continue
 		}
+
+		tool := "sqlmap"
+		if ghauriHit && !sqlmapHit {
+			tool = "ghauri"
+		} else if sqlmapHit && ghauriHit {
+			tool = "sqlmap+ghauri"
+		}
+		results = append(results, u+" ["+tool+"]")
+		f := map[string]interface{}{
+			"title": "SQL Injection", "severity": "Critical",
+			"url": u, "tool": tool, "evidence": tool + " reports parameter injectable",
+			"requires_ai":       true,
+			"multi_tool":        sqlmapHit && ghauriHit,
+			"specific_pattern":  true,
+			"no_waf_confirmed":  true, // we already skipped WAF-fronted URLs
+			"http_confirmed":    sqlmapHit && ghauriHit,
+		}
+		// FIX #3/#7: triage + confidence gate. An AI-offline unconfirmed
+		// Critical is auto-downgraded to Info; low confidence is discarded.
+		s.TriageAndScore(ctx, "SQL Injection", u, f["evidence"].(string), f,
+			func(ff map[string]interface{}) bool { return filter.ApplyConfidencePolicy(ff, s.Scope) })
 		s.Governor.Throttle()
 	}
 	writeLines(sqliOut, results)
-	s.Printf("│  SQLi: tested %d, found %d injectable\n", len(targets), len(results))
+	s.Printf("│  SQLi: tested %d, confirmed %d injectable (post-triage)\n", len(targets), len(results))
 	return nil
 }
 
@@ -458,13 +544,15 @@ func (p *SSRFPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	ssrfJSONL := filepath.Join(s.OutputFolder, "ssrf_results.jsonl")
 
+	// FIX #5: Tier 2 BURP — confirmed SSRF probes are routed to Burp.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	args := []string{"-l", urlsFile, "-tags", "ssrf", "-jsonl", "-o", ssrfJSONL,
 		"-silent", "-nc", "-rl", "100"}
 	// Use a public interactsh server explicitly (oast.pro) — nuclei defaults to
 	// interactsh.com but naming it makes the behaviour deterministic.
 	args = append(args, "-iserver", "https://oast.pro")
-	if s.Proxy.Active {
-		args = append(args, "-proxy", s.Proxy.ProxyURL)
+	if px.Active {
+		args = append(args, "-proxy", px.ProxyURL)
 	}
 
 	res := runner.RunTool(ctx, "nuclei", args, nil)
@@ -480,11 +568,14 @@ func (p *SSRFPhase) Execute(ctx context.Context, s *engine.State) error {
 			f := map[string]interface{}{
 				"title": "SSRF Vulnerability", "severity": "High",
 				"url": matched, "tool": "nuclei-ssrf", "evidence": "template=" + tid,
+				"http_confirmed": true, "specific_pattern": true,
 			}
-			s.Triage(ctx, "SSRF", matched, "template="+tid, f)
-			count++
+			if s.TriageAndScore(ctx, "SSRF", matched, "template="+tid, f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+				count++
+			}
 		}
-		s.Printf("│  nuclei SSRF: %d finding(s)\n", count)
+		s.Printf("│  nuclei SSRF: %d finding(s) kept\n", count)
 	} else {
 		s.Printf("│  nuclei SSRF: SKIP (%v)\n", res.Err)
 	}
@@ -508,10 +599,12 @@ func (p *OpenRedirectPhase) Execute(ctx context.Context, s *engine.State) error 
 	}
 	redirectJSONL := filepath.Join(s.OutputFolder, "redirect_results.jsonl")
 
+	// FIX #5: Tier 2 BURP.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	args := []string{"-l", paramsFile, "-tags", "redirect", "-jsonl", "-o", redirectJSONL,
 		"-silent", "-nc", "-rl", "100"}
-	if s.Proxy.Active {
-		args = append(args, "-proxy", s.Proxy.ProxyURL)
+	if px.Active {
+		args = append(args, "-proxy", px.ProxyURL)
 	}
 
 	res := runner.RunTool(ctx, "nuclei", args, nil)
@@ -524,13 +617,17 @@ func (p *OpenRedirectPhase) Execute(ctx context.Context, s *engine.State) error 
 			}
 			matched, _ := rec["matched-at"].(string)
 			tid, _ := rec["template-id"].(string)
-			s.AddFinding(map[string]interface{}{
+			f := map[string]interface{}{
 				"title": "Open Redirect", "severity": "Medium",
 				"url": matched, "tool": "nuclei-redirect", "evidence": "template=" + tid,
-			})
-			count++
+				"http_confirmed": true, "specific_pattern": true,
+			}
+			if filter.ApplyConfidencePolicy(f, s.Scope) {
+				s.AddFinding(f)
+				count++
+			}
 		}
-		s.Printf("│  Open Redirect: %d finding(s)\n", count)
+		s.Printf("│  Open Redirect: %d finding(s) kept\n", count)
 	} else {
 		s.Printf("│  Open Redirect: SKIP (%v)\n", res.Err)
 	}
@@ -569,16 +666,24 @@ func (p *ForbiddenBypassPhase) Execute(ctx context.Context, s *engine.State) err
 		}
 		// Plain-text fallback.
 		if strings.Contains(l, "[403]") || strings.Contains(l, "[401]") {
-			parts := strings.Fields(l)
-			if len(parts) > 0 && !seen[parts[0]] {
-				seen[parts[0]] = true
-				forbiddenURLs = append(forbiddenURLs, parts[0])
+			fields := strings.Fields(l)
+			if len(fields) > 0 && !seen[fields[0]] {
+				seen[fields[0]] = true
+				forbiddenURLs = append(forbiddenURLs, fields[0])
 			}
 		}
 	}
 
+	// FIX #2 (FP #3): only bypass-test in-scope forbidden endpoints.
+	if s.Scope != nil {
+		var removed int
+		forbiddenURLs, removed = filter.FilterInScopeURLs(forbiddenURLs, s.Scope)
+		if removed > 0 {
+			s.Printf("│  403/401 scope filter: %d out-of-scope removed\n", removed)
+		}
+	}
 	if len(forbiddenURLs) == 0 {
-		s.Printf("│  403/401 Bypass: SKIP (no forbidden endpoints)\n")
+		s.Printf("│  403/401 Bypass: SKIP (no in-scope forbidden endpoints)\n")
 		return nil
 	}
 
@@ -591,9 +696,12 @@ func (p *ForbiddenBypassPhase) Execute(ctx context.Context, s *engine.State) err
 			f := map[string]interface{}{
 				"title": "403/401 Bypass", "severity": "High",
 				"url": u, "tool": "dontgo403", "evidence": strings.TrimSpace(res.Stdout),
+				"http_confirmed": true, "specific_pattern": true,
 			}
-			s.Triage(ctx, "Forbidden Bypass", u, res.Stdout, f)
-			bypassed++
+			if s.TriageAndScore(ctx, "Forbidden Bypass", u, res.Stdout, f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+				bypassed++
+			}
 		}
 		s.Governor.Throttle()
 	}
@@ -620,6 +728,20 @@ func (p *APIDiscoveryPhase) Execute(ctx context.Context, s *engine.State) error 
 		s.Printf("│  API discovery: SKIP (no live endpoints)\n")
 		return nil
 	}
+	// FIX #2: API discovery only on in-scope hosts.
+	if s.Scope != nil {
+		var removed int
+		seeds, removed = filter.FilterInScopeURLs(seeds, s.Scope)
+		if removed > 0 {
+			s.Printf("│  API scope filter: %d out-of-scope hosts removed\n", removed)
+		}
+	}
+	if len(seeds) == 0 {
+		s.Printf("│  API discovery: SKIP (no in-scope endpoints)\n")
+		return nil
+	}
+	// FIX #5: Tier 2 BURP.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	apiSeedFile := filepath.Join(s.OutputFolder, "api_seeds.txt")
 	writeLines(apiSeedFile, seeds)
 	apiOut := filepath.Join(s.OutputFolder, "api_results.txt")
@@ -655,8 +777,8 @@ func (p *APIDiscoveryPhase) Execute(ctx context.Context, s *engine.State) error 
 		base := strings.TrimRight(u, "/")
 		for _, path := range apiPaths {
 			args := []string{"-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "6", base + path}
-			if s.Proxy.Active {
-				args = append([]string{"-x", s.Proxy.ProxyURL, "-k"}, args...)
+			if px.Active {
+				args = append([]string{"-x", px.ProxyURL, "-k"}, args...)
 			}
 			res := runner.RunTool(ctx, "curl", args, nil)
 			if res.OK() && (res.Stdout == "200" || res.Stdout == "301" || res.Stdout == "302") {
@@ -690,21 +812,27 @@ func (p *CRLFPhase) Execute(ctx context.Context, s *engine.State) error {
 	writeLines(crlfIn, seeds)
 	crlfOut := filepath.Join(s.OutputFolder, "crlf_results.txt")
 
+	// FIX #5: Tier 2 BURP.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	args := []string{"-l", crlfIn, "-o", crlfOut, "-s", "-c", "20"}
-	if s.Proxy.Active {
-		args = append(args, "-x", s.Proxy.ProxyURL)
+	if px.Active {
+		args = append(args, "-x", px.ProxyURL)
 	}
 	res := runner.RunTool(ctx, "crlfuzz", args, nil)
 	if res.OK() || res.TimedOut {
 		count := 0
 		for _, l := range readNonEmptyLines(crlfOut) {
-			count++
-			s.AddFinding(map[string]interface{}{
+			f := map[string]interface{}{
 				"title": "CRLF Injection", "severity": "Medium",
 				"url": l, "tool": "crlfuzz", "evidence": l,
-			})
+				"http_confirmed": true, "specific_pattern": true,
+			}
+			if filter.ApplyConfidencePolicy(f, s.Scope) {
+				s.AddFinding(f)
+				count++
+			}
 		}
-		s.Printf("│  crlfuzz: %d vulnerable\n", count)
+		s.Printf("│  crlfuzz: %d vulnerable kept\n", count)
 	} else {
 		s.Printf("│  crlfuzz: SKIP (%v)\n", res.Err)
 	}
@@ -728,8 +856,16 @@ func (p *SmugglingPhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(seeds) == 0 {
 		seeds = dedupeURLs(s.URLs)
 	}
+	// FIX #2: only test in-scope endpoints for smuggling.
+	if s.Scope != nil {
+		var removed int
+		seeds, removed = filter.FilterInScopeURLs(seeds, s.Scope)
+		if removed > 0 {
+			s.Printf("│  smuggler scope filter: %d out-of-scope removed\n", removed)
+		}
+	}
 	if len(seeds) == 0 {
-		s.Printf("│  smuggler: SKIP (no live endpoints)\n")
+		s.Printf("│  smuggler: SKIP (no in-scope live endpoints)\n")
 		return nil
 	}
 	if len(seeds) > 5 {
@@ -752,9 +888,12 @@ func (p *SmugglingPhase) Execute(ctx context.Context, s *engine.State) error {
 			f := map[string]interface{}{
 				"title": "HTTP Request Smuggling", "severity": "Critical",
 				"url": u, "tool": "smuggler", "evidence": strings.TrimSpace(combined),
+				"requires_ai": true, "http_confirmed": true, "specific_pattern": true,
 			}
-			s.Triage(ctx, "HTTP Request Smuggling", u, combined, f)
-			confirmed++
+			if s.TriageAndScore(ctx, "HTTP Request Smuggling", u, combined, f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+				confirmed++
+			}
 		}
 		s.Governor.Throttle()
 	}
@@ -773,9 +912,19 @@ func (p *GitExposurePhase) Description() string {
 	return "nuclei exposure templates + custom sensitive-file checks"
 }
 func (p *GitExposurePhase) Execute(ctx context.Context, s *engine.State) error {
+	// FIX #5 (Tier 2): sensitive-file validation GETs are targeted/confirmed.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
+
 	seeds := extractURLsFromHTTPX(filepath.Join(s.OutputFolder, "http_live.txt"))
 	if len(seeds) == 0 {
 		seeds = dedupeURLs(s.URLs)
+	}
+	// FIX #2: only probe in-scope hosts for sensitive files.
+	if removed := 0; s.Scope != nil {
+		seeds, removed = filter.FilterInScopeURLs(seeds, s.Scope)
+		if removed > 0 {
+			s.Printf("│  Exposure scope filter: %d out-of-scope hosts removed\n", removed)
+		}
 	}
 
 	// nuclei exposure templates.
@@ -785,8 +934,8 @@ func (p *GitExposurePhase) Execute(ctx context.Context, s *engine.State) error {
 		exposureJSONL := filepath.Join(s.OutputFolder, "exposure_results.jsonl")
 		args := []string{"-l", exposureIn, "-tags", "exposure", "-jsonl", "-o", exposureJSONL,
 			"-silent", "-nc", "-rl", "100"}
-		if s.Proxy.Active {
-			args = append(args, "-proxy", s.Proxy.ProxyURL)
+		if px.Active {
+			args = append(args, "-proxy", px.ProxyURL)
 		}
 		res := runner.RunTool(ctx, "nuclei", args, nil)
 		if res.OK() || res.TimedOut {
@@ -811,9 +960,13 @@ func (p *GitExposurePhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 
 	// Custom checks for common sensitive files.
+	// FIX #4 (FP #5): HTTP 200 ≠ real file. ValidateSensitiveFile inspects the
+	// response body, rejects WAF/Cloudflare error pages, and requires
+	// file-specific content markers before a finding is emitted.
 	sensitiveFiles := []string{"/.git/config", "/.env", "/.DS_Store", "/backup.zip",
 		"/wp-config.php.bak", "/.htpasswd", "/server-status", "/.svn/entries"}
 	found := 0
+	rejected := 0
 	targets := seeds
 	if len(targets) > 20 {
 		targets = targets[:20]
@@ -821,25 +974,31 @@ func (p *GitExposurePhase) Execute(ctx context.Context, s *engine.State) error {
 	for _, u := range targets {
 		base := strings.TrimRight(u, "/")
 		for _, path := range sensitiveFiles {
-			args := []string{"-s", "-o", "/dev/null", "-w", "%{http_code}:%{size_download}", "-m", "6", base + path}
-			if s.Proxy.Active {
-				args = append([]string{"-x", s.Proxy.ProxyURL, "-k"}, args...)
-			}
-			res := runner.RunTool(ctx, "curl", args, nil)
-			if res.OK() {
-				parts := strings.Split(res.Stdout, ":")
-				if len(parts) == 2 && parts[0] == "200" && parts[1] != "0" {
-					found++
-					s.AddFinding(map[string]interface{}{
-						"title": "Sensitive File: " + path, "severity": "High",
-						"url": base + path, "tool": "custom_scan", "evidence": "HTTP 200, size: " + parts[1],
-					})
+			full := base + path
+			ok, evidence := ValidateSensitiveFile(ctx, px, full)
+			if !ok {
+				if evidence != "" {
+					rejected++
 				}
+				continue
+			}
+			// FIX #3/#4: build finding, mark http-confirmed + specific pattern,
+			// then run the confidence policy gate before storing.
+			f := map[string]interface{}{
+				"title": "Sensitive File: " + path, "severity": "High",
+				"url": full, "tool": "custom_scan", "evidence": evidence,
+				"http_confirmed": true, "specific_pattern": true,
+			}
+			if filter.ApplyConfidencePolicy(f, s.Scope) {
+				found++
+				s.AddFinding(f)
+			} else {
+				rejected++
 			}
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  Sensitive files found: %d\n", found)
+	s.Printf("│  Sensitive files: %d confirmed, %d rejected (FP guard)\n", found, rejected)
 	return nil
 }
 
@@ -910,8 +1069,10 @@ func (p *PrototypePollutionPhase) Execute(ctx context.Context, s *engine.State) 
 
 	args := []string{"-l", urlsFile, "-tags", "prototype-pollution", "-jsonl", "-o", ppJSONL,
 		"-silent", "-nc", "-rl", "100"}
-	if s.Proxy.Active {
-		args = append(args, "-proxy", s.Proxy.ProxyURL)
+	// FIX #5: Tier 2 BURP.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
+	if px.Active {
+		args = append(args, "-proxy", px.ProxyURL)
 	}
 	res := runner.RunTool(ctx, "nuclei", args, nil)
 	if res.OK() || res.TimedOut {
@@ -926,11 +1087,14 @@ func (p *PrototypePollutionPhase) Execute(ctx context.Context, s *engine.State) 
 			f := map[string]interface{}{
 				"title": "Prototype Pollution", "severity": "High",
 				"url": matched, "tool": "nuclei-pp", "evidence": "template=" + tid,
+				"http_confirmed": true, "specific_pattern": true,
 			}
-			s.Triage(ctx, "Prototype Pollution", matched, "template="+tid, f)
-			count++
+			if s.TriageAndScore(ctx, "Prototype Pollution", matched, "template="+tid, f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+				count++
+			}
 		}
-		s.Printf("│  Proto Pollution: %d finding(s)\n", count)
+		s.Printf("│  Proto Pollution: %d finding(s) kept\n", count)
 	} else {
 		s.Printf("│  Proto Pollution: SKIP (%v)\n", res.Err)
 	}
@@ -1000,6 +1164,16 @@ func (p *ReportPhase) Execute(ctx context.Context, s *engine.State) error {
 		"findings":   s.Findings,
 	}, "", "  "); err == nil {
 		_ = os.WriteFile(filepath.Join(s.OutputFolder, "final_report.json"), data, 0644)
+	}
+
+	// FIX #9: split findings into CONFIRMED_VULNS.txt (safe to act on / route
+	// to Burp evidence) and MANUAL_REVIEW.txt (needs a human — mid confidence
+	// or AI offline). This is the zero-FP deliverable that keeps the whatnot.com
+	// class of false positives out of the "confirmed" bucket.
+	if cCount, rCount, err := report.ExportTieredReports(s); err == nil {
+		s.Printf("│  CONFIRMED_VULNS.txt: %d | MANUAL_REVIEW.txt: %d\n", cCount, rCount)
+	} else {
+		s.Printf("│  Tiered export: SKIP (%v)\n", err)
 	}
 
 	s.Printf("│  Report saved: %s\n", reportFile)

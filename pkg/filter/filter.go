@@ -32,6 +32,15 @@ func HashBody(body []byte) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+// HashBodyString hashes a response body string. Empty input hashes to "" so
+// callers can treat "could not fingerprint" distinctly from a real hash.
+func HashBodyString(body string) string {
+	if body == "" {
+		return ""
+	}
+	return HashBody([]byte(body))
+}
+
 func (e *EvidenceVerifier) AddEvidence(ev *Evidence) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
