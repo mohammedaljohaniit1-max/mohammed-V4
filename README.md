@@ -501,6 +501,24 @@ wiring, resolvers, and each bug fix.
 | Scan hangs on one tool | tool exceeded timeout | it is killed via process-group `kill(-pgid)`; check `pkg/runner` timeout map |
 | Build error | stale Go | `export PATH=$PATH:/usr/local/go/bin` (Go 1.22+), then `go build ./...` |
 
+### Tool-integration audit fixes (11 confirmed on a 206-min whatnot.com scan)
+
+These are verified by `verify.sh` section 16 and unit tests:
+
+| # | Tool | Symptom (live) | Fix |
+|---|------|----------------|-----|
+| 1 | **amass** | `0 / 1 [__] 0.00%` → 0 results (no data-source config) | `ensureAmassConfig()` writes `~/.config/amass/config.ini` with free/key-less sources; **retry once** and log advice if still 0 |
+| 2 | **bbot** | `bbot: 0 subdomains` (only `.txt` parsed) | invoke with `-om json`; parse `output.ndjson` `DNS_NAME` events first, `.txt` as fallback |
+| 3 | **findomain** | `0 subdomains` (relied on `-u` file some builds ignore) | parse **stdout** as primary source, output file as fallback |
+| 4 | **gau** | `config /home/…/.gau.toml not found` → 0 URLs | `ensureGauConfig()` writes `~/.gau.toml`; pass `--config` |
+| 5 | **gospider** | `+0 URLs` (only stdout parsed with `-q`) | also walk the gospider output **directory** and extract every `http(s)` token |
+| 6 | **paramspider** | `0 param URLs` (default output dir not read) | read `~/results/<domain>.txt` + `./results/<domain>.txt` defaults (timeout already 3 min) |
+| 7 | **arjun** | `0 params across 15 URLs` | add `--stable`, cap at **10** most-parameterized URLs |
+| 8 | **JS secrets** | evidence = `pattern: api_key_generic` (no value) | `extractSecretEvidence()` captures match line + value + ±40-char context; writes `js_secrets_confirmed.txt` and enriches the finding/report |
+| 9 | **final_report** | showed **old** scan's counts | delete stale `final_report.*` / tiered `.txt` first; add `Scan Date · Duration · v4` header; read `s.Findings` in-memory |
+| 10 | **stale `.txt`** | old `sqli_results.txt` (`__cf_chl`) persisted | `State.CleanStaleResults()` wipes prior `.txt/.json/.md` on a **fresh** scan only (never on `--resume`; keeps `checkpoint.json`) |
+| 11 | **waybackurls** | `0 URLs` treated as failure | demoted to a **bonus** source — 0 is informational, gau/URLScan/CommonCrawl cover the same data |
+
 ### Build & verify (canonical commands)
 ```bash
 export PATH=$PATH:/usr/local/go/bin

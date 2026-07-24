@@ -96,3 +96,51 @@ func TestAppendUnique(t *testing.T) {
 		}
 	}
 }
+
+// TestExtractSecretEvidence guards BUG #8 (audit): a confirmed JS secret must
+// carry the ACTUAL matched value + context, not just the pattern label.
+func TestExtractSecretEvidence(t *testing.T) {
+	body := `window.env = {};` + "\n" +
+		`const STRIPE_KEY = "pk_live_abc123DEF456";` + "\n" +
+		`window.next = 1;`
+	pattern := "pk_live"
+	idx := indexOf(body, pattern)
+	if idx < 0 {
+		t.Fatalf("test setup: pattern %q not in body", pattern)
+	}
+	matchLine, context, value := extractSecretEvidence(body, idx, pattern)
+
+	if matchLine == "" || matchLine == "pattern: "+pattern {
+		t.Errorf("matchLine should contain the source line, got %q", matchLine)
+	}
+	if value != "pk_live_abc123DEF456" {
+		t.Errorf("value should be the extracted key, got %q", value)
+	}
+	if context == "" {
+		t.Errorf("context should be non-empty")
+	}
+}
+
+// TestExtractSecretEvidenceOutOfRange proves the helper never panics on a bad
+// index (defensive — the curl body can be empty or the offset stale).
+func TestExtractSecretEvidenceOutOfRange(t *testing.T) {
+	ml, _, _ := extractSecretEvidence("short", -1, "api_key")
+	if ml == "" {
+		t.Errorf("out-of-range index should still return a non-empty fallback")
+	}
+	ml2, _, _ := extractSecretEvidence("short", 999, "api_key")
+	if ml2 == "" {
+		t.Errorf("beyond-length index should still return a non-empty fallback")
+	}
+}
+
+// indexOf is a tiny test helper mirroring strings.Index without importing it
+// into the test's top-level (keeps the test self-contained/readable).
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

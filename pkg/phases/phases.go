@@ -599,6 +599,26 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 					amCount++
 				}
 			}
+			// BUG #1 (audit) FIX: amass silently returns 0 when it has no working
+			// data-source config. If we auto-created a config this run AND the
+			// first pass returned nothing, retry ONCE (the config may not have
+			// been on disk when amass first read it) and log actionable advice.
+			if amCount == 0 && amassCfg != "" {
+				s.Printf("│    amass: 0 results — retrying once with auto-created free-source config\n")
+				retry := runner.RunTool(ctx, "amass", amArgs, nil)
+				if retry.OK() || retry.TimedOut {
+					for _, l := range readNonEmptyLines(amOut) {
+						l = strings.ToLower(l)
+						if strings.HasSuffix(l, domain) && !found[l] {
+							found[l] = true
+							amCount++
+						}
+					}
+				}
+				if amCount == 0 {
+					s.Printf("│    amass: still 0 — add API keys to %s for better coverage\n", amassCfg)
+				}
+			}
 			s.Printf("│    amass: %d subdomains\n", amCount)
 		} else if res.TimedOut {
 			s.Printf("│    amass: partial (timed out) — parsing any output\n")
@@ -619,26 +639,46 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		// with -em and keep only fast passive sources; results are read from the
 		// output dir whether bbot finished or was still cut off.
 		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
+		// BUG #2 (audit) FIX: emit JSON (`-om json`) so bbot writes a machine
+		// readable output.ndjson. The old code parsed only *.txt files, which
+		// bbot does not reliably produce for subdomain output — hence the
+		// perpetual "bbot: 0 subdomains". We now parse the ndjson DNS_NAME
+		// events first (canonical), then fall back to any *.txt.
 		res = runner.RunTool(ctx, "bbot", []string{
 			"-t", domain, "-p", "subdomain-enum", "-f", "passive",
 			"-em", "github_codesearch,dnsbrute,dnsbrute_mutations,dnscommonsrv,massdns",
-			"-o", bbotOutDir, "--force", "-y",
+			"-om", "json", "-o", bbotOutDir, "--force", "-y",
 		}, nil)
 		if res.OK() || res.TimedOut {
 			bbotCount := 0
+			addHost := func(h string) {
+				h = strings.ToLower(strings.TrimSpace(h))
+				if h != "" && strings.HasSuffix(h, domain) && len(h) < 255 && !found[h] {
+					found[h] = true
+					bbotCount++
+				}
+			}
 			_ = filepath.Walk(bbotOutDir, func(path string, info os.FileInfo, err error) error {
 				if err != nil || info == nil || info.IsDir() {
 					return nil
 				}
 				base := strings.ToLower(filepath.Base(path))
-				if !strings.HasSuffix(base, ".txt") {
-					return nil
-				}
-				for _, l := range readNonEmptyLines(path) {
-					l = strings.ToLower(l)
-					if strings.HasSuffix(l, domain) && len(l) < 255 && !found[l] {
-						found[l] = true
-						bbotCount++
+				switch {
+				case strings.HasSuffix(base, ".ndjson") || base == "output.json":
+					// Canonical bbot output: one JSON event per line.
+					for _, l := range readNonEmptyLines(path) {
+						var ev struct {
+							Type string `json:"type"`
+							Data string `json:"data"`
+						}
+						if json.Unmarshal([]byte(l), &ev) == nil && ev.Type == "DNS_NAME" {
+							addHost(ev.Data)
+						}
+					}
+				case strings.HasSuffix(base, ".txt"):
+					// Fallback for older bbot builds that emit plain lists.
+					for _, l := range readNonEmptyLines(path) {
+						addHost(l)
 					}
 				}
 				return nil
@@ -655,14 +695,20 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		// findomain — apex only (BUG #7). -t <domain> -u <out> -q. Some
 		// findomain builds write to the file, others only to stdout depending
 		// on version, so we parse BOTH the output file and stdout as a fallback.
+		// BUG #3 (audit) FIX: findomain reliably writes to STDOUT, one host per
+		// line, with `-t <domain> -q`. The `-u <file>` form is not honored by all
+		// builds (it prints to stdout instead), which caused the empty-file "0
+		// subdomains". We now parse STDOUT as the primary source and fall back to
+		// the output file only if stdout was empty. No -t/--threads (unsupported
+		// on some builds).
 		fdOut := filepath.Join(s.OutputFolder, fmt.Sprintf("findomain_%s.txt", sanitizeName(domain)))
 		fdCount := 0
-		res = runner.RunTool(ctx, "findomain", []string{"-t", domain, "-u", fdOut, "-q"}, nil)
-		if res.OK() {
-			lines := readNonEmptyLines(fdOut)
-			if len(lines) == 0 && res.Stdout != "" {
-				// Fallback: parse stdout directly when the file came back empty.
-				lines = strings.Split(res.Stdout, "\n")
+		res = runner.RunTool(ctx, "findomain", []string{"-t", domain, "-q", "-u", fdOut}, nil)
+		if res.OK() || res.TimedOut {
+			// Primary: stdout. Fallback: the -u output file.
+			lines := strings.Split(res.Stdout, "\n")
+			if fileLines := readNonEmptyLines(fdOut); len(fileLines) > 0 {
+				lines = append(lines, fileLines...)
 			}
 			for _, l := range lines {
 				l = strings.ToLower(strings.TrimSpace(l))
@@ -906,14 +952,20 @@ func ensureAmassConfig(s *engine.State) string {
 	cfgPath := filepath.Join(dir, "config.ini")
 	// Minimal config: scope left open, all free data sources enabled. amass
 	// treats a data source with no api key as free/enabled when present here.
-	content := `# Auto-generated by MOHAMMED (BUG #4 fix) — enables free data sources.
+	content := `# Auto-generated by MOHAMMED (BUG #4 fix) — enables free, key-less data sources.
+# amass silently returns 0 results when no config enables any source, so we
+# turn on every source that works WITHOUT an API key.
 [scope]
 
 [data_sources]
 minimum_ttl = 1440
 
-[data_sources.Crtsh]
+[data_sources.CertSpotter]
+[data_sources.CRTsh]
 [data_sources.HackerTarget]
+[data_sources.URLScan]
+[data_sources.PassiveDNS]
+[data_sources.Crtsh]
 [data_sources.RapidDNS]
 [data_sources.AnubisDB]
 [data_sources.ThreatMiner]
@@ -929,6 +981,39 @@ minimum_ttl = 1440
 		return ""
 	}
 	s.Printf("│  amass: wrote minimal free-source config → %s\n", cfgPath)
+	return cfgPath
+}
+
+// ensureGauConfig makes sure gau has a ~/.gau.toml (BUG #4 audit). gau logs
+// `error reading config: ... .gau.toml not found` and falls back to a limited
+// default when the file is missing, which returned 0 URLs for apex domains in
+// the live test. We write a minimal working config enabling the free
+// providers if the user has not supplied one. Returns the config path, or ""
+// if it could not be created (gau then runs with CLI --providers only).
+func ensureGauConfig(s *engine.State) string {
+	home := os.Getenv("HOME")
+	if home == "" {
+		return ""
+	}
+	cfgPath := filepath.Join(home, ".gau.toml")
+	if _, err := os.Stat(cfgPath); err == nil {
+		return cfgPath // respect an existing user config
+	}
+	content := `# Auto-generated by MOHAMMED (BUG #4 fix) — silences the "config not found"
+# warning and enables the free, key-less URL providers.
+providers = ["wayback","commoncrawl","otx","urlscan"]
+threads = 5
+retries = 3
+timeout = 45
+verbose = false
+
+[urlscan]
+apikey = ""
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		return ""
+	}
+	s.Printf("│  gau: wrote minimal free-provider config → %s\n", cfgPath)
 	return cfgPath
 }
 
@@ -1481,13 +1566,21 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 	// union of scope entries and derived apexes, de-duplicated.
 	targets := waybackTargets(s.Scope.Domains)
 
+	// BUG #4 (audit) FIX: create ~/.gau.toml so gau stops warning + falling back
+	// to a degraded default (which returned 0 URLs for the apex in the live run).
+	gauCfg := ensureGauConfig(s)
+
 	for _, domain := range targets {
 		// gau: providers + threads + retries + subs (BUG #10). --subs makes
 		// gau expand to subdomains, which is where the archives actually live.
 		gauArgs := []string{
 			"--threads", "5", "--retries", "3", "--subs",
-			"--providers", "wayback,commoncrawl,otx,urlscan", domain,
+			"--providers", "wayback,commoncrawl,otx,urlscan",
 		}
+		if gauCfg != "" {
+			gauArgs = append(gauArgs, "--config", gauCfg)
+		}
+		gauArgs = append(gauArgs, domain)
 		res := runner.RunTool(ctx, "gau", gauArgs, nil)
 		gauCount := 0
 		if res.OK() || res.TimedOut {
@@ -1503,6 +1596,10 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 			s.Printf("│  gau [%s]: SKIP (%v)\n", domain, res.Err)
 		}
 
+		// BUG #11 (audit): waybackurls is a BONUS source. It frequently returns 0
+		// even when gau (same Wayback data) succeeds, so a 0 result is logged as
+		// informational and never treated as a failure. Correct usage is either
+		// `waybackurls <domain>` or `echo <domain> | waybackurls`.
 		res = runner.RunTool(ctx, "waybackurls", []string{domain}, nil)
 		if res.OK() || res.TimedOut {
 			wbCount := 0
@@ -1513,7 +1610,13 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 					wbCount++
 				}
 			}
-			s.Printf("│  waybackurls [%s]: %d URLs\n", domain, wbCount)
+			if wbCount == 0 {
+				s.Printf("│  waybackurls [%s]: 0 URLs (bonus source — gau/URLScan/CommonCrawl cover this)\n", domain)
+			} else {
+				s.Printf("│  waybackurls [%s]: +%d URLs\n", domain, wbCount)
+			}
+		} else {
+			s.Printf("│  waybackurls [%s]: skipped bonus source (%v)\n", domain, res.Err)
 		}
 	}
 
@@ -1705,15 +1808,33 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 		res = runner.RunTool(ctx, "gospider", goArgs, goEnv)
 		if res.OK() || res.TimedOut {
 			goCount := 0
-			// gospider prints to stdout and to files under goOut (a dir).
-			for _, l := range strings.Split(res.Stdout, "\n") {
-				for _, part := range strings.Fields(l) {
-					if strings.HasPrefix(part, "http") && !crawlURLs[part] {
-						crawlURLs[part] = true
-						goCount++
-					}
+			addURL := func(tok string) {
+				tok = strings.Trim(tok, `"'[]() `)
+				if strings.HasPrefix(tok, "http") && !crawlURLs[tok] {
+					crawlURLs[tok] = true
+					goCount++
 				}
 			}
+			// BUG #5 (audit) FIX: gospider with -q writes results to per-site
+			// files under goOut (a directory) and echoes far less to stdout, so
+			// parsing stdout alone reported "+0 URLs". Parse BOTH: every http(s)
+			// token in stdout AND every http(s) token in each file under goOut.
+			for _, l := range strings.Split(res.Stdout, "\n") {
+				for _, part := range strings.Fields(l) {
+					addURL(part)
+				}
+			}
+			_ = filepath.Walk(goOut, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info == nil || info.IsDir() {
+					return nil
+				}
+				for _, l := range readNonEmptyLines(path) {
+					for _, part := range strings.Fields(l) {
+						addURL(part)
+					}
+				}
+				return nil
+			})
 			s.Printf("│  gospider: +%d URLs\n", goCount)
 		} else {
 			s.Printf("│  gospider: SKIP (%v)\n", res.Err)
@@ -1844,6 +1965,12 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	secretsFound := 0
 	count := 0
+	// BUG #8 (audit) FIX: accumulate the ACTUAL matched value + surrounding
+	// context for every confirmed secret and persist it to
+	// js_secrets_confirmed.txt so a researcher can act on the finding. The old
+	// code only stored "pattern: <label>" with no value, which is useless.
+	secretsFile := filepath.Join(s.OutputFolder, "js_secrets_confirmed.txt")
+	var secretsReport strings.Builder
 	for u := range jsURLs {
 		if count >= 60 { // cap network work
 			break
@@ -1859,20 +1986,33 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 			lowerBody := strings.ToLower(body)
 			for label, pattern := range secretPatterns {
 				match := false
+				idx := -1
 				if strings.HasPrefix(pattern, "AKIA") || strings.HasPrefix(pattern, "-----") {
-					match = strings.Contains(body, pattern) // case-sensitive
+					idx = strings.Index(body, pattern) // case-sensitive
+					match = idx >= 0
 				} else {
-					match = strings.Contains(lowerBody, strings.ToLower(pattern))
+					idx = strings.Index(lowerBody, strings.ToLower(pattern))
+					match = idx >= 0
 				}
 				if match {
+					// Extract the actual matched value and a context window so
+					// the finding carries evidence a human can verify.
+					matchLine, context, value := extractSecretEvidence(body, idx, pattern)
+
 					// A specific high-entropy pattern (AWS key / private key) is
 					// far more trustworthy than a generic "api_key" substring.
 					specific := strings.HasPrefix(pattern, "AKIA") ||
 						strings.HasPrefix(pattern, "-----") || label == "google_api" ||
 						label == "slack_token"
+					evidence := fmt.Sprintf("pattern: %s | match: %s", label, matchLine)
 					f := map[string]interface{}{
 						"title": "Potential Secret in JS", "severity": "High",
-						"url": u, "tool": "js_scanner", "evidence": "pattern: " + label,
+						"url": u, "tool": "js_scanner",
+						"evidence":         evidence,
+						"secret_pattern":   label,
+						"secret_match":     matchLine,
+						"secret_value":     value,
+						"secret_context":   context,
 						"requires_ai":      true,
 						"specific_pattern": specific,
 					}
@@ -1885,6 +2025,10 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 						})
 					if kept {
 						secretsFound++
+						secretsReport.WriteString(fmt.Sprintf(
+							"[SOURCE] %s\n[PATTERN] %s\n[MATCH] %s\n[CONTEXT] %s\n%s\n",
+							u, label, matchLine, context,
+							strings.Repeat("─", 60)))
 					}
 					break
 				}
@@ -1892,8 +2036,83 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 		s.Governor.Throttle()
 	}
+	if secretsReport.Len() > 0 {
+		_ = os.WriteFile(secretsFile, []byte(secretsReport.String()), 0644)
+		s.Printf("│  JS secrets → %s\n", secretsFile)
+	}
 	s.Printf("│  JS secrets confirmed (post-triage): %d\n", secretsFound)
 	return nil
+}
+
+// extractSecretEvidence pulls the human-readable evidence around a matched
+// secret pattern at byte offset idx in body (BUG #8 audit). It returns:
+//   - matchLine: the trimmed source line containing the match (truncated)
+//   - context:   ±40 chars around the match on a single line
+//   - value:     best-effort extracted assigned value (e.g. the "pk_live_…"
+//     from `const K = "pk_live_…"`), or the match line if none is obvious.
+func extractSecretEvidence(body string, idx int, pattern string) (matchLine, context, value string) {
+	if idx < 0 || idx >= len(body) {
+		return "pattern: " + pattern, "", ""
+	}
+	// Line boundaries around idx.
+	lineStart := strings.LastIndexByte(body[:idx], '\n') + 1
+	lineEnd := strings.IndexByte(body[idx:], '\n')
+	if lineEnd < 0 {
+		lineEnd = len(body)
+	} else {
+		lineEnd += idx
+	}
+	matchLine = strings.TrimSpace(body[lineStart:lineEnd])
+	if len(matchLine) > 200 {
+		matchLine = matchLine[:200] + "…"
+	}
+
+	// Context window ±40 chars, kept on one line.
+	cs := idx - 40
+	if cs < 0 {
+		cs = 0
+	}
+	ce := idx + 40
+	if ce > len(body) {
+		ce = len(body)
+	}
+	context = strings.ReplaceAll(strings.TrimSpace(body[cs:ce]), "\n", " ")
+
+	// Best-effort value extraction: find the quoted string on the match line
+	// that CONTAINS the match offset (the pattern may sit inside the value,
+	// e.g. "pk_live_…"), else fall back to the longest quoted token on the line.
+	value = matchLine
+	line := body[lineStart:lineEnd]
+	rel := idx - lineStart // match position within the line
+	best := ""
+	for _, quote := range []byte{'"', '\''} {
+		search := 0
+		for {
+			open := strings.IndexByte(line[search:], quote)
+			if open < 0 {
+				break
+			}
+			open += search
+			closeIdx := strings.IndexByte(line[open+1:], quote)
+			if closeIdx < 0 {
+				break
+			}
+			closeIdx += open + 1
+			candidate := line[open+1 : closeIdx]
+			// Prefer the quoted string that spans the match offset.
+			if rel >= open && rel <= closeIdx && candidate != "" && len(candidate) <= 200 {
+				return matchLine, context, candidate
+			}
+			if len(candidate) > len(best) && len(candidate) <= 200 {
+				best = candidate
+			}
+			search = closeIdx + 1
+		}
+	}
+	if best != "" {
+		value = best
+	}
+	return matchLine, context, value
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1941,11 +2160,19 @@ func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) erro
 			}
 			c := readInto(paramOut)
 			if c == 0 {
-				// Try known default locations.
-				for _, alt := range []string{
+				// BUG #6 (audit): paramspider (devanshbatham) ignores --output on
+				// several builds and always writes to its DEFAULT location
+				// ~/results/<domain>.txt (or ./results/<domain>.txt). Read every
+				// known default so the 482-vs-0 discrepancy disappears.
+				home := os.Getenv("HOME")
+				alts := []string{
 					filepath.Join("results", domain+".txt"),
 					filepath.Join(s.OutputFolder, domain+".txt"),
-				} {
+				}
+				if home != "" {
+					alts = append(alts, filepath.Join(home, "results", domain+".txt"))
+				}
+				for _, alt := range alts {
 					c += readInto(alt)
 				}
 			}
@@ -1955,20 +2182,22 @@ func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) erro
 		}
 	}
 
-	// arjun — scan top parameterized live URLs.
+	// arjun — scan top parameterized live URLs. BUG #7 (audit): cap at 10 (the
+	// most-parameterized ones) and add --stable so arjun re-checks candidate
+	// params for reliable detection instead of returning 0.
 	var arjunTargets []string
 	for _, u := range s.URLs {
 		if strings.HasPrefix(u, "http") {
 			arjunTargets = append(arjunTargets, u)
 		}
-		if len(arjunTargets) >= 15 {
+		if len(arjunTargets) >= 10 {
 			break
 		}
 	}
 	arjunFound := 0
 	for _, u := range arjunTargets {
 		arjunOut := filepath.Join(s.OutputFolder, "arjun_temp.json")
-		res := runner.RunTool(ctx, "arjun", []string{"-u", u, "-oJ", arjunOut, "-q", "-t", "5"}, nil)
+		res := runner.RunTool(ctx, "arjun", []string{"-u", u, "-oJ", arjunOut, "-q", "-t", "5", "--stable"}, nil)
 		if res.OK() {
 			if data, err := os.ReadFile(arjunOut); err == nil {
 				var arjunResult map[string]interface{}
