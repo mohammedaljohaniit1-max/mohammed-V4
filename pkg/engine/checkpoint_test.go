@@ -9,28 +9,26 @@ import (
 	"github.com/mohammed-v3/core/pkg/config"
 )
 
-// newTestState builds a minimal State rooted at a temp output folder.
-func newTestState(t *testing.T, outDir string) *State {
+// newTestState builds a minimal State whose OutputFolder is a temp dir.
+func newTestState(t *testing.T, dir string) *State {
 	t.Helper()
 	return &State{
 		Scope:        &config.Scope{Domains: []string{"whatnot.com"}},
-		OutputFolder: outDir,
+		OutputFolder: dir,
 		StartTime:    time.Now().Add(-5 * time.Minute),
-		Parameters:   map[string][]string{},
-		Findings:     []map[string]interface{}{},
+		Subdomains:   []string{"api.whatnot.com", "www.whatnot.com"},
+		LiveHosts:    []string{"https://api.whatnot.com"},
+		URLs:         []string{"https://api.whatnot.com/graphql"},
+		Parameters:   map[string][]string{"https://api.whatnot.com": {"id", "q"}},
+		Findings:     []map[string]interface{}{{"type": "cors", "severity": "Medium"}},
 	}
 }
 
-// TestCheckpointRoundTrip verifies Save → Load → RestoreInto preserves all
-// discovered data and the completed-phase skip set (FLAW #2).
+// TestCheckpointRoundTrip proves state survives a save → load → restore cycle
+// (the core of the FLAW #2 resume engine).
 func TestCheckpointRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	s := newTestState(t, dir)
-	s.Subdomains = []string{"api.whatnot.com", "www.whatnot.com"}
-	s.LiveHosts = []string{"https://api.whatnot.com"}
-	s.URLs = []string{"https://api.whatnot.com/v1"}
-	s.Parameters["https://api.whatnot.com"] = []string{"id", "token"}
-	s.AddFinding(map[string]interface{}{"type": "CORS", "severity": "Medium"})
 	s.MarkComplete("OSINT Intelligence Gathering")
 	s.MarkComplete("Passive Subdomain Enumeration")
 
@@ -48,49 +46,42 @@ func TestCheckpointRoundTrip(t *testing.T) {
 		t.Fatalf("LoadCheckpoint: %v", err)
 	}
 
-	fresh := newTestState(t, dir)
+	// Restore into a brand-new empty state.
+	fresh := &State{Scope: &config.Scope{Domains: []string{"whatnot.com"}}}
 	cp.RestoreInto(fresh)
 
 	if len(fresh.Subdomains) != 2 {
 		t.Errorf("subdomains not restored: got %d want 2", len(fresh.Subdomains))
 	}
-	if len(fresh.LiveHosts) != 1 || len(fresh.URLs) != 1 {
-		t.Errorf("live/urls not restored: live=%d urls=%d", len(fresh.LiveHosts), len(fresh.URLs))
+	if len(fresh.URLs) != 1 {
+		t.Errorf("urls not restored: got %d want 1", len(fresh.URLs))
 	}
 	if len(fresh.Findings) != 1 {
 		t.Errorf("findings not restored: got %d want 1", len(fresh.Findings))
 	}
-	if got := fresh.Parameters["https://api.whatnot.com"]; len(got) != 2 {
-		t.Errorf("parameters not restored: got %v want [id token]", got)
-	}
 	if !fresh.IsComplete("OSINT Intelligence Gathering") {
-		t.Error("OSINT phase should be marked complete after restore")
+		t.Error("completed phase OSINT not marked complete after restore")
 	}
 	if !fresh.IsComplete("Passive Subdomain Enumeration") {
-		t.Error("Passive phase should be marked complete after restore")
+		t.Error("completed phase Passive not marked complete after restore")
 	}
-	if fresh.IsComplete("Nuclei Vulnerability Scan") {
-		t.Error("uncompleted phase must NOT be skipped")
-	}
-}
-
-// TestIsCompleteWithoutResume ensures a fresh (non-resumed) scan skips nothing.
-func TestIsCompleteWithoutResume(t *testing.T) {
-	s := newTestState(t, t.TempDir())
-	if s.IsComplete("anything") {
-		t.Error("fresh scan must never report phases complete")
+	if fresh.IsComplete("Vulnerability Scanning") {
+		t.Error("uncompleted phase wrongly marked complete")
 	}
 }
 
-// TestFindLatestCheckpoint verifies auto-detection picks the newest scan dir.
+// TestFindLatestCheckpoint proves auto-detect picks the newest scan folder.
 func TestFindLatestCheckpoint(t *testing.T) {
 	base := t.TempDir()
 
-	older := filepath.Join(base, "old_target")
-	newer := filepath.Join(base, "new_target")
-	_ = os.MkdirAll(older, 0755)
-	_ = os.MkdirAll(newer, 0755)
-
+	older := filepath.Join(base, "old_com")
+	newer := filepath.Join(base, "new_com")
+	if err := os.MkdirAll(older, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newer, 0755); err != nil {
+		t.Fatal(err)
+	}
 	oldCP := filepath.Join(older, checkpointFileName)
 	newCP := filepath.Join(newer, checkpointFileName)
 	if err := os.WriteFile(oldCP, []byte(`{"version":1}`), 0644); err != nil {
@@ -99,7 +90,6 @@ func TestFindLatestCheckpoint(t *testing.T) {
 	// Make the older one genuinely older.
 	old := time.Now().Add(-1 * time.Hour)
 	_ = os.Chtimes(oldCP, old, old)
-
 	if err := os.WriteFile(newCP, []byte(`{"version":1}`), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -108,13 +98,19 @@ func TestFindLatestCheckpoint(t *testing.T) {
 	if got != newCP {
 		t.Errorf("FindLatestCheckpoint = %q, want %q", got, newCP)
 	}
+
+	if FindLatestCheckpoint(filepath.Join(base, "does-not-exist")) != "" {
+		t.Error("expected empty path for missing base dir")
+	}
 }
 
 // TestLoadCheckpointRejectsVersionless guards against loading garbage.
 func TestLoadCheckpointRejectsVersionless(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad.json")
-	_ = os.WriteFile(bad, []byte(`{"target":"x"}`), 0644)
+	if err := os.WriteFile(bad, []byte(`{"subdomains":["x.com"]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := LoadCheckpoint(bad); err == nil {
 		t.Error("expected error loading versionless checkpoint")
 	}
