@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
@@ -1111,6 +1112,18 @@ func (p *ReportPhase) Description() string {
 	return "Generates Markdown + JSON summary with all findings and AI verdicts"
 }
 func (p *ReportPhase) Execute(ctx context.Context, s *engine.State) error {
+	// BUG #9 (audit) FIX: delete any stale report artifacts from a PREVIOUS scan
+	// into the same output folder BEFORE writing, so the report can never show
+	// old (e.g. July-23) findings. os.WriteFile truncates, but an explicit
+	// remove also clears tiered .txt reports that a shorter new scan would not
+	// otherwise overwrite.
+	for _, stale := range []string{
+		"final_report.md", "final_report.json",
+		"CONFIRMED_VULNS.txt", "MANUAL_REVIEW.txt",
+	} {
+		_ = os.Remove(filepath.Join(s.OutputFolder, stale))
+	}
+
 	counts := map[string]int{"Critical": 0, "High": 0, "Medium": 0, "Low": 0, "Info": 0}
 	for _, f := range s.Findings {
 		sev := fmt.Sprintf("%v", f["severity"])
@@ -1119,6 +1132,10 @@ func (p *ReportPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	var b strings.Builder
 	b.WriteString("# MOHAMMED v4 — Scan Report\n\n")
+	// BUG #9 (audit): a scan-date/duration header proves the report is fresh.
+	duration := time.Since(s.StartTime).Round(time.Second)
+	b.WriteString(fmt.Sprintf("**Scan Date:** %s | **Duration:** %s | **Tool Version:** v4\n\n",
+		s.StartTime.Format("2006-01-02 15:04:05 MST"), duration))
 	b.WriteString("## Summary\n\n")
 	b.WriteString("| Metric | Count |\n|---|---|\n")
 	b.WriteString(fmt.Sprintf("| Subdomains | %d |\n", len(s.Subdomains)))
@@ -1142,6 +1159,13 @@ func (p *ReportPhase) Execute(ctx context.Context, s *engine.State) error {
 			b.WriteString(fmt.Sprintf("- URL: %v\n", f["url"]))
 			b.WriteString(fmt.Sprintf("- Tool: %v\n", f["tool"]))
 			b.WriteString(fmt.Sprintf("- Evidence: %v\n", f["evidence"]))
+			// BUG #8 (audit): surface the real secret value/context in the report.
+			if v, ok := f["secret_value"]; ok && fmt.Sprintf("%v", v) != "" {
+				b.WriteString(fmt.Sprintf("- Secret Value: `%v`\n", v))
+			}
+			if v, ok := f["secret_context"]; ok && fmt.Sprintf("%v", v) != "" {
+				b.WriteString(fmt.Sprintf("- Context: `%v`\n", v))
+			}
 			if v, ok := f["ai_verdict"]; ok {
 				b.WriteString(fmt.Sprintf("- AI Verdict: %v\n", v))
 			}

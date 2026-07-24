@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +84,45 @@ func (s *State) IsComplete(name string) bool {
 		return false
 	}
 	return s.completedSet[name]
+}
+
+// IsResumed reports whether this run was restored from a checkpoint. A nil
+// completedSet means no checkpoint was loaded (a fresh scan).
+func (s *State) IsResumed() bool {
+	return s.completedSet != nil
+}
+
+// CleanStaleResults deletes result .txt/report artifacts left over from a
+// PREVIOUS scan into the same output folder (BUG #10 audit). It runs ONLY on a
+// fresh scan (never on --resume, which must keep prior-phase artifacts intact).
+// The checkpoint.json itself is preserved so an accidental fresh run can still
+// be recovered.
+func (s *State) CleanStaleResults() int {
+	if s.IsResumed() {
+		return 0 // never wipe artifacts we are resuming from
+	}
+	entries, err := os.ReadDir(s.OutputFolder)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if name == "checkpoint.json" {
+			continue // keep the recovery point
+		}
+		if strings.HasSuffix(name, ".txt") ||
+			strings.HasSuffix(name, ".json") ||
+			strings.HasSuffix(name, ".md") {
+			if os.Remove(filepath.Join(s.OutputFolder, name)) == nil {
+				removed++
+			}
+		}
+	}
+	return removed
 }
 
 func NewState(cfg *config.Config, scope *config.Scope) *State {
@@ -274,8 +315,19 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED v3 Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED v4 Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
+
+	// BUG #10 (audit) FIX: on a FRESH scan, purge stale result files from a
+	// previous scan into the same folder so no old .txt/.json/.md data (e.g.
+	// last week's sqli_results.txt with __cf_chl URLs) pollutes this run. This
+	// is a no-op on --resume (IsResumed guard) so we never delete data we are
+	// restoring from.
+	if !o.State.IsResumed() {
+		if n := o.State.CleanStaleResults(); n > 0 {
+			fmt.Printf("[+] Fresh scan: cleared %d stale result file(s) from %s\n", n, o.State.OutputFolder)
+		}
+	}
 
 	// ── Burp Suite connectivity check ────────────────────
 	//

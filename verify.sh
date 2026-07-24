@@ -533,6 +533,83 @@ check_grep pkg/phases/phases.go 'out_of_scope_urls.txt' \
     "GENIUS #5: scope-drift out_of_scope_urls.txt present" \
     "GENIUS #5: scope-drift capture MISSING"
 
+# ── Section 16: Tool Integration Fixes (audit — 11 confirmed bugs) ────
+hdr "16. Tool Integration Fixes (11 audit bugs)"
+
+# #1 amass: auto-config + retry-on-zero
+check_grep pkg/phases/phases.go 'func ensureAmassConfig' \
+    "TOOL #1: ensureAmassConfig present (amass free-source config)" \
+    "TOOL #1: ensureAmassConfig MISSING"
+check_grep pkg/phases/phases.go 'retrying once with auto-created' \
+    "TOOL #1: amass retry-on-zero present" \
+    "TOOL #1: amass retry-on-zero MISSING"
+# #2 bbot: -om json + DNS_NAME ndjson parse
+check_grep pkg/phases/phases.go '"-om", "json"' \
+    "TOOL #2: bbot emits JSON (-om json)" \
+    "TOOL #2: bbot -om json MISSING"
+check_grep pkg/phases/phases.go 'ev.Type == "DNS_NAME"' \
+    "TOOL #2: bbot parses ndjson DNS_NAME events" \
+    "TOOL #2: bbot DNS_NAME parse MISSING"
+# #3 findomain: stdout primary
+check_grep pkg/phases/phases.go 'findomain reliably writes to STDOUT' \
+    "TOOL #3: findomain stdout-primary parse present" \
+    "TOOL #3: findomain stdout parse MISSING"
+# #4 gau: ~/.gau.toml
+check_grep pkg/phases/phases.go 'func ensureGauConfig' \
+    "TOOL #4: ensureGauConfig present (~/.gau.toml)" \
+    "TOOL #4: ensureGauConfig MISSING"
+check_grep pkg/phases/phases.go '"--config", gauCfg' \
+    "TOOL #4: gau invoked with --config" \
+    "TOOL #4: gau --config wiring MISSING"
+# #5 gospider: parse output dir files
+check_grep pkg/phases/phases.go 'filepath.Walk\(goOut' \
+    "TOOL #5: gospider parses output-dir files" \
+    "TOOL #5: gospider dir parse MISSING"
+# #6 paramspider: HOME/results default
+check_grep pkg/phases/phases.go 'filepath.Join\(home, "results"' \
+    "TOOL #6: paramspider reads ~/results/<domain>.txt" \
+    "TOOL #6: paramspider default-path read MISSING"
+# #7 arjun: --stable + cap 10
+check_grep pkg/phases/phases.go '"--stable"' \
+    "TOOL #7: arjun --stable present" \
+    "TOOL #7: arjun --stable MISSING"
+check_grep pkg/phases/phases.go 'len\(arjunTargets\) >= 10' \
+    "TOOL #7: arjun capped at 10 URLs" \
+    "TOOL #7: arjun cap-10 MISSING"
+# #8 JS secrets: value+context saved
+check_grep pkg/phases/phases.go 'js_secrets_confirmed.txt' \
+    "TOOL #8: js_secrets_confirmed.txt written" \
+    "TOOL #8: js_secrets_confirmed.txt MISSING"
+check_grep pkg/phases/phases.go 'func extractSecretEvidence' \
+    "TOOL #8: extractSecretEvidence (value+context) present" \
+    "TOOL #8: extractSecretEvidence MISSING"
+# #9 report: delete stale + timestamp header
+check_grep pkg/phases/phases_vuln.go 'delete any stale report artifacts' \
+    "TOOL #9: report deletes stale artifacts before write" \
+    "TOOL #9: report stale-delete MISSING"
+check_grep pkg/phases/phases_vuln.go 'Scan Date:' \
+    "TOOL #9: report has scan-date/duration header" \
+    "TOOL #9: report timestamp header MISSING"
+# #10 CleanStaleResults (fresh-scan only)
+check_grep pkg/engine/engine.go 'func \(s \*State\) CleanStaleResults' \
+    "TOOL #10: CleanStaleResults present" \
+    "TOOL #10: CleanStaleResults MISSING"
+check_grep pkg/engine/engine.go 'IsResumed\(\)' \
+    "TOOL #10: fresh-vs-resume guard (IsResumed) present" \
+    "TOOL #10: IsResumed guard MISSING"
+# #11 waybackurls: bonus (0 not failure)
+check_grep pkg/phases/phases.go 'bonus source' \
+    "TOOL #11: waybackurls demoted to bonus source" \
+    "TOOL #11: waybackurls bonus demotion MISSING"
+# unit tests for #8 / #10
+if command -v go >/dev/null 2>&1; then
+    if go test ./pkg/phases/ ./pkg/engine/ >/dev/null 2>&1; then
+        pass "TOOL #8/#10: unit tests pass (extractSecretEvidence + CleanStaleResults)"
+    else
+        fail "TOOL #8/#10: unit tests FAILED"
+    fi
+fi
+
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}╔═══════════════════════════════════════════════════╗${NC}"

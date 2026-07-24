@@ -111,3 +111,50 @@ func TestLoadCheckpointRejectsUnversioned(t *testing.T) {
 		t.Fatal("expected error loading unversioned checkpoint, got nil")
 	}
 }
+
+// TestCleanStaleResultsFreshScan proves BUG #10 (audit): a fresh scan wipes
+// stale .txt/.json/.md result files from a prior scan but PRESERVES
+// checkpoint.json.
+func TestCleanStaleResultsFreshScan(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestState(t, dir) // completedSet nil ⇒ fresh scan
+
+	write := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("old"), 0644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	write("sqli_results.txt")
+	write("final_report.md")
+	write("final_report.json")
+	write("checkpoint.json") // must survive
+
+	removed := s.CleanStaleResults()
+	if removed != 3 {
+		t.Errorf("expected 3 stale files removed, got %d", removed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "checkpoint.json")); err != nil {
+		t.Errorf("checkpoint.json must be preserved, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sqli_results.txt")); err == nil {
+		t.Errorf("sqli_results.txt should have been removed")
+	}
+}
+
+// TestCleanStaleResultsResumeIsNoOp proves CleanStaleResults NEVER deletes
+// artifacts on a resumed scan (completedSet != nil).
+func TestCleanStaleResultsResumeIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	s := newTestState(t, dir)
+	s.completedSet = map[string]bool{"OSINT Intelligence Gathering": true} // resumed
+
+	if err := os.WriteFile(filepath.Join(dir, "sqli_results.txt"), []byte("x"), 0644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if removed := s.CleanStaleResults(); removed != 0 {
+		t.Errorf("resume must be a no-op, but removed %d files", removed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sqli_results.txt")); err != nil {
+		t.Errorf("resume must keep prior artifacts, got err=%v", err)
+	}
+}
