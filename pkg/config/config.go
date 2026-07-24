@@ -27,6 +27,13 @@ type Config struct {
 	Debug      bool
 	APIKeys    APIKeys
 	Ollama     OllamaConfig
+
+	// Zero-false-positive controls (FIX #5/#1/#2/#7).
+	SelectiveProxyRouting          bool
+	StripCloudflareParams          bool
+	EnforceScopeOnJS               bool
+	RequireConfirmationForCritical bool
+	WAFBypass                      bool // --waf-bypass (Genius #4)
 }
 
 type APIKeys struct {
@@ -48,9 +55,30 @@ type OllamaConfig struct {
 	Timeout     int     `yaml:"timeout"`
 }
 
+// ProxyConfig controls the two-tier Burp routing (FIX #5).
+type ProxyConfig struct {
+	// SelectiveRouting turns on the Tier-1 (direct) / Tier-2 (Burp) split.
+	SelectiveRouting bool `yaml:"selective_routing"`
+}
+
+// FilterConfig controls the zero-false-positive filtering (FIX #1/#2).
+type FilterConfig struct {
+	StripCloudflareParams bool `yaml:"strip_cloudflare_params"`
+	EnforceScopeOnJS      bool `yaml:"enforce_scope_on_js"`
+}
+
+// AIExtra holds the require-confirmation-for-critical toggle (FIX #7). It is
+// separate from OllamaConfig so the existing ollama block is untouched.
+type AIExtra struct {
+	RequireConfirmationForCritical bool `yaml:"require_confirmation_for_critical"`
+}
+
 type YAMLConfig struct {
 	APIKeys APIKeys      `yaml:"api_keys"`
 	Ollama  OllamaConfig `yaml:"ollama"`
+	Proxy   ProxyConfig  `yaml:"proxy"`
+	Filter  FilterConfig `yaml:"filter"`
+	AIExtra AIExtra      `yaml:"ai"`
 }
 
 func LoadYAMLConfig(path string) (*YAMLConfig, error) {

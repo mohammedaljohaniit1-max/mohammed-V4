@@ -384,7 +384,9 @@ check_grep cmd/mohammed/main.go 'DeepReconPhase' \
     "main.go: DeepReconPhase NOT registered"
 
 # FLAW #5 — gospider + katana proxy env inheritance
-check_grep pkg/phases/phases.go 's.Proxy.GetEnv\(\)' \
+# (Under FIX #5 two-tier routing the crawl phase uses a Tier-1 `px` handle, so
+# the env call is now px.GetEnv(); accept either form.)
+check_grep pkg/phases/phases.go '(s\.Proxy|px)\.GetEnv\(\)' \
     "phases.go: crawl tools inherit HTTP(S)_PROXY env (FLAW #5)" \
     "phases.go: crawl proxy env MISSING (FLAW #5)"
 check_grep pkg/phases/phases.go '"katana", katArgs, katEnv' \
@@ -429,6 +431,107 @@ for rp in /usr/share/seclists/Miscellaneous/dns-resolvers.txt \
     fi
 done
 [ "$RES_FOUND" -eq 0 ] && warn "No resolvers file found — puredns/dnsx will use built-in fallback (run setup.sh)"
+
+# ── Section 15: Zero-FP Architecture (9 mandatory fixes) ─────────────
+hdr "15. Zero False-Positive Architecture (FIX #1-#9)"
+
+# FIX #1 — Cloudflare / noisy-param stripper + challenge detector
+check_grep pkg/filter/scope.go 'func StripNoisyParams' \
+    "FIX #1: StripNoisyParams present (CF/analytics param stripper)" \
+    "FIX #1: StripNoisyParams MISSING"
+check_grep pkg/filter/scope.go 'func IsCloudflareChallenge' \
+    "FIX #1: IsCloudflareChallenge present (CF challenge URLs never to sqlmap)" \
+    "FIX #1: IsCloudflareChallenge MISSING"
+check_grep pkg/filter/scope.go '__cf_chl_rt_tk' \
+    "FIX #1: __cf_chl_rt_tk token stripped (FP #1 root cause)" \
+    "FIX #1: __cf_chl_rt_tk NOT handled (FP #1)"
+
+# FIX #2 — absolute scope enforcement
+check_grep pkg/filter/scope.go 'func IsInScope' \
+    "FIX #2: IsInScope present (exact host or verified subdomain)" \
+    "FIX #2: IsInScope MISSING"
+check_grep pkg/filter/scope.go 'func FilterInScopeURLs' \
+    "FIX #2: FilterInScopeURLs present" \
+    "FIX #2: FilterInScopeURLs MISSING"
+check_grep pkg/phases/phases.go 'EnforceScopeOnJS' \
+    "FIX #2: JS scan honours in-scope filter (FP #2 CDN secrets)" \
+    "FIX #2: JS scope enforcement MISSING (FP #2)"
+
+# FIX #3 — confidence scoring 0-100 with report/review/discard gates
+check_grep pkg/filter/confidence.go 'func CalculateConfidence' \
+    "FIX #3: CalculateConfidence present (0-100 scoring)" \
+    "FIX #3: CalculateConfidence MISSING"
+check_grep pkg/filter/confidence.go 'func ApplyConfidencePolicy' \
+    "FIX #3: ApplyConfidencePolicy present (>=70 report / 40-69 Info / <40 discard)" \
+    "FIX #3: ApplyConfidencePolicy MISSING"
+
+# FIX #4 — sensitive-file validator (HTTP 200 != real file)
+check_grep pkg/phases/zerofp.go 'func ValidateSensitiveFile' \
+    "FIX #4: ValidateSensitiveFile present (rejects WAF/CF error pages, FP #5)" \
+    "FIX #4: ValidateSensitiveFile MISSING (FP #5)"
+check_grep pkg/phases/zerofp.go 'been blocked|Attention Required|Ray ID' \
+    "FIX #4: WAF/Cloudflare fingerprints rejected" \
+    "FIX #4: WAF fingerprint rejection MISSING"
+
+# FIX #5 — two-tier Burp routing
+check_grep pkg/proxy/proxy.go 'ProxyModeDirect|ProxyModeSelective' \
+    "FIX #5: ProxyMode (Direct/Selective) present" \
+    "FIX #5: ProxyMode MISSING"
+check_grep pkg/engine/engine.go 'func \(s \*State\) PhaseProxy' \
+    "FIX #5: State.PhaseProxy tier selector present" \
+    "FIX #5: PhaseProxy MISSING"
+check_grep config.yaml 'selective_routing' \
+    "FIX #5: config.yaml proxy.selective_routing present" \
+    "FIX #5: config.yaml selective_routing MISSING"
+
+# FIX #6 — WAF detection + sqlmap sanity/cap
+check_grep pkg/phases/zerofp.go 'func DetectWAF' \
+    "FIX #6: DetectWAF present (probe before sqlmap/ghauri)" \
+    "FIX #6: DetectWAF MISSING"
+check_grep pkg/phases/zerofp.go 'func PrepareSQLiURLs' \
+    "FIX #6: PrepareSQLiURLs present (CF-strip + scope + cap 5)" \
+    "FIX #6: PrepareSQLiURLs MISSING"
+
+# FIX #7 — Ollama startup probe + downgrade
+check_grep pkg/ai/triage.go 'func \(c \*Client\) Ping' \
+    "FIX #7: AI Ping (one-time startup connectivity check) present" \
+    "FIX #7: AI Ping MISSING"
+check_grep pkg/engine/engine.go 'AIOnline' \
+    "FIX #7: State.AIOnline gate present" \
+    "FIX #7: AIOnline MISSING"
+check_grep pkg/engine/engine.go 'AI: REJECTED' \
+    "FIX #7: AI REJECTED logging present" \
+    "FIX #7: AI REJECTED logging MISSING"
+
+# FIX #8 — CORS scope enforcement
+check_grep pkg/phases/phases.go 'CORS scope filter' \
+    "FIX #8: CORS scope filter log present (out-of-scope hosts removed)" \
+    "FIX #8: CORS scope filter MISSING"
+
+# FIX #9 — tiered exporter
+check_grep pkg/report/exporter.go 'CONFIRMED_VULNS.txt' \
+    "FIX #9: CONFIRMED_VULNS.txt exporter present" \
+    "FIX #9: CONFIRMED_VULNS.txt exporter MISSING"
+check_grep pkg/report/exporter.go 'MANUAL_REVIEW.txt' \
+    "FIX #9: MANUAL_REVIEW.txt exporter present" \
+    "FIX #9: MANUAL_REVIEW.txt exporter MISSING"
+
+# GENIUS recommendations
+check_grep pkg/phases/zerofp.go 'func IsHoneypotOrSink' \
+    "GENIUS #1: anti-honeypot (IsHoneypotOrSink) present" \
+    "GENIUS #1: IsHoneypotOrSink MISSING"
+check_grep pkg/filter/scope.go 'func DeduplicateByBehavior' \
+    "GENIUS #2: behavioral dedup present" \
+    "GENIUS #2: DeduplicateByBehavior MISSING"
+check_grep pkg/filter/scope.go 'func IsStaticAsset' \
+    "GENIUS #3: response fingerprint / static-asset filter present" \
+    "GENIUS #3: IsStaticAsset MISSING"
+check_grep cmd/mohammed/main.go 'waf-bypass' \
+    "GENIUS #4: --waf-bypass flag present (sqlmap tamper)" \
+    "GENIUS #4: --waf-bypass flag MISSING"
+check_grep pkg/phases/phases.go 'out_of_scope_urls.txt' \
+    "GENIUS #5: scope-drift out_of_scope_urls.txt present" \
+    "GENIUS #5: scope-drift capture MISSING"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

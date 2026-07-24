@@ -12,6 +12,8 @@ import (
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
+	"github.com/mohammed-v3/core/pkg/filter"
+	"github.com/mohammed-v3/core/pkg/proxy"
 	"github.com/mohammed-v3/core/pkg/runner"
 )
 
@@ -1102,8 +1104,24 @@ func (p *TakeoverPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	// subzy writes JSON. Parse it; fall back to line scan if not JSON.
 	candidates := parseSubzyVulnerable(takeoverOut)
+	// FIX #2 (FP #3): only consider in-scope takeover candidates.
+	if s.Scope != nil {
+		var kept []string
+		removed := 0
+		for _, host := range candidates {
+			if filter.IsInScope(host, s.Scope) {
+				kept = append(kept, host)
+			} else {
+				removed++
+			}
+		}
+		candidates = kept
+		if removed > 0 {
+			s.Printf("│  Takeover scope filter: %d out-of-scope candidate(s) removed\n", removed)
+		}
+	}
 	if len(candidates) == 0 {
-		s.Printf("│  subzy: 0 candidate takeovers\n")
+		s.Printf("│  subzy: 0 in-scope candidate takeovers\n")
 		return nil
 	}
 	s.Printf("│  subzy: %d candidate(s) — running HTTP confirmation…\n", len(candidates))
@@ -1114,21 +1132,31 @@ func (p *TakeoverPhase) Execute(ctx context.Context, s *engine.State) error {
 		f := map[string]interface{}{
 			"title": "Subdomain Takeover", "url": host,
 			"tool": "subzy+http-confirm", "evidence": evidence,
+			"http_confirmed": httpConfirmed, "requires_ai": true,
+			"specific_pattern": httpConfirmed,
 		}
 		if httpConfirmed {
 			f["severity"] = "Critical"
-			// Second gate: AI triage before we commit to Critical.
-			s.Triage(ctx, "Subdomain Takeover", host, evidence, f)
-			confirmed++
+			// FIX #4 (FP #4): subzy alone is NOT enough. Require HTTP fingerprint
+			// AND AI confirmation. TriageAndScore downgrades an AI-offline or
+			// low-confidence Critical to Unverified-Critical Info via the
+			// confidence policy — it is never reported as a confirmed takeover
+			// without a REAL AI verdict.
+			if s.TriageAndScore(ctx, "Subdomain Takeover", host, evidence, f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+				confirmed++
+			}
 		} else {
 			// Not confirmed by HTTP → Info, but keep for the record.
 			f["severity"] = "Info"
 			f["ai_verdict"] = "unconfirmed_by_http"
-			s.AddFinding(f)
+			if filter.ApplyConfidencePolicy(f, s.Scope) {
+				s.AddFinding(f)
+			}
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  Takeover: %d candidate(s), %d HTTP-confirmed Critical\n", len(candidates), confirmed)
+	s.Printf("│  Takeover: %d candidate(s), %d confirmed (HTTP+AI, in-scope)\n", len(candidates), confirmed)
 	return nil
 }
 
@@ -1190,6 +1218,9 @@ func (p *HTTPProbePhase) Description() string {
 	return "httpx: status codes, titles, tech detect, CDN (Burp-aware routing)"
 }
 func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
+	// FIX #5 (Tier 2): httpx probes a small, targeted host set — route through
+	// Burp so a researcher sees the live-host confirmation traffic.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	hostsFile := filepath.Join(s.OutputFolder, "live_dns.txt")
 	if ok, _ := fileHasContent(hostsFile); !ok {
 		hostsFile = filepath.Join(s.OutputFolder, "subdomains.txt")
@@ -1214,8 +1245,8 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 	// reaching this branch means Burp really is up. This is the ONLY correct
 	// way to route httpx through a proxy (it has no -insecure flag; it tolerates
 	// the proxy CA by default).
-	if s.Proxy.Active {
-		args = append(args, "-http-proxy", s.Proxy.ProxyURL)
+	if px.Active {
+		args = append(args, "-http-proxy", px.ProxyURL)
 	}
 
 	res := runner.RunTool(ctx, "httpx", args, nil)
@@ -1277,6 +1308,8 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 // ones that answer. Bounded to the first 200 hosts to stay fast. Honors an
 // active proxy so it still works behind a reachable Burp.
 func directProbe(ctx context.Context, s *engine.State, hosts []string) []string {
+	// Part of the Phase 07 live-host verification path → Tier 2 (Burp-aware).
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	var (
 		mu    sync.Mutex
 		wg    sync.WaitGroup
@@ -1304,8 +1337,8 @@ func directProbe(ctx context.Context, s *engine.State, hosts []string) []string 
 			for _, scheme := range []string{"https://", "http://"} {
 				curlArgs := []string{"-s", "-o", "/dev/null", "-w", "%{http_code}",
 					"-m", "10", "-L", "-A", "Mozilla/5.0", "-k"}
-				if s.Proxy.Active {
-					curlArgs = append(curlArgs, "-x", s.Proxy.ProxyURL)
+				if px.Active {
+					curlArgs = append(curlArgs, "-x", px.ProxyURL)
 				}
 				curlArgs = append(curlArgs, scheme+host)
 				res := runner.RunTool(ctx, "curl", curlArgs, nil)
@@ -1608,6 +1641,9 @@ func (p *CrawlPhase) Description() string {
 	return "katana + gospider deep crawl on live endpoints (empty-input guarded)"
 }
 func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
+	// FIX #5 (Tier 1): crawling generates hundreds of noisy URLs — NEVER route
+	// katana/gospider through Burp (px is inert when selective routing is on).
+	px := s.PhaseProxy(proxy.ProxyModeDirect)
 	urlsFile := filepath.Join(s.OutputFolder, "http_live.txt")
 	ok, n := fileHasContent(urlsFile)
 	if !ok {
@@ -1636,9 +1672,9 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 	// client that ignores -proxy still routes through Burp. GetEnv() is nil
 	// without --burp, so this is a no-op when no proxy is configured.
 	var katEnv map[string]string
-	if s.Proxy.Active {
-		katArgs = append(katArgs, "-proxy", s.Proxy.ProxyURL)
-		katEnv = s.Proxy.GetEnv()
+	if px.Active {
+		katArgs = append(katArgs, "-proxy", px.ProxyURL)
+		katEnv = px.GetEnv()
 	}
 	res := runner.RunTool(ctx, "katana", katArgs, katEnv)
 	if res.OK() || res.TimedOut {
@@ -1662,9 +1698,9 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 		// routes through Burp. GetEnv() returns nil when no proxy is set, so
 		// this is a no-op without --burp (no double-proxy risk).
 		var goEnv map[string]string
-		if s.Proxy.Active {
-			goArgs = append(goArgs, "-p", s.Proxy.ProxyURL)
-			goEnv = s.Proxy.GetEnv()
+		if px.Active {
+			goArgs = append(goArgs, "-p", px.ProxyURL)
+			goEnv = px.GetEnv()
 		}
 		res = runner.RunTool(ctx, "gospider", goArgs, goEnv)
 		if res.OK() || res.TimedOut {
@@ -1692,8 +1728,24 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	crawlFile := filepath.Join(s.OutputFolder, "urls_crawled.txt")
 	writeLines(crawlFile, lines)
+
+	// Genius #5 (scope-drift detection): separate in-scope from out-of-scope
+	// crawled URLs. Out-of-scope hits are recorded to out_of_scope_urls.txt for
+	// audit but NEVER enter s.URLs, so every downstream vuln phase operates on a
+	// scope-clean corpus (FIX #2). CDNs like squarespace/cloudfront and
+	// unrelated hosts (grillservice) drop out here.
+	if s.Scope != nil {
+		inScope, _ := filter.FilterInScopeURLs(lines, s.Scope)
+		drift := filter.OutOfScopeURLs(lines, s.Scope)
+		if len(drift) > 0 {
+			driftFile := filepath.Join(s.OutputFolder, "out_of_scope_urls.txt")
+			writeLines(driftFile, drift)
+			s.Printf("│  Scope-drift: %d out-of-scope URLs recorded to out_of_scope_urls.txt\n", len(drift))
+		}
+		lines = inScope
+	}
 	s.URLs = append(s.URLs, lines...)
-	s.Printf("│  Total Crawled URLs: %d\n", len(crawlURLs))
+	s.Printf("│  Total in-scope crawled URLs: %d\n", len(lines))
 	return nil
 }
 
@@ -1730,6 +1782,8 @@ func (p *JSAnalysisPhase) Description() string {
 	return "Extract JS files, scan for API keys/tokens/secrets"
 }
 func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
+	// FIX #5 (Tier 2): JS fetching for confirmed in-scope domains is high-value.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	jsURLs := make(map[string]bool)
 	for _, u := range s.URLs {
 		if strings.HasSuffix(u, ".js") || strings.Contains(u, ".js?") {
@@ -1754,13 +1808,28 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 	}
 
+	// FIX #2 / FP #2: ONLY scan JS files served from in-scope domains. This
+	// eliminates the squarespace.com / cloudfront.net "secret" false positives
+	// — finding "api_key" inside a third-party CDN library is meaningless.
+	if s.Config.EnforceScopeOnJS {
+		beforeJS := len(jsURLs)
+		for u := range jsURLs {
+			if !filter.IsInScope(u, s.Scope) {
+				delete(jsURLs, u)
+			}
+		}
+		if removed := beforeJS - len(jsURLs); removed > 0 {
+			s.Printf("│  Scope filter: %d out-of-scope JS files removed (CDN/third-party)\n", removed)
+		}
+	}
+
 	jsFile := filepath.Join(s.OutputFolder, "js_files.txt")
 	var jsLines []string
 	for u := range jsURLs {
 		jsLines = append(jsLines, u)
 	}
 	writeLines(jsFile, jsLines)
-	s.Printf("│  JS files found: %d\n", len(jsURLs))
+	s.Printf("│  JS files found (in-scope): %d\n", len(jsURLs))
 
 	secretPatterns := map[string]string{
 		"aws_access_key":  `AKIA[0-9A-Z]{16}`,
@@ -1781,8 +1850,8 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 		count++
 		args := []string{"-s", "-m", "12", "-A", "Mozilla/5.0", u}
-		if s.Proxy.Active {
-			args = append([]string{"-x", s.Proxy.ProxyURL, "-k"}, args...)
+		if px.Active {
+			args = append([]string{"-x", px.ProxyURL, "-k"}, args...)
 		}
 		res := runner.RunTool(ctx, "curl", args, nil)
 		if res.OK() && res.Stdout != "" {
@@ -1796,18 +1865,34 @@ func (p *JSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 					match = strings.Contains(lowerBody, strings.ToLower(pattern))
 				}
 				if match {
-					secretsFound++
-					s.AddFinding(map[string]interface{}{
+					// A specific high-entropy pattern (AWS key / private key) is
+					// far more trustworthy than a generic "api_key" substring.
+					specific := strings.HasPrefix(pattern, "AKIA") ||
+						strings.HasPrefix(pattern, "-----") || label == "google_api" ||
+						label == "slack_token"
+					f := map[string]interface{}{
 						"title": "Potential Secret in JS", "severity": "High",
 						"url": u, "tool": "js_scanner", "evidence": "pattern: " + label,
-					})
+						"requires_ai":      true,
+						"specific_pattern": specific,
+					}
+					// AI triage confirms/denies; then confidence policy decides
+					// whether to keep, downgrade, or discard (FIX #3/#7).
+					kept := s.TriageAndScore(ctx, "JS Secret", filter.HostOf(u),
+						"pattern "+label+" in "+u, f,
+						func(ff map[string]interface{}) bool {
+							return filter.ApplyConfidencePolicy(ff, s.Scope)
+						})
+					if kept {
+						secretsFound++
+					}
 					break
 				}
 			}
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  JS secrets flagged: %d\n", secretsFound)
+	s.Printf("│  JS secrets confirmed (post-triage): %d\n", secretsFound)
 	return nil
 }
 
@@ -1905,13 +1990,34 @@ func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) erro
 	}
 	s.Printf("│  arjun: %d params found across %d URLs\n", arjunFound, len(arjunTargets))
 
+	// FIX #1/#2: this params.txt feeds SQLi, XSS and Open-Redirect, so it is the
+	// single most important chokepoint for zero-FP. Strip Cloudflare challenge
+	// and analytics params (a bare __cf_chl_rt_tk URL is DISCARDED), drop
+	// CF-challenge URLs entirely, then scope-filter — so no injection tool ever
+	// sees a challenge token (FP #1) or an out-of-scope host (FP #2/#3).
 	var lines []string
+	discarded := 0
 	for u := range paramURLs {
-		lines = append(lines, u)
+		if filter.IsCloudflareChallenge(u) {
+			discarded++
+			continue
+		}
+		cleaned, testable := filter.StripNoisyParams(u)
+		if !testable {
+			discarded++
+			continue
+		}
+		lines = append(lines, cleaned)
 	}
+	if s.Scope != nil {
+		var removed int
+		lines, removed = filter.FilterInScopeURLs(lines, s.Scope)
+		discarded += removed
+	}
+	lines = filter.DeduplicateByParamSignature(lines)
 	paramFile := filepath.Join(s.OutputFolder, "params.txt")
 	writeLines(paramFile, lines)
-	s.Printf("│  Total Param URLs: %d\n", len(paramURLs))
+	s.Printf("│  Param URLs: %d testable (%d noisy/out-of-scope discarded)\n", len(lines), discarded)
 	return nil
 }
 
@@ -1925,10 +2031,23 @@ func (p *CORSPhase) Description() string {
 	return "Tests CORS reflection, null origin, wildcard"
 }
 func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
+	// FIX #5 (Tier 2): targeted CORS reflection tests are high-value.
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	corsVuln := 0
 	testOrigins := []string{"https://evil.com", "null", "https://attacker.com"}
 
 	targets := dedupeURLs(s.URLs)
+
+	// FIX #8 / FP #3: ONLY test endpoints whose hostname is explicitly in
+	// scope. This kills the www.grillservice-famholler.at (German grill site)
+	// CORS false positive that crept in via a crawled off-scope link.
+	before := len(targets)
+	targets, removed := filter.FilterInScopeURLs(targets, s.Scope)
+	if removed > 0 {
+		s.Printf("│  CORS scope filter: %d out-of-scope hosts removed\n", removed)
+	}
+	_ = before
+
 	if len(targets) > 50 {
 		targets = targets[:50]
 	}
@@ -1939,26 +2058,35 @@ func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 		for _, origin := range testOrigins {
 			args := []string{"-s", "-m", "10", "-H", "Origin: " + origin, "-I", u}
-			if s.Proxy.Active {
-				args = append([]string{"-x", s.Proxy.ProxyURL, "-k"}, args...)
+			if px.Active {
+				args = append([]string{"-x", px.ProxyURL, "-k"}, args...)
 			}
 			res := runner.RunTool(ctx, "curl", args, nil)
 			if res.OK() {
 				lower := strings.ToLower(res.Stdout)
-				if strings.Contains(lower, "access-control-allow-origin: "+strings.ToLower(origin)) ||
-					strings.Contains(lower, "access-control-allow-origin: *") {
-					corsVuln++
-					s.AddFinding(map[string]interface{}{
+				reflected := strings.Contains(lower, "access-control-allow-origin: "+strings.ToLower(origin))
+				wildcardCreds := strings.Contains(lower, "access-control-allow-origin: *") &&
+					strings.Contains(lower, "access-control-allow-credentials: true")
+				if reflected || wildcardCreds {
+					f := map[string]interface{}{
 						"title": "CORS Misconfiguration", "severity": "High",
-						"url": u, "tool": "cors_check", "evidence": "Reflected origin: " + origin,
-					})
+						"url": u, "tool": "cors_check",
+						"evidence":         "Reflected origin: " + origin,
+						"http_confirmed":   true, // we saw the real ACAO header
+						"specific_pattern": reflected,
+					}
+					// In scope (filtered above) + HTTP-confirmed → high confidence.
+					if filter.ApplyConfidencePolicy(f, s.Scope) {
+						s.AddFinding(f)
+						corsVuln++
+					}
 					break
 				}
 			}
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  CORS: tested %d, vulnerable %d\n", len(targets), corsVuln)
+	s.Printf("│  CORS: tested %d in-scope, confirmed %d\n", len(targets), corsVuln)
 	return nil
 }
 

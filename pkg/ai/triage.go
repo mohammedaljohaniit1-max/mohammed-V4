@@ -49,6 +49,34 @@ func NewClient(enabled bool, endpoint, model string, timeoutSecs int) *Client {
 	}
 }
 
+// Ping performs a ONE-TIME connectivity check against the Ollama server
+// (FIX #7). It hits /api/tags with a short timeout. Returns true only if the
+// server is enabled AND reachable AND answers 200. Used at startup so the whole
+// run knows whether AI confirmation is available; when offline, unconfirmed
+// Critical findings are downgraded to Unverified-Critical Info by the
+// confidence policy rather than reported as confirmed.
+func (c *Client) Ping(ctx context.Context) bool {
+	if c == nil || !c.Enabled {
+		return false
+	}
+	to := c.Timeout
+	if to > 5*time.Second {
+		to = 5 * time.Second
+	}
+	callCtx, cancel := context.WithTimeout(ctx, to)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodGet, c.Endpoint+"/api/tags", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
 // ollamaRequest is the /api/generate request body.
 type ollamaRequest struct {
 	Model   string                 `json:"model"`
