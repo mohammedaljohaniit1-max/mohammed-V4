@@ -124,20 +124,14 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 	)
 
 	// addAll merges a harvester's hosts into the shared set (thread-safe) and
-	// returns how many were NEW. Only hosts under `apex` are accepted.
+	// returns how many were NEW. Only clean hosts under `apex` are accepted
+	// (filtering delegated to the pure, unit-tested filterHostsUnderApex).
 	addAll := func(apex string, hosts []string) int {
+		clean := filterHostsUnderApex(apex, hosts)
 		mu.Lock()
 		defer mu.Unlock()
 		n := 0
-		for _, h := range hosts {
-			h = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h, "*.")))
-			h = strings.TrimSuffix(h, ".")
-			if h == "" || strings.ContainsAny(h, " /=\"<>") {
-				continue
-			}
-			if h != apex && !strings.HasSuffix(h, "."+apex) {
-				continue
-			}
+		for _, h := range clean {
 			if !allSubs[h] {
 				allSubs[h] = true
 				n++
@@ -219,6 +213,31 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 // timeout), and NEVER panic on malformed JSON (they just return nil).
 // Host-suffix filtering is applied centrally by addAll().
 // ═══════════════════════════════════════════════════════════════
+
+// filterHostsUnderApex normalizes a raw list of candidate hosts and keeps only
+// clean, deduplicated hostnames that are the apex itself or a subdomain of it.
+// Pure & side-effect free so the OSINT fan-in filtering (FLAW #3) is unit
+// testable without hitting the network.
+func filterHostsUnderApex(apex string, hosts []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(h, "*.")))
+		h = strings.TrimSuffix(h, ".")
+		if h == "" || strings.ContainsAny(h, " /=\"<>") {
+			continue
+		}
+		if h != apex && !strings.HasSuffix(h, "."+apex) {
+			continue
+		}
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out
+}
 
 // curlGet is a small helper: GET url (optionally with extra args/headers)
 // and return the body, or "" on any failure.
@@ -1613,10 +1632,15 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 	katOut := filepath.Join(s.OutputFolder, "katana_raw.txt")
 	katArgs := []string{"-list", seedFile, "-o", katOut, "-silent", "-nc",
 		"-d", "3", "-rl", "150", "-jc"}
+	// FLAW #5: explicit -proxy flag PLUS HTTP(S)_PROXY env so any internal
+	// client that ignores -proxy still routes through Burp. GetEnv() is nil
+	// without --burp, so this is a no-op when no proxy is configured.
+	var katEnv map[string]string
 	if s.Proxy.Active {
 		katArgs = append(katArgs, "-proxy", s.Proxy.ProxyURL)
+		katEnv = s.Proxy.GetEnv()
 	}
-	res := runner.RunTool(ctx, "katana", katArgs, nil)
+	res := runner.RunTool(ctx, "katana", katArgs, katEnv)
 	if res.OK() || res.TimedOut {
 		for _, l := range readNonEmptyLines(katOut) {
 			if strings.HasPrefix(l, "http") {
