@@ -37,6 +37,46 @@ func TestWaybackTargetsIncludesAllScope(t *testing.T) {
 	}
 }
 
+// TestFilterHostsUnderApex is the regression guard for FLAW #3: the parallel
+// OSINT harvesters return raw, noisy data (wildcards, trailing dots, HTML
+// tokens, out-of-scope hosts). The central filter MUST normalize, dedupe, and
+// keep only real hosts under the queried apex.
+func TestFilterHostsUnderApex(t *testing.T) {
+	raw := []string{
+		"API.WhatNot.com",           // uppercase → normalized
+		"*.whatnot.com",             // wildcard prefix stripped → apex
+		"live-service.whatnot.com.", // trailing dot stripped
+		"api.whatnot.com",           // dup of first after normalize
+		"evil.com",                  // out of scope → dropped
+		"attacker.whatnot.com.evil.com", // sneaky suffix → dropped
+		"",                          // empty → dropped
+		"foo=bar whatnot.com",       // dirty token → dropped
+		"whatnot.com",               // the apex itself → kept
+	}
+	got := filterHostsUnderApex("whatnot.com", raw)
+
+	want := map[string]bool{
+		"api.whatnot.com":          true,
+		"whatnot.com":              true,
+		"live-service.whatnot.com": true,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("filterHostsUnderApex returned %d hosts, want %d: %v", len(got), len(want), got)
+	}
+	seen := map[string]int{}
+	for _, h := range got {
+		seen[h]++
+		if !want[h] {
+			t.Errorf("unexpected host kept: %q", h)
+		}
+	}
+	for h, n := range seen {
+		if n != 1 {
+			t.Errorf("host %q returned %d times (dedup failed)", h, n)
+		}
+	}
+}
+
 // TestAppendUnique guards the URL-merge helper used by the httpx fallback and
 // wayback aggregation (IMPROVEMENT #4).
 func TestAppendUnique(t *testing.T) {

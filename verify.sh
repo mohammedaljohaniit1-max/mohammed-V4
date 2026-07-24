@@ -365,6 +365,12 @@ for src in harvestAnubis harvestThreatMiner harvestCertspotter harvestURLScan; d
         "phases.go: OSINT source $src present" \
         "phases.go: OSINT source $src MISSING"
 done
+check_grep pkg/phases/phases.go 'func filterHostsUnderApex' \
+    "phases.go: OSINT host filter is pure & unit-tested (FLAW #3)" \
+    "phases.go: filterHostsUnderApex MISSING (FLAW #3 testability)"
+check_grep pkg/phases/regression_test.go 'func TestFilterHostsUnderApex' \
+    "regression_test.go: filterHostsUnderApex has a unit test" \
+    "regression_test.go: filterHostsUnderApex test MISSING"
 
 # Deep External Recon phase (zero-login)
 check_grep pkg/phases/phases_deeprecon.go 'func murmur3Hash32' \
@@ -377,10 +383,13 @@ check_grep cmd/mohammed/main.go 'DeepReconPhase' \
     "main.go: DeepReconPhase registered" \
     "main.go: DeepReconPhase NOT registered"
 
-# FLAW #5 — gospider proxy env inheritance
+# FLAW #5 — gospider + katana proxy env inheritance
 check_grep pkg/phases/phases.go 's.Proxy.GetEnv\(\)' \
-    "phases.go: gospider inherits HTTP(S)_PROXY env (FLAW #5)" \
-    "phases.go: gospider proxy env MISSING (FLAW #5)"
+    "phases.go: crawl tools inherit HTTP(S)_PROXY env (FLAW #5)" \
+    "phases.go: crawl proxy env MISSING (FLAW #5)"
+check_grep pkg/phases/phases.go '"katana", katArgs, katEnv' \
+    "phases.go: katana receives proxy env (FLAW #5)" \
+    "phases.go: katana proxy env MISSING (FLAW #5)"
 
 # ── Section 13: Ollama AI Triage Integration ─────────────────────────
 hdr "13. Ollama AI Triage Wiring"
