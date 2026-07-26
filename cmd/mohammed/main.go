@@ -14,6 +14,7 @@ import (
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
 	"github.com/mohammed-v3/core/pkg/phases"
+	"github.com/mohammed-v3/core/pkg/report"
 	"github.com/mohammed-v3/core/pkg/runner"
 )
 
@@ -35,9 +36,16 @@ USAGE:
 
 COMMANDS:
   scan       Run recon + vulnerability scan with target-size profiles
+  report     Serve the interactive HTML dashboard for a completed scan
   doctor     Check tool availability and PATH environment
   setup      Automated one-click installation of all 38+ scanning tools
   help       Show this guidance menu
+
+REPORT DASHBOARD:
+  Launch a zero-dependency web dashboard (summary metrics, severity filters,
+  one-click "Copy HackerOne Report") from a scan's final_report.json:
+     👉 ./mohammed report --serve --port 8090
+     👉 ./mohammed report --serve --report output/roblox_com/final_report.json
 
 TARGET SIZING RECOMMENDATIONS:
 
@@ -107,6 +115,10 @@ func main() {
 	case "scan":
 		fmt.Print(banner)
 		runScan(os.Args[2:])
+
+	case "report":
+		fmt.Print(banner)
+		runReport(os.Args[2:])
 
 	default:
 		fmt.Printf("Unknown command: %s\nRun './mohammed help' for usage.\n", os.Args[1])
@@ -197,6 +209,20 @@ func runScan(args []string) {
 	yamlCfg, _ := config.LoadYAMLConfig(*configFile)
 	if _, err := os.Stat(*configFile); err == nil {
 		fmt.Printf("[+] Loaded configuration & API keys from: %s\n", *configFile)
+	}
+
+	// EXPANSION 1 — report the 3-tier API-key resolution result and auto-sync
+	// the active keys into the subfinder + amass config files so exported
+	// environment variables reach every downstream CLI tool automatically.
+	if active := config.ActiveKeyNames(yamlCfg.APIKeys); len(active) > 0 {
+		fmt.Printf("[+] Active API keys (env > config.yaml): %s\n", strings.Join(active, ", "))
+		if written, syncErr := config.SyncProviderConfigs(yamlCfg.APIKeys); syncErr != nil {
+			fmt.Printf("[!] Provider auto-sync warning: %v\n", syncErr)
+		} else if len(written) > 0 {
+			fmt.Printf("[+] Auto-synced keys → %s\n", strings.Join(written, ", "))
+		}
+	} else {
+		fmt.Println("[*] No API keys configured — using native key-less scrapers (Tier 3 fallback)")
 	}
 
 	cfg := &config.Config{
@@ -344,4 +370,43 @@ func runScan(args []string) {
 		fmt.Printf("\n[!] Scan error: %v\n", err)
 	}
 	fmt.Printf("\n[+] Scan complete. Results in: %s/\n", state.OutputFolder)
+}
+
+// runReport implements EXPANSION 5: `./mohammed report --serve --port 8090`.
+// It launches the embedded, zero-dependency HTML dashboard for a completed
+// scan's final_report.json.
+func runReport(args []string) {
+	fs := flag.NewFlagSet("report", flag.ExitOnError)
+	serve := fs.Bool("serve", false, "Serve the interactive HTML dashboard")
+	port := fs.Int("port", 8090, "Port for the dashboard web server")
+	reportPath := fs.String("report", "", "Path to final_report.json (default: latest under output/)")
+	output := fs.String("output", "output", "Output directory to search for the latest report")
+	fs.Parse(args)
+
+	if !*serve {
+		fmt.Println("[!] Nothing to do. Use: ./mohammed report --serve --port 8090")
+		return
+	}
+
+	path := *reportPath
+	if path == "" {
+		path = report.FindLatestReport(*output)
+		if path == "" {
+			fmt.Printf("[!] No final_report.json found under %s/. Run a scan first or pass --report.\n", *output)
+			os.Exit(1)
+		}
+		fmt.Printf("[+] Using latest report: %s\n", path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		fmt.Printf("[!] Report file not found: %s\n", path)
+		os.Exit(1)
+	}
+
+	addr := fmt.Sprintf(":%d", *port)
+	fmt.Printf("[+] Dashboard server running → http://localhost%s\n", addr)
+	fmt.Println("[*] Press Ctrl+C to stop.")
+	if err := report.ServeDashboard(addr, path); err != nil {
+		fmt.Printf("[!] Dashboard server error: %v\n", err)
+		os.Exit(1)
+	}
 }

@@ -192,6 +192,40 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 		run("Certspotter", domain, func() []string { return harvestCertspotter(ctx, domain) })
 		run("AlienVaultOTX", domain, func() []string { return harvestOTX(ctx, domain, keys.AlienVault) })
 		run("URLScan", domain, func() []string { return harvestURLScan(ctx, domain) })
+
+		// ── EXPANSION 2 — NATIVE KEY-LESS SCRAPERS ──────────────────────────
+		// crt.sh SAN harvester (native Go HTTP, distinct from the curl-based
+		// harvestCrtSh above so we exercise the raw JSON SAN parser directly).
+		run("crtsh-SAN", domain, func() []string { return ScrapeCrtShSAN(ctx, domain) })
+		// GitHub public-code search for leaked host references (uses GITHUB_TOKEN
+		// when present for a higher rate limit; still works unauthenticated).
+		run("GitHubScrape", domain, func() []string { return ScrapeGitHubHosts(ctx, domain, keys.GitHub) })
+	}
+
+	// ── EXPANSION 2 — Shodan InternetDB IP intelligence ─────────────────────
+	// After DNS-based subdomain harvesting, enrich every in-scope seed IP with
+	// free, key-less Shodan InternetDB data (open ports + CVEs). Findings are
+	// added directly to state so they surface in the report.
+	for _, ip := range s.Scope.IPs {
+		ip := ip
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			intel := ScrapeShodanInternetDB(ctx, ip)
+			if intel == nil {
+				return
+			}
+			s.Printf("│  InternetDB [%s]: %d ports, %d CVEs\n", ip, len(intel.Ports), len(intel.Vulns))
+			if len(intel.Vulns) > 0 {
+				s.AddFinding(map[string]interface{}{
+					"title":    "Known CVEs on host (Shodan InternetDB)",
+					"severity": "Medium",
+					"url":      ip,
+					"tool":     "internetdb",
+					"evidence": fmt.Sprintf("ports=%v cves=%s", intel.Ports, strings.Join(intel.Vulns, ",")),
+				})
+			}
+		}()
 	}
 
 	wg.Wait()
@@ -1385,7 +1419,63 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 			s.Printf("│  direct fallback: still 0 — hosts may be firewalled or non-HTTP\n")
 		}
 	}
+
+	// ── EXPANSION 3 — WAF/challenge classification (zero-false-positive) ────
+	// Probe each unique live host once and flag it WAF_PROTECTED when the
+	// response is a Cloudflare/WAF/Captcha challenge or a 403 block page. Such
+	// hosts are automatically excluded from heavy XSS/SQLi fuzzing later so a
+	// block page can never be reported as a vulnerability.
+	detectWAFOnLiveHosts(ctx, s, urlSet)
+
 	return nil
+}
+
+// detectWAFOnLiveHosts inspects each unique live host from Phase 07 and records
+// WAF-protected hosts on state. Bounded + concurrent so it stays fast.
+func detectWAFOnLiveHosts(ctx context.Context, s *engine.State, urls map[string]bool) {
+	px := s.PhaseProxy(proxy.ProxyModeSelective)
+	seenHost := make(map[string]bool)
+	var targets []string
+	for u := range urls {
+		h := filter.HostOf(u)
+		if h == "" || seenHost[h] {
+			continue
+		}
+		seenHost[h] = true
+		targets = append(targets, u)
+	}
+	if len(targets) == 0 {
+		return
+	}
+	if len(targets) > 300 {
+		targets = targets[:300]
+	}
+
+	var (
+		mu      sync.Mutex
+		wg      sync.WaitGroup
+		sem     = make(chan struct{}, 25)
+		flagged int
+	)
+	for _, u := range targets {
+		wg.Add(1)
+		go func(rawURL string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if DetectWAF(ctx, px, rawURL) {
+				host := filter.HostOf(rawURL)
+				s.MarkWAFProtected(host)
+				mu.Lock()
+				flagged++
+				mu.Unlock()
+			}
+		}(u)
+	}
+	wg.Wait()
+	if flagged > 0 {
+		s.Printf("│  WAF_PROTECTED: %d host(s) flagged — excluded from heavy fuzzing (XSS/SQLi)\n", flagged)
+	}
 }
 
 // directProbe is the IMPROVEMENT #4 / #6 cascading fallback: when httpx yields
@@ -1635,8 +1725,14 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 				allURLs[u] = true
 			}
 		}
+		// EXPANSION 2 — native Wayback CDX scraper (key-less, polite HTTP).
+		for _, u := range ScrapeWaybackURLs(ctx, apex, 10000) {
+			if strings.HasPrefix(u, "http") && !allURLs[u] {
+				allURLs[u] = true
+			}
+		}
 		if added := len(allURLs) - before; added > 0 {
-			s.Printf("│  URLScan+CommonCrawl [%s]: +%d URLs\n", apex, added)
+			s.Printf("│  URLScan+CommonCrawl+WaybackCDX [%s]: +%d URLs\n", apex, added)
 		}
 	}
 

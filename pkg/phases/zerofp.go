@@ -51,6 +51,11 @@ func httpClientFor(px *proxy.ProxyManager, timeout time.Duration) *http.Client {
 		if pu, err := url.Parse(px.ProxyURL); err == nil {
 			tr.Proxy = http.ProxyURL(pu)
 		}
+		// REPAIR #5: when routing security probes through Burp, disable
+		// keep-alives so no idle socket lingers to trigger the "Unsolicited
+		// response on idle HTTP channel" console flood during tool handoffs.
+		tr.DisableKeepAlives = true
+		tr.IdleConnTimeout = 5 * time.Second
 	}
 	return &http.Client{Timeout: timeout, Transport: tr}
 }

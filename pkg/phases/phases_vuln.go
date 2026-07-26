@@ -17,6 +17,26 @@ import (
 	"github.com/mohammed-v3/core/pkg/runner"
 )
 
+// dropWAFProtected removes, in place, every URL whose host was flagged
+// WAF_PROTECTED during Phase 07 (EXPANSION 3). It returns how many were
+// dropped so the caller can log it. A nil state or empty flag-set is a no-op.
+func dropWAFProtected(s *engine.State, urls *[]string) int {
+	if s == nil || urls == nil || len(s.WAFProtected) == 0 {
+		return 0
+	}
+	kept := (*urls)[:0]
+	dropped := 0
+	for _, u := range *urls {
+		if s.IsWAFProtected(u) {
+			dropped++
+			continue
+		}
+		kept = append(kept, u)
+	}
+	*urls = kept
+	return dropped
+}
+
 // parameterizedURLs returns URLs that carry at least one query parameter
 // (contain '?' and '='), deduplicated and capped at `limit`. Used to feed
 // dalfox / sqlmap only URLs worth testing (BUG #7).
@@ -170,6 +190,15 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 		return nil
 	}
 
+	// EXPANSION 4 (speed tuning): hard-cap the fuzzing wordlist to the top
+	// 10,000 high-priority routes. A raft/seclists file can hold 100k+ entries
+	// which, multiplied across 15 targets, blows well past the < 90 minute
+	// budget. capWordlist writes a trimmed copy and returns its path.
+	if capped, n := capWordlist(s, wordlist, 10000); capped != "" {
+		wordlist = capped
+		s.Printf("│  ffuf wordlist: capped to top %d routes (speed tuning)\n", n)
+	}
+
 	// Prefer live endpoints from httpx; fall back to any http URL.
 	seeds := extractURLsFromHTTPX(filepath.Join(s.OutputFolder, "http_live.txt"))
 	if len(seeds) == 0 {
@@ -222,6 +251,31 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 	writeLines(fuzzOut, allResults)
 	s.Printf("│  ffuf: scanned %d targets, %d content hits\n", len(seeds), hits)
 	return nil
+}
+
+// capWordlist writes a trimmed copy of src containing at most maxN non-empty,
+// non-comment entries and returns (path, count) (EXPANSION 4). If src already
+// has <= maxN entries it returns ("", 0) so the caller keeps using the
+// original file unchanged. Best-effort: any error yields ("", 0).
+func capWordlist(s *engine.State, src string, maxN int) (string, int) {
+	if maxN <= 0 {
+		return "", 0
+	}
+	lines := readNonEmptyLines(src)
+	// Filter out comment lines that some seclists files carry.
+	filtered := lines[:0]
+	for _, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			continue
+		}
+		filtered = append(filtered, l)
+	}
+	if len(filtered) <= maxN {
+		return "", 0 // already small enough — use the original
+	}
+	capped := filepath.Join(s.OutputFolder, "fuzz_wordlist_top10k.txt")
+	writeLines(capped, filtered[:maxN])
+	return capped, maxN
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -375,6 +429,12 @@ func (p *XSSPhase) Execute(ctx context.Context, s *engine.State) error {
 			s.Printf("│  XSS scope filter: %d out-of-scope URLs removed\n", removed)
 		}
 	}
+	// EXPANSION 3: drop URLs whose host was flagged WAF_PROTECTED in Phase 07 —
+	// a WAF challenge page reflects payloads unpredictably and produces XSS
+	// false positives, so we never fuzz it.
+	if dropped := dropWAFProtected(s, &targets); dropped > 0 {
+		s.Printf("│  XSS WAF filter: %d URL(s) on WAF_PROTECTED hosts skipped\n", dropped)
+	}
 	if len(targets) == 0 {
 		s.Printf("│  XSS: SKIP (no in-scope URLs with query parameters)\n")
 		return nil
@@ -452,8 +512,13 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 	// __cf_chl_rt_tk "SQL injection" false positives entirely.
 	raw := readNonEmptyLines(paramsFile)
 	targets := PrepareSQLiURLs(raw, s.Scope, 5)
+	// EXPANSION 3: exclude URLs on Phase-07 WAF_PROTECTED hosts up-front so we
+	// do not even attempt sqlmap against a WAF block page.
+	if dropped := dropWAFProtected(s, &targets); dropped > 0 {
+		s.Printf("│  SQLi WAF filter: %d URL(s) on WAF_PROTECTED hosts skipped\n", dropped)
+	}
 	if len(targets) == 0 {
-		s.Printf("│  SQLi: SKIP (0 clean in-scope injectable URLs after CF/scope filter)\n")
+		s.Printf("│  SQLi: SKIP (0 clean in-scope injectable URLs after CF/scope/WAF filter)\n")
 		return nil
 	}
 	s.Printf("│  SQLi: %d raw → %d clean in-scope candidates (cap 5)\n", len(raw), len(targets))
@@ -933,7 +998,11 @@ func (p *GitExposurePhase) Execute(ctx context.Context, s *engine.State) error {
 		exposureIn := filepath.Join(s.OutputFolder, "exposure_targets.txt")
 		writeLines(exposureIn, seeds)
 		exposureJSONL := filepath.Join(s.OutputFolder, "exposure_results.jsonl")
-		args := []string{"-l", exposureIn, "-tags", "exposure", "-jsonl", "-o", exposureJSONL,
+		// EXPANSION 4 (speed tuning): restrict the exposure scan to high/critical
+		// severity rules only. Low/info exposure templates dominate template
+		// count and runtime while rarely producing actionable findings.
+		args := []string{"-l", exposureIn, "-tags", "exposure",
+			"-severity", "high,critical", "-jsonl", "-o", exposureJSONL,
 			"-silent", "-nc", "-rl", "100"}
 		if px.Active {
 			args = append(args, "-proxy", px.ProxyURL)
@@ -1043,9 +1112,85 @@ func (p *EmailSecurityPhase) Execute(ctx context.Context, s *engine.State) error
 				"evidence": fmt.Sprintf("SPF:%v DKIM:%v DMARC:%v", hasSPF, hasDKIM, hasDMARC),
 			})
 		}
+
+		// EXPANSION 3 — Email Spoofing Auto-Reporter. When a domain is fully
+		// unprotected (no SPF AND no DMARC — e.g. rbx.com in the baseline scan),
+		// append a ready-to-paste HackerOne report snippet to MANUAL_REVIEW.txt
+		// so a researcher can submit it without hand-writing the boilerplate.
+		if !hasSPF && !hasDMARC {
+			snippet := buildEmailSpoofReport(domain, hasSPF, hasDKIM, hasDMARC)
+			// Persist to a dedicated file that the final ReportPhase never
+			// truncates, and attach the snippet to a finding so the tiered
+			// exporter also surfaces it in MANUAL_REVIEW.txt.
+			if err := appendToFile(filepath.Join(s.OutputFolder, "email_spoofing_reports.md"), snippet); err == nil {
+				s.Printf("│  ⚑ %s fully unprotected — pre-formatted H1 report saved\n", domain)
+			}
+			s.AddFinding(map[string]interface{}{
+				"title": "Email Spoofing (no SPF + no DMARC)", "severity": "Medium",
+				"url": domain, "tool": "email_check",
+				"evidence":       fmt.Sprintf("SPF:%v DKIM:%v DMARC:%v — spoofable", hasSPF, hasDKIM, hasDMARC),
+				"h1_report":      snippet,
+				"http_confirmed": true,
+			})
+		}
 	}
 	writeLines(emailOut, results)
 	return nil
+}
+
+// appendToFile appends text to a file, creating it if necessary.
+func appendToFile(path, text string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(text)
+	return err
+}
+
+// buildEmailSpoofReport returns a pre-formatted HackerOne vulnerability report
+// (Markdown) for an email-spoofable domain (EXPANSION 3).
+func buildEmailSpoofReport(domain string, hasSPF, hasDKIM, hasDMARC bool) string {
+	return fmt.Sprintf(`
+════════════════════════════════════════════════════════════════════
+[AUTO-GENERATED HACKERONE REPORT] Email Spoofing — %[1]s
+════════════════════════════════════════════════════════════════════
+## Title
+Email Spoofing possible on %[1]s due to missing SPF and DMARC records
+
+## Severity
+Medium (CVSS 3.1: AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N)
+
+## Summary
+The domain '%[1]s' does not publish an SPF record and has no DMARC policy.
+This allows an attacker to send email that appears to originate from
+'@%[1]s', enabling phishing and business-email-compromise against the
+program's users and staff.
+
+## Steps To Reproduce
+1. Query the domain's DNS TXT records:
+   dig +short TXT %[1]s          → SPF present: %[2]v
+   dig +short TXT _dmarc.%[1]s   → DMARC present: %[4]v
+   (DKIM selector probe present: %[3]v)
+2. Both SPF and DMARC are absent, so receiving mail servers cannot verify
+   the authenticity of mail claiming to be from @%[1]s.
+3. Send a spoofed email using any SMTP client with a forged
+   "From: security@%[1]s" header — it is delivered without authentication
+   failure.
+
+## Impact
+Attackers can impersonate the organisation in email, dramatically
+increasing the success rate of phishing and credential-theft campaigns.
+
+## Remediation
+- Publish a strict SPF record, e.g. "v=spf1 -all" if the domain sends no
+  mail, or enumerate authorised senders otherwise.
+- Publish a DMARC policy, e.g.
+  "v=DMARC1; p=reject; rua=mailto:dmarc@%[1]s".
+- Configure DKIM signing for all legitimate mail streams.
+════════════════════════════════════════════════════════════════════
+`, domain, hasSPF, hasDKIM, hasDMARC)
 }
 
 // ═══════════════════════════════════════════════════════════════

@@ -73,3 +73,57 @@ func TestIsApexDomain(t *testing.T) {
 		t.Error("example.co.uk should be apex")
 	}
 }
+
+// TestResolveAPIKeysEnvPrecedence guards EXPANSION 1: OS environment variables
+// (Tier 1) override config.yaml values (Tier 2); an empty env var never
+// clobbers a non-empty config value.
+func TestResolveAPIKeysEnvPrecedence(t *testing.T) {
+	t.Setenv("SHODAN_API_KEY", "env-shodan")
+	t.Setenv("VIRUSTOTAL_API_KEY", "") // empty must not clobber config
+
+	base := APIKeys{
+		Shodan:     "cfg-shodan",
+		VirusTotal: "cfg-vt",
+		Chaos:      "cfg-chaos",
+	}
+	got := ResolveAPIKeys(base)
+
+	if got.Shodan != "env-shodan" {
+		t.Errorf("Shodan = %q, want env-shodan (Tier 1 wins)", got.Shodan)
+	}
+	if got.VirusTotal != "cfg-vt" {
+		t.Errorf("VirusTotal = %q, want cfg-vt (empty env must not clobber)", got.VirusTotal)
+	}
+	if got.Chaos != "cfg-chaos" {
+		t.Errorf("Chaos = %q, want cfg-chaos (config fallthrough)", got.Chaos)
+	}
+}
+
+// TestActiveKeyNames verifies only non-empty keys are listed and no key
+// material is returned.
+func TestActiveKeyNames(t *testing.T) {
+	names := ActiveKeyNames(APIKeys{Shodan: "x", GitHub: "y"})
+	if len(names) != 2 {
+		t.Fatalf("ActiveKeyNames len = %d, want 2 (%v)", len(names), names)
+	}
+	joined := ""
+	for _, n := range names {
+		joined += n + " "
+	}
+	if !contains(joined, "shodan") || !contains(joined, "github") {
+		t.Errorf("expected shodan+github in %q", joined)
+	}
+}
+
+func contains(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && (indexOf(haystack, needle) >= 0)
+}
+
+func indexOf(s, sub string) int {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return i
+		}
+	}
+	return -1
+}

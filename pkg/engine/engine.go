@@ -44,6 +44,12 @@ type State struct {
 	OutputFolder string
 	StartTime    time.Time
 
+	// WAFProtected records hosts flagged as WAF/Captcha/challenge protected
+	// during Phase 07 (HTTP probing). EXPANSION 3: such hosts are excluded from
+	// heavy fuzzing (XSS/SQLi) so a WAF block page can never masquerade as a
+	// vulnerability (zero-false-positive). Keyed by bare host (no scheme).
+	WAFProtected map[string]bool
+
 	// AIOnline records the result of the one-time startup Ollama connectivity
 	// probe (FIX #7). When false, findings that require AI confirmation are
 	// downgraded by the confidence policy rather than reported as confirmed.
@@ -153,9 +159,43 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 		URLs:         make([]string, 0),
 		Parameters:   make(map[string][]string),
 		Findings:     make([]map[string]interface{}, 0),
+		WAFProtected: make(map[string]bool),
 		OutputFolder: outDir,
 		StartTime:    time.Now(),
 	}
+}
+
+// MarkWAFProtected records that a host is behind a WAF/challenge (thread-safe).
+// EXPANSION 3: consumed by the fuzzing/injection phases to skip heavy scanning.
+func (s *State) MarkWAFProtected(host string) {
+	if host == "" {
+		return
+	}
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	if s.WAFProtected == nil {
+		s.WAFProtected = make(map[string]bool)
+	}
+	s.WAFProtected[strings.ToLower(host)] = true
+}
+
+// IsWAFProtected reports whether a host (or the host component of a URL) was
+// flagged WAF-protected during probing.
+func (s *State) IsWAFProtected(hostOrURL string) bool {
+	if s.WAFProtected == nil || hostOrURL == "" {
+		return false
+	}
+	h := strings.ToLower(hostOrURL)
+	// Strip scheme + path if a full URL was passed.
+	if i := strings.Index(h, "://"); i != -1 {
+		h = h[i+3:]
+	}
+	if i := strings.IndexAny(h, "/:?"); i != -1 {
+		h = h[:i]
+	}
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	return s.WAFProtected[h]
 }
 
 // AddFinding appends a finding in a thread-safe manner.
@@ -454,6 +494,12 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.State.PrintMu.Unlock()
 
 		err := phase.Execute(ctx, o.State)
+
+		// REPAIR #5: after every phase, close any idle Burp keep-alive
+		// connections so a socket left over from this phase's tool handoff
+		// cannot emit "Unsolicited response on idle HTTP channel" spam while
+		// the next phase runs.
+		o.State.Proxy.CloseIdleConnections()
 
 		phaseDur := time.Since(phaseStart)
 		totalElapsed := time.Since(o.State.StartTime)
