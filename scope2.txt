@@ -1,0 +1,16 @@
+# ══════════════════════════════════════════════════════════════
+# MOHAMMED - Scope File: Roblox Bug Bounty (HackerOne)
+# Program: https://hackerone.com/roblox
+# Last Updated: 2026-07-26
+# Max Severity: Critical | Bounty: Eligible
+# ══════════════════════════════════════════════════════════════
+
+# ── In-Scope Apex Domains (Eligible) ─────────────────────────
+roblox.com
+rbx.com
+blox.link
+ra.roblox.com
+
+# ── Wildcards (Eligible) ─────────────────────────────────────
+*.roblox.com
+*.rbx.com
