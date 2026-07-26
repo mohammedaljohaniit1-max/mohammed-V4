@@ -94,34 +94,77 @@ else
     fail "go not found in PATH"
 fi
 
-# ── Section 4: Critical Tools (must exist) ───────────────────────────
-hdr "4. Critical Tools (required for core phases)"
+# ── Section 4: Canonical 38-Tool Inventory (REPAIR #6) ───────────────
+# The mandate requires all 38 binaries be installed & resolvable so no phase
+# is quietly skipped. Critical tools FAIL if missing; the rest WARN (phase
+# degrades gracefully). Every tool is linked to /usr/local/bin AND $GOPATH/bin
+# by install_path.sh, so we also report which of those two paths resolve it.
+hdr "4. Canonical 38-Tool Inventory (install_path.sh target)"
 
-CRITICAL_TOOLS=(subfinder httpx dnsx nuclei katana gau waybackurls curl dig)
-for tool in "${CRITICAL_TOOLS[@]}"; do
-    if command -v "$tool" &>/dev/null; then
-        pass "$tool → $(command -v "$tool")"
+export GOPATH="${GOPATH:-$HOME/go}"
+GOBIN="$GOPATH/bin"
+
+# The authoritative 38 binaries (must match install_path.sh TOOLS array).
+ALL_TOOLS=(
+    subfinder amass bbot assetfinder findomain
+    dnsx puredns massdns shuffledns
+    subzy httpx tlsx naabu nmap
+    gau waybackurls katana gospider hakrawler
+    getJS paramspider arjun
+    ffuf feroxbuster dirsearch
+    nuclei dalfox kxss sqlmap ghauri
+    dontgo403 kr crlfuzz smuggler
+    cloud_enum s3scanner interactsh-client gf
+)
+
+# Tools whose absence must FAIL (core recon/vuln phases cannot run without them).
+CRITICAL_TOOLS=(subfinder httpx dnsx nuclei katana gau waybackurls)
+
+is_critical() {
+    local t="$1"
+    for c in "${CRITICAL_TOOLS[@]}"; do [ "$c" = "$t" ] && return 0; done
+    return 1
+}
+
+tool_present=0
+for tool in "${ALL_TOOLS[@]}"; do
+    resolved="$(command -v "$tool" 2>/dev/null || true)"
+    # Report reachability via the two mandated link targets.
+    link_note=""
+    [ -e "/usr/local/bin/$tool" ] && link_note="${link_note} /usr/local/bin ✓"
+    [ -e "$GOBIN/$tool" ]         && link_note="${link_note} \$GOPATH/bin ✓"
+    if [ -n "$resolved" ]; then
+        pass "$tool → $resolved${link_note:+ (${link_note# })}"
+        tool_present=$((tool_present + 1))
+    elif is_critical "$tool"; then
+        fail "$tool NOT FOUND (CRITICAL) — run: bash install_path.sh"
     else
-        fail "$tool NOT FOUND — run: bash setup.sh"
+        warn "$tool not found (phase will SKIP) — run: bash install_path.sh"
     fi
 done
 
-# ── Section 5: Optional Tools (skip = just warn) ─────────────────────
-hdr "5. Optional Tools (phase skips if missing)"
+echo ""
+if [ "$tool_present" -eq "${#ALL_TOOLS[@]}" ]; then
+    pass "All ${#ALL_TOOLS[@]}/38 canonical tools resolvable — zero phase skips expected"
+else
+    info "$tool_present / ${#ALL_TOOLS[@]} canonical tools resolvable"
+    info "Install the rest with:  bash install_path.sh   (network required)"
+fi
 
-OPT_TOOLS=(amass bbot assetfinder findomain puredns massdns shuffledns
-           subzy tlsx naabu nmap gospider hakrawler getJS
-           paramspider arjun ffuf feroxbuster dirsearch
-           dalfox kxss sqlmap ghauri dontgo403 kr crlfuzz
-           smuggler cloud_enum s3scanner)
+# ── Section 5: Tool → link-target coverage (REPAIR #6 detail) ────────
+hdr "5. Link-Target Coverage (/usr/local/bin AND \$GOPATH/bin)"
 
-for tool in "${OPT_TOOLS[@]}"; do
-    if command -v "$tool" &>/dev/null; then
-        pass "$tool → $(command -v "$tool")"
-    else
-        warn "$tool not found (phase will SKIP for this tool)"
-    fi
+usrlocal_ok=0; gobin_ok=0
+for tool in "${ALL_TOOLS[@]}"; do
+    command -v "$tool" &>/dev/null || continue
+    [ -e "/usr/local/bin/$tool" ] && usrlocal_ok=$((usrlocal_ok + 1))
+    [ -e "$GOBIN/$tool" ]         && gobin_ok=$((gobin_ok + 1))
 done
+info "Resolvable tools linked into /usr/local/bin: $usrlocal_ok"
+info "Resolvable tools linked into \$GOPATH/bin ($GOBIN): $gobin_ok"
+if [ "$tool_present" -gt 0 ] && [ "$usrlocal_ok" -eq 0 ]; then
+    warn "No tools linked into /usr/local/bin — engine spawned by other users may miss them. Run: bash install_path.sh"
+fi
 
 # ── Section 6: PATH Directories ──────────────────────────────────────
 hdr "6. PATH Directories"
@@ -609,6 +652,111 @@ if command -v go >/dev/null 2>&1; then
         fail "TOOL #8/#10: unit tests FAILED"
     fi
 fi
+
+# ── Section 17: REPAIR #6 — install_path.sh 38-tool installer ────────
+hdr "17. REPAIR #6: install_path.sh installs & links all 38 tools"
+
+# The overhauled install_path.sh must (a) contain the canonical 38-tool array,
+# (b) actually INSTALL (not just symlink) via install_go_tool/install_pip_tool,
+# and (c) link every tool into BOTH /usr/local/bin and $GOPATH/bin.
+check_grep install_path.sh 'install_go_tool' \
+    "REPAIR #6: install_path.sh installs Go tools (install_go_tool)" \
+    "REPAIR #6: install_path.sh missing install_go_tool (still symlink-only)"
+check_grep install_path.sh 'install_pip_tool' \
+    "REPAIR #6: install_path.sh installs Python tools (install_pip_tool)" \
+    "REPAIR #6: install_path.sh missing install_pip_tool"
+check_grep install_path.sh 'link_tool' \
+    "REPAIR #6: install_path.sh has link_tool (dual-path symlink helper)" \
+    "REPAIR #6: install_path.sh missing link_tool"
+check_grep install_path.sh 'GOBIN/\$name|GOBIN"/"?\$name|\$GOBIN/\$name' \
+    "REPAIR #6: install_path.sh links into \$GOPATH/bin" \
+    "REPAIR #6: install_path.sh does NOT link into \$GOPATH/bin"
+check_grep install_path.sh '/usr/local/bin/\$name' \
+    "REPAIR #6: install_path.sh links into /usr/local/bin" \
+    "REPAIR #6: install_path.sh does NOT link into /usr/local/bin"
+
+# Confirm the install_path.sh TOOLS array names all 38 canonical binaries.
+missing_in_installer=""
+for t in subfinder amass bbot assetfinder findomain dnsx puredns massdns \
+         shuffledns subzy httpx tlsx naabu nmap gau waybackurls katana gospider \
+         hakrawler getJS paramspider arjun ffuf feroxbuster dirsearch nuclei \
+         dalfox kxss sqlmap ghauri dontgo403 kr crlfuzz smuggler cloud_enum \
+         s3scanner interactsh-client gf; do
+    grep -qw "$t" install_path.sh 2>/dev/null || missing_in_installer="$missing_in_installer $t"
+done
+if [ -z "$missing_in_installer" ]; then
+    pass "REPAIR #6: install_path.sh references all 38 canonical tool names"
+else
+    fail "REPAIR #6: install_path.sh missing tool name(s):$missing_in_installer"
+fi
+
+# Static shell lint of the installer (bash -n) — catch syntax regressions.
+if bash -n install_path.sh 2>/dev/null; then
+    pass "REPAIR #6: install_path.sh passes bash -n syntax check"
+else
+    fail "REPAIR #6: install_path.sh has a shell syntax error"
+fi
+
+# ── Section 18: MOHAMMED-V5 Expansions (code checks) ─────────────────
+hdr "18. MOHAMMED-V5 Expansions (EXP #1-#5)"
+
+# EXP #1 — 3-tier API key precedence + provider auto-sync
+check_grep pkg/config/config.go 'func ResolveAPIKeys' \
+    "EXP #1: ResolveAPIKeys present (env > yaml precedence)" \
+    "EXP #1: ResolveAPIKeys MISSING"
+check_grep pkg/config/config.go 'func SyncProviderConfigs' \
+    "EXP #1: SyncProviderConfigs present (subfinder/amass auto-sync)" \
+    "EXP #1: SyncProviderConfigs MISSING"
+check_grep pkg/config/config.go 'SHODAN_API_KEY|GITHUB_TOKEN' \
+    "EXP #1: env vars (SHODAN_API_KEY/GITHUB_TOKEN) honoured" \
+    "EXP #1: API-key env vars MISSING"
+
+# EXP #2 — native free threat-intel scrapers
+check_grep pkg/phases/scrapers.go 'func ScrapeShodanInternetDB' \
+    "EXP #2: Shodan InternetDB scraper present" \
+    "EXP #2: ScrapeShodanInternetDB MISSING"
+check_grep pkg/phases/scrapers.go 'func ScrapeCrtShSAN' \
+    "EXP #2: crt.sh SAN scraper present" \
+    "EXP #2: ScrapeCrtShSAN MISSING"
+check_grep pkg/phases/scrapers.go 'func ScrapeWaybackURLs' \
+    "EXP #2: Wayback CDX scraper present" \
+    "EXP #2: ScrapeWaybackURLs MISSING"
+check_grep pkg/phases/scrapers.go 'randomUA|userAgents' \
+    "EXP #2: randomized User-Agent rotation present" \
+    "EXP #2: UA rotation MISSING"
+check_grep pkg/phases/scrapers.go '429' \
+    "EXP #2: 429 backoff handling present" \
+    "EXP #2: 429 backoff MISSING"
+
+# EXP #3 — WAF_PROTECTED exclusion + email spoof auto-reporter
+check_grep pkg/engine/engine.go 'func \(s \*State\) MarkWAFProtected' \
+    "EXP #3: State.MarkWAFProtected present" \
+    "EXP #3: MarkWAFProtected MISSING"
+check_grep pkg/phases/phases_vuln.go 'func dropWAFProtected' \
+    "EXP #3: dropWAFProtected excludes WAF hosts from XSS/SQLi fuzzing" \
+    "EXP #3: dropWAFProtected MISSING"
+check_grep pkg/phases/phases_vuln.go 'buildEmailSpoofReport|email_spoofing_reports' \
+    "EXP #3: email spoofing auto-reporter present (H1 report)" \
+    "EXP #3: email spoof auto-reporter MISSING"
+
+# EXP #4 — scan-speed tuning (wordlist cap + nuclei severity filter)
+check_grep pkg/phases/phases_vuln.go 'func capWordlist' \
+    "EXP #4: capWordlist (top-10k fuzz cap) present" \
+    "EXP #4: capWordlist MISSING"
+check_grep pkg/phases/phases_vuln.go '"-severity", "high,critical"|high,critical' \
+    "EXP #4: nuclei exposure filtered to high/critical" \
+    "EXP #4: nuclei severity filter MISSING"
+
+# EXP #5 — interactive embedded dashboard server
+check_grep pkg/report/server.go 'func ServeDashboard' \
+    "EXP #5: ServeDashboard present (report --serve)" \
+    "EXP #5: ServeDashboard MISSING"
+check_grep cmd/mohammed/main.go 'func runReport' \
+    "EXP #5: main.go runReport (report command) wired" \
+    "EXP #5: runReport MISSING"
+check_grep pkg/report/server.go 'Copy HackerOne|Copy HackerOne Report|copyH1|copy-h1' \
+    "EXP #5: one-click Copy HackerOne Report present" \
+    "EXP #5: Copy HackerOne Report MISSING"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

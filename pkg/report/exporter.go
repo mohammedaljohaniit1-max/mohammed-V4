@@ -81,6 +81,13 @@ func formatFinding(f map[string]interface{}) string {
 		b.WriteString(fmt.Sprintf("  AI Verdict: %v\n", v))
 	}
 	b.WriteString(fmt.Sprintf("  Evidence  : %v\n", f["evidence"]))
+	// EXPANSION 3: email-spoofing findings carry a ready-to-paste HackerOne
+	// report snippet — surface it inline so MANUAL_REVIEW.txt is submit-ready.
+	if r, ok := f["h1_report"].(string); ok && strings.TrimSpace(r) != "" {
+		b.WriteString("  HackerOne Report:\n")
+		b.WriteString(r)
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
 	return b.String()
 }
