@@ -108,29 +108,81 @@ var toolTimeouts = map[string]time.Duration{
 
 // ─────────────────────────────────────────
 // ResolveToolPath: finds binary across common install locations
+//
+// BUG #1/#2/#4 FIX (V6): a live Kali scan proved paramspider (/usr/bin),
+// cloud_enum (/usr/local/bin) and bbot (/root/.local/bin) were reported
+// "not found" even though they were installed. Root cause: the search list
+// depended on os.UserHomeDir(), which returns the WRONG home when the engine
+// is launched under sudo (HOME=/home/<user> instead of /root) — so
+// /root/.local/bin and /root/go/bin were never probed. The fix is to search
+// an EXPLICIT, absolute, de-duplicated list that always includes the Kali
+// root paths, the invoking user's home paths, AND every dir already on PATH.
 // ─────────────────────────────────────────
+func toolSearchDirs() []string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(d string) {
+		if d == "" {
+			return
+		}
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+
+	// 1) Every directory already on PATH (covers custom installs).
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		add(d)
+	}
+
+	// 2) The invoking user's home (whatever HOME currently is).
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		add(filepath.Join(home, ".local", "bin"))
+		add(filepath.Join(home, "go", "bin"))
+	}
+
+	// 3) The ORIGINAL user's home when running under sudo (SUDO_USER set).
+	if su := os.Getenv("SUDO_USER"); su != "" {
+		add(filepath.Join("/home", su, ".local", "bin"))
+		add(filepath.Join("/home", su, "go", "bin"))
+	}
+
+	// 4) Explicit absolute fallbacks — ALWAYS probed regardless of HOME.
+	//    These are the exact locations proven by the live Kali scan.
+	for _, d := range []string{
+		"/root/.local/bin", // bbot, pipx packages (Kali root)
+		"/root/go/bin",     // go install packages (Kali root)
+		"/usr/local/bin",   // Go symlinks + shell wrappers (cloud_enum, dontgo403)
+		"/usr/bin",         // Kali apt packages (paramspider, sqlmap)
+		"/usr/sbin",
+		"/bin",
+		"/snap/bin",          // snap-installed tools (amass)
+		"/opt/homebrew/bin",  // macOS brew
+		"/home/linuxbrew/.linuxbrew/bin",
+	} {
+		add(d)
+	}
+
+	return dirs
+}
+
+// ResolveToolPath finds the absolute path to a tool binary, searching PATH and
+// every common install location (see toolSearchDirs). Symlinks and wrapper
+// scripts are accepted as long as the target exists and is not a directory.
 func ResolveToolPath(toolName string) (string, error) {
-	// First try system PATH
-	path, err := exec.LookPath(toolName)
-	if err == nil {
+	// Fast path: rely on the process PATH first.
+	if path, err := exec.LookPath(toolName); err == nil {
 		return path, nil
 	}
 
-	// Check common installation directories
-	homeDir, _ := os.UserHomeDir()
-	candidates := []string{
-		filepath.Join(homeDir, ".local", "bin", toolName),
-		filepath.Join(homeDir, "go", "bin", toolName),
-		filepath.Join("/usr/local/bin", toolName),
-		filepath.Join("/usr/bin", toolName),
-		filepath.Join("/snap/bin", toolName),
-		filepath.Join("/opt/homebrew/bin", toolName),
-	}
-
-	for _, cand := range candidates {
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
-			return cand, nil
+	for _, dir := range toolSearchDirs() {
+		cand := filepath.Join(dir, toolName)
+		info, err := os.Stat(cand) // Stat follows symlinks — wrappers resolve fine.
+		if err != nil || info.IsDir() {
+			continue
 		}
+		return cand, nil
 	}
 
 	return "", fmt.Errorf("tool %q not found in system PATH or common locations", toolName)

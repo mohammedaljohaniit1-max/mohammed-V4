@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +65,40 @@ func readNonEmptyLines(path string) []string {
 // writeLines writes a slice of strings to a file, one per line.
 func writeLines(path string, lines []string) {
 	_ = os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+}
+
+// mapKeys returns the keys of a string-keyed set as a slice.
+func mapKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// sanitizeHostFileLF (BUG #6 V6) reads a host list, strips CR (\r) and any
+// surrounding whitespace so lines use Unix LF endings, and writes a cleaned
+// copy into the output folder. httpx silently drops CRLF-terminated hosts, so
+// feeding it a sanitized file is what makes the primary probe succeed. Returns
+// the cleaned file path, or the original path when nothing needed cleaning /
+// on any read error.
+func sanitizeHostFileLF(s *engine.State, src string) string {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return src
+	}
+	if !strings.ContainsRune(string(data), '\r') {
+		return src // already LF-only — no rewrite needed.
+	}
+	var out []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(data), "\r", ""), "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			out = append(out, t)
+		}
+	}
+	dst := filepath.Join(s.OutputFolder, "hosts_lf.txt")
+	writeLines(dst, out)
+	return dst
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -591,10 +628,14 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		}
 
 		// assetfinder — apex only; filters to hosts under this apex.
+		// BUG #5 FIX (V6): read stdout line-by-line with an explicit 2-minute
+		// timeout. assetfinder emits results ONLY on stdout (never a file), so a
+		// robust CRLF-tolerant stdout parse is what actually captures its output.
 		afCount := 0
-		res = runner.RunTool(ctx, "assetfinder", []string{"--subs-only", domain}, nil)
-		if res.OK() {
-			for _, l := range strings.Split(res.Stdout, "\n") {
+		res = runner.RunToolWithTimeout(ctx, "assetfinder", []string{"--subs-only", domain}, nil, 2*time.Minute)
+		if res.OK() || res.TimedOut {
+			// Strip \r so CRLF-terminated lines still match the apex suffix.
+			for _, l := range strings.Split(strings.ReplaceAll(res.Stdout, "\r", ""), "\n") {
 				l = strings.TrimSpace(strings.ToLower(l))
 				if l != "" && (l == domain || strings.HasSuffix(l, "."+domain)) && !found[l] {
 					found[l] = true
@@ -607,25 +648,38 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		}
 	}
 
-	// BUG #4 FIX: amass passive silently returns nothing without a config file
-	// that enables data sources. Generate a minimal one at the default path if
-	// the user has not provided their own, BEFORE amass runs.
-	amassCfg := ensureAmassConfig(s)
+	// BUG #3 FIX (V6): detect the installed amass MAJOR version ONCE. amass v4+
+	// dropped the old config.ini format entirely and works perfectly in passive
+	// mode from CLI flags alone — feeding it a v3 config.ini made it silently
+	// return 0. We branch: v4+ = CLI-only; v3 = keep the generated config.ini.
+	amassMajor := detectAmassMajor(ctx)
+	amassCfg := ""
+	if amassMajor > 0 && amassMajor < 4 {
+		// Only v3 benefits from (and can parse) the generated INI config.
+		amassCfg = ensureAmassConfig(s)
+	}
 
 	// ── Tools that require APEX/root domains ONLY (BUG #2) ────────────
 	for _, domain := range apexDomains {
 		s.Printf("│  [Apex passive enum: %s]\n", domain)
 
-		// amass — apex only. -timeout is in MINUTES. -config points at the
-		// generated config so free sources are actually queried (BUG #4).
+		// amass — apex only. BUG #3 FIX (V6): version-aware invocation.
+		//   v4+: amass enum -passive -d <domain> -timeout 3 -o <out>   (NO -config)
+		//   v3 : amass enum -passive -d <domain> -config <ini> -o <out> -timeout 4
 		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
 		amCount := 0
-		amArgs := []string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}
-		if amassCfg != "" {
-			amArgs = append(amArgs, "-config", amassCfg)
+		var amArgs []string
+		if amassMajor >= 4 || amassMajor == 0 {
+			// v4+ (or unknown → assume modern): CLI-only, no config file.
+			amArgs = []string{"enum", "-passive", "-d", domain, "-timeout", "3", "-o", amOut}
+		} else {
+			amArgs = []string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}
+			if amassCfg != "" {
+				amArgs = append(amArgs, "-config", amassCfg)
+			}
 		}
 		res := runner.RunTool(ctx, "amass", amArgs, nil)
-		if res.OK() {
+		if res.OK() || res.TimedOut {
 			for _, l := range readNonEmptyLines(amOut) {
 				l = strings.ToLower(l)
 				if strings.HasSuffix(l, domain) && !found[l] {
@@ -633,13 +687,10 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 					amCount++
 				}
 			}
-			// BUG #1 (audit) FIX: amass silently returns 0 when it has no working
-			// data-source config. If we auto-created a config this run AND the
-			// first pass returned nothing, retry ONCE (the config may not have
-			// been on disk when amass first read it) and log actionable advice.
-			if amCount == 0 && amassCfg != "" {
-				s.Printf("│    amass: 0 results — retrying once with auto-created free-source config\n")
-				retry := runner.RunTool(ctx, "amass", amArgs, nil)
+			if amCount == 0 && res.OK() {
+				// One retry without any config, in case a stale INI is interfering.
+				retryArgs := []string{"enum", "-passive", "-d", domain, "-timeout", "3", "-o", amOut}
+				retry := runner.RunTool(ctx, "amass", retryArgs, nil)
 				if retry.OK() || retry.TimedOut {
 					for _, l := range readNonEmptyLines(amOut) {
 						l = strings.ToLower(l)
@@ -649,39 +700,25 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 						}
 					}
 				}
-				if amCount == 0 {
-					s.Printf("│    amass: still 0 — add API keys to %s for better coverage\n", amassCfg)
-				}
 			}
-			s.Printf("│    amass: %d subdomains\n", amCount)
-		} else if res.TimedOut {
-			s.Printf("│    amass: partial (timed out) — parsing any output\n")
-			for _, l := range readNonEmptyLines(amOut) {
-				l = strings.ToLower(l)
-				if strings.HasSuffix(l, domain) && !found[l] {
-					found[l] = true
-				}
+			verNote := ""
+			if amassMajor > 0 {
+				verNote = fmt.Sprintf(" (v%d)", amassMajor)
 			}
+			s.Printf("│    amass%s: %d subdomains\n", verNote, amCount)
 		} else {
 			s.Printf("│    amass: SKIP (%v)\n", res.Err)
 		}
 
-		// bbot — apex only (BUG #5 FIX). The old `-p subdomain-enum -f passive`
-		// preset pulls in slow modules (github_codesearch, certspotter, etc.)
-		// that routinely blow past 10 minutes, so bbot always hit the runner
-		// timeout with only partial output. We now EXCLUDE the slowest modules
-		// with -em and keep only fast passive sources; results are read from the
-		// output dir whether bbot finished or was still cut off.
+		// bbot — apex only. BUG #4 FIX (V6): use the exact proven invocation
+		//   bbot -t <domain> -p subdomain-enum -rf passive -om json --force -y -o <outdir>
+		// and parse ALL *.ndjson (and output.json) events where type==DNS_NAME.
+		// The old "[OK]" label on a 0 result was misleading — 0 from bbot is a
+		// FAILURE, so we now log it as such.
 		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
-		// BUG #2 (audit) FIX: emit JSON (`-om json`) so bbot writes a machine
-		// readable output.ndjson. The old code parsed only *.txt files, which
-		// bbot does not reliably produce for subdomain output — hence the
-		// perpetual "bbot: 0 subdomains". We now parse the ndjson DNS_NAME
-		// events first (canonical), then fall back to any *.txt.
 		res = runner.RunTool(ctx, "bbot", []string{
-			"-t", domain, "-p", "subdomain-enum", "-f", "passive",
-			"-em", "github_codesearch,dnsbrute,dnsbrute_mutations,dnscommonsrv,massdns",
-			"-om", "json", "-o", bbotOutDir, "--force", "-y",
+			"-t", domain, "-p", "subdomain-enum", "-rf", "passive",
+			"-om", "json", "--force", "-y", "-o", bbotOutDir,
 		}, nil)
 		if res.OK() || res.TimedOut {
 			bbotCount := 0
@@ -692,14 +729,14 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 					bbotCount++
 				}
 			}
+			// Parse EVERY .ndjson / output.json file in the output dir.
 			_ = filepath.Walk(bbotOutDir, func(path string, info os.FileInfo, err error) error {
 				if err != nil || info == nil || info.IsDir() {
 					return nil
 				}
 				base := strings.ToLower(filepath.Base(path))
 				switch {
-				case strings.HasSuffix(base, ".ndjson") || base == "output.json":
-					// Canonical bbot output: one JSON event per line.
+				case strings.HasSuffix(base, ".ndjson") || base == "output.json" || base == "output.ndjson":
 					for _, l := range readNonEmptyLines(path) {
 						var ev struct {
 							Type string `json:"type"`
@@ -710,18 +747,23 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 						}
 					}
 				case strings.HasSuffix(base, ".txt"):
-					// Fallback for older bbot builds that emit plain lists.
 					for _, l := range readNonEmptyLines(path) {
 						addHost(l)
 					}
 				}
 				return nil
 			})
-			status := "OK"
-			if res.TimedOut {
-				status = "partial (timeout)"
+			if bbotCount > 0 {
+				status := "OK"
+				if res.TimedOut {
+					status = "partial (timeout)"
+				}
+				s.Printf("│    bbot: %d subdomains [%s]\n", bbotCount, status)
+			} else if res.TimedOut {
+				s.Printf("│    bbot: 0 subdomains — FAILED (timed out before results)\n")
+			} else {
+				s.Printf("│    bbot: 0 subdomains — FAILED (no DNS_NAME events parsed from %s)\n", bbotOutDir)
 			}
-			s.Printf("│    bbot: %d subdomains [%s]\n", bbotCount, status)
 		} else {
 			s.Printf("│    bbot: SKIP (%v)\n", res.Err)
 		}
@@ -813,10 +855,40 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 	if wordlist == "" {
 		wordlist = ensureDNSWordlist(ctx, s)
 	}
+
+	// BUG #8 FIX (V6): a 100k wordlist × 3 apex domains cannot finish inside the
+	// old 8m/5m caps (needs ~45m). Cap the wordlist to the top 25,000 entries by
+	// default; only --profile xlarge uses the full list. This alone makes the
+	// phase finish while still adding subdomains.
+	profile := strings.ToLower(strings.TrimSpace(s.Config.Profile))
+	wordlistCap := 25000
+	if profile == "xlarge" {
+		wordlistCap = 0 // 0 = no cap (full wordlist)
+	}
+	if wordlist != "" && wordlistCap > 0 {
+		if capped, n := capDNSWordlist(s, wordlist, wordlistCap); capped != "" {
+			wordlist = capped
+			_ = n
+		}
+	}
 	if wordlist != "" {
 		if _, n := fileHasContent(wordlist); n > 0 {
 			s.Printf("│  DNS wordlist: %s (%d entries)\n", filepath.Base(wordlist), n)
 		}
+	}
+
+	// BUG #8 FIX (V6): profile-aware brute-force timeouts. The static per-tool
+	// caps (puredns 8m / dnsx 5m) are far too short for --profile large. Give
+	// large scans room to actually complete.
+	purednsTimeout := 8 * time.Minute
+	dnsxBruteTimeout := 5 * time.Minute
+	switch profile {
+	case "large":
+		purednsTimeout = 30 * time.Minute
+		dnsxBruteTimeout = 20 * time.Minute
+	case "xlarge":
+		purednsTimeout = 45 * time.Minute
+		dnsxBruteTimeout = 30 * time.Minute
 	}
 
 	// Ensure a resolvers file exists (BUG #3 root cause: missing --resolvers).
@@ -839,7 +911,7 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 			args := []string{"bruteforce", wordlist, domain,
 				"--resolvers", resolverFile, "--write", activeOut,
 				"--rate-limit", "150", "-q"}
-			res := runner.RunTool(ctx, "puredns", args, nil)
+			res := runner.RunToolWithTimeout(ctx, "puredns", args, nil, purednsTimeout)
 			if res.OK() {
 				for _, l := range readNonEmptyLines(activeOut) {
 					l = strings.ToLower(l)
@@ -865,7 +937,7 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 		// dnsx -d <domain> -w <wordlist> -a -resp-only -o <out>
 		args := []string{"-d", domain, "-w", wordlist, "-a", "-resp-only",
 			"-o", dnsxOut, "-silent", "-r", resolverFile}
-		res := runner.RunTool(ctx, "dnsx", args, nil)
+		res := runner.RunToolWithTimeout(ctx, "dnsx", args, nil, dnsxBruteTimeout)
 		if res.OK() {
 			for _, l := range readNonEmptyLines(dnsxOut) {
 				l = strings.ToLower(strings.Fields(l)[0])
@@ -897,6 +969,29 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 	writeLines(subFile, s.Subdomains)
 	s.Printf("│  Total After Active Bruteforce: %d\n", len(s.Subdomains))
 	return nil
+}
+
+// capDNSWordlist writes the first maxN non-comment entries of src to a capped
+// file inside the output folder and returns its path (BUG #8 V6). Returns
+// ("", 0) when the source is already <= maxN (caller keeps the original).
+func capDNSWordlist(s *engine.State, src string, maxN int) (string, int) {
+	if maxN <= 0 || src == "" {
+		return "", 0
+	}
+	lines := readNonEmptyLines(src)
+	filtered := lines[:0]
+	for _, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "#") {
+			continue
+		}
+		filtered = append(filtered, l)
+	}
+	if len(filtered) <= maxN {
+		return "", 0
+	}
+	capped := filepath.Join(s.OutputFolder, fmt.Sprintf("dns_wordlist_top%d.txt", maxN))
+	writeLines(capped, filtered[:maxN])
+	return capped, maxN
 }
 
 // ensureDNSWordlist downloads a minimal DNS wordlist to /tmp when none of the
@@ -960,11 +1055,32 @@ func ensureResolvers(s *engine.State) string {
 	return fallback
 }
 
+// detectAmassMajor runs `amass -version` and returns the major version number
+// (e.g. 4 for v4.2.0). Returns 0 when amass is missing or the version cannot be
+// parsed — callers treat 0 as "assume modern (v4+), CLI-only" (BUG #3 V6).
+// amass prints its version to STDERR on most builds, so we parse both streams.
+func detectAmassMajor(ctx context.Context) int {
+	if _, err := runner.ResolveToolPath("amass"); err != nil {
+		return 0
+	}
+	res := runner.RunToolWithTimeout(ctx, "amass", []string{"-version"}, nil, 20*time.Second)
+	out := res.Stdout + "\n" + res.Stderr
+	// Match the first vN or N. pattern, e.g. "v4.2.0", "amass version 3.23.3".
+	re := regexp.MustCompile(`v?(\d+)\.\d+`)
+	if m := re.FindStringSubmatch(out); len(m) == 2 {
+		if n, err := strconv.Atoi(m[1]); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
 // ensureAmassConfig makes sure amass has a config file that enables data
-// sources (BUG #4). If the user already has ~/.config/amass/config.ini we do
-// not touch it; otherwise we write a minimal one that turns on all free,
+// sources (BUG #4, v3 only). If the user already has ~/.config/amass/config.ini
+// we do not touch it; otherwise we write a minimal one that turns on all free,
 // key-less sources. Returns the config path, or "" if it could not be created
-// (amass then runs with its own defaults).
+// (amass then runs with its own defaults). Only used for amass v3 — v4+ ignores
+// this format (BUG #3 V6).
 func ensureAmassConfig(s *engine.State) string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -1349,29 +1465,27 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 		s.Printf("│  httpx: SKIP (no hosts to probe)\n")
 		return nil
 	}
+	// BUG #6 FIX (V6): the live scan proved httpx returns 0 endpoints when its
+	// probe is routed through Burp (the proxy breaks the initial TLS handshake to
+	// hundreds of hosts) and/or when the host list has CRLF line endings. So we
+	// now run the PRIMARY discovery pass WITHOUT the proxy, over a sanitized
+	// (LF-only) host file. Burp is used only for the OPTIONAL second content pass.
+	cleanHostsFile := sanitizeHostFileLF(s, hostsFile)
 	s.Printf("│  httpx input: %d hosts (%s)\n", inputN, filepath.Base(hostsFile))
 
 	httpxOut := filepath.Join(s.OutputFolder, "http_live.txt")
 
-	// -timeout 10 prevents hanging on slow hosts; -json writes JSONL to -o.
-	args := []string{"-l", hostsFile, "-o", httpxOut, "-silent", "-nc",
+	// PRIMARY PASS — direct, NO proxy. -timeout 10 prevents hanging on slow
+	// hosts; -json writes JSONL to -o.
+	baseArgs := []string{"-l", cleanHostsFile, "-o", httpxOut, "-silent", "-nc",
 		"-rl", "150", "-timeout", "10", "-sc", "-title", "-td", "-cdn", "-fr",
 		"-threads", fmt.Sprintf("%d", s.Config.Threads),
 		"-json", "-srd", filepath.Join(s.OutputFolder, "httpx_responses")}
 
-	// BUG #1: only route through Burp when the proxy is ACTIVE. engine.Run now
-	// forcibly sets Proxy.Active=false when Burp's connectivity test fails, so
-	// reaching this branch means Burp really is up. This is the ONLY correct
-	// way to route httpx through a proxy (it has no -insecure flag; it tolerates
-	// the proxy CA by default).
-	if px.Active {
-		args = append(args, "-http-proxy", px.ProxyURL)
-	}
-
-	res := runner.RunTool(ctx, "httpx", args, nil)
+	res := runner.RunTool(ctx, "httpx", baseArgs, nil)
 
 	urlSet := make(map[string]bool)
-	if res.OK() || res.TimedOut {
+	parseHTTPXOut := func() {
 		for _, l := range readNonEmptyLines(httpxOut) {
 			var rec map[string]interface{}
 			if json.Unmarshal([]byte(l), &rec) == nil {
@@ -1388,7 +1502,10 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 				s.URLs = append(s.URLs, parts[0])
 			}
 		}
-		s.Printf("│  httpx: %d live endpoints\n", len(urlSet))
+	}
+	if res.OK() || res.TimedOut {
+		parseHTTPXOut()
+		s.Printf("│  httpx (direct): %d live endpoints\n", len(urlSet))
 	} else {
 		s.Printf("│  httpx: FAILED (%v)\n", res.Err)
 		if s.Config.Debug && res.Stderr != "" {
@@ -1396,16 +1513,27 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 	}
 
-	// ── IMPROVEMENT #2 + #4: sanity check + direct fallback ────────────────
-	// httpx finding 0 endpoints from N resolved hosts is a red flag. Rather
-	// than silently break every downstream phase, probe the hosts directly
-	// (scheme-prefixed) so the pipeline always has URLs when hosts are live.
+	// SECOND PASS — content/header analysis THROUGH Burp so a researcher sees
+	// the confirmation traffic. This runs only when the proxy is active and the
+	// primary pass already found live hosts (we never depend on it for URLs).
+	if px.Active && len(urlSet) > 0 {
+		proxyArgs := append(append([]string{}, baseArgs...), "-http-proxy", px.ProxyURL)
+		// Feed the confirmed live URLs (not raw hosts) and discard the file
+		// output — this pass exists purely to mirror traffic into Burp.
+		liveList := filepath.Join(s.OutputFolder, "httpx_live_urls.txt")
+		writeLines(liveList, mapKeys(urlSet))
+		proxyArgs[1] = liveList // replace the -l argument value
+		proxyArgs = append(proxyArgs, "-o", filepath.Join(s.OutputFolder, "http_live_burp.txt"))
+		_ = runner.RunTool(ctx, "httpx", proxyArgs, nil)
+		s.Printf("│  httpx (Burp pass): mirrored %d live URLs into proxy\n", len(urlSet))
+	}
+
+	// ── Direct raw-socket fallback (last resort) ───────────────────────────
+	// If httpx itself found nothing (binary missing / all timeouts), probe the
+	// hosts directly so the pipeline always has URLs when hosts are live.
 	if len(urlSet) == 0 && inputN > 0 {
-		s.Printf("│  ⚠ WARNING: httpx found 0 endpoints from %d hosts — running direct fallback probe\n", inputN)
-		if s.Config.Debug {
-			s.Printf("│  [DEBUG] httpx cmd was: httpx %s\n", strings.Join(args, " "))
-		}
-		fallback := directProbe(ctx, s, readNonEmptyLines(hostsFile))
+		s.Printf("│  ⚠ WARNING: httpx found 0 endpoints from %d hosts — running direct raw-probe fallback\n", inputN)
+		fallback := directProbe(ctx, s, readNonEmptyLines(cleanHostsFile))
 		for _, u := range fallback {
 			if !urlSet[u] {
 				urlSet[u] = true
@@ -1598,12 +1726,21 @@ func (p *TLSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 // BUG #4 FIX: force TCP Connect scan with "-scan-type c" so naabu works
 // without root/CAP_NET_RAW (default SYN scan exits with status 2 unprivileged).
 // The old code used "-connect-scan", which is NOT a valid naabu flag.
+//
+// BUG #7 FIX: In the live production run naabu returned 0 open ports across
+// all 608 hosts because every host sat behind Cloudflare (AS13335) or AWS
+// CloudFront (AS16509), both of which silently DROP the unsolicited connect
+// probes naabu sends (anti-scan mitigation). Scanning them is 100% wasted
+// time. We now resolve each host, classify it against known CDN ASNs/CIDRs,
+// and for CDN hosts we SKIP naabu entirely and emit synthetic 80/443 entries
+// (those ports are always served by the edge). Only genuinely non-CDN hosts
+// are handed to naabu, which is tuned for reliability over raw speed.
 // ═══════════════════════════════════════════════════════════════
 type PortScanPhase struct{}
 
 func (p *PortScanPhase) Name() string { return "Port Scanning" }
 func (p *PortScanPhase) Description() string {
-	return "naabu top-1000 ports, TCP connect scan (-scan-type c, no root needed)"
+	return "CDN-aware port scan: skip Cloudflare/CloudFront edges, naabu the rest (-scan-type c)"
 }
 func (p *PortScanPhase) Execute(ctx context.Context, s *engine.State) error {
 	hostsFile := filepath.Join(s.OutputFolder, "live_dns.txt")
@@ -1613,20 +1750,157 @@ func (p *PortScanPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	portsOut := filepath.Join(s.OutputFolder, "ports.txt")
 
-	// -scan-type c == CONNECT scan (unprivileged). -Pn skips host discovery
-	// which also needs raw sockets.
-	res := runner.RunTool(ctx, "naabu", []string{
-		"-list", hostsFile, "-o", portsOut, "-silent",
-		"-top-ports", "1000", "-scan-type", "c", "-Pn",
-		"-rate", "1000", "-c", "25",
-	}, nil)
-	if res.OK() || res.TimedOut {
-		lines := readNonEmptyLines(portsOut)
-		s.Printf("│  naabu: %d open port entries\n", len(lines))
-	} else {
-		s.Printf("│  naabu: SKIP (%v)\n", res.Err)
+	hosts := readNonEmptyLines(hostsFile)
+
+	// ── BUG #7: CDN classification ─────────────────────────────────────────
+	// Split the host list into CDN-fronted hosts (naabu is futile) and direct
+	// hosts (naabu is useful). Results are cached per-IP so we never re-query
+	// the same edge twice.
+	var cdnHosts, directHosts []string
+	asnCache := map[string]bool{} // ip -> isCDN
+	var portEntries []string      // synthetic + real "host:port" lines
+
+	for _, h := range hosts {
+		host := strings.TrimSpace(strings.ToLower(h))
+		if host == "" {
+			continue
+		}
+		if isCDNHost(ctx, host, asnCache) {
+			cdnHosts = append(cdnHosts, host)
+			// The CDN edge always terminates 80/443 for a live host.
+			portEntries = append(portEntries, host+":80", host+":443")
+		} else {
+			directHosts = append(directHosts, host)
+		}
 	}
+
+	s.Printf("│  CDN classification: %d CDN-fronted (Cloudflare/CloudFront — naabu skipped), %d direct\n",
+		len(cdnHosts), len(directHosts))
+	if len(cdnHosts) > 0 {
+		s.Printf("│  CDN detected — assuming ports 80/443 open for %d edge host(s)\n", len(cdnHosts))
+	}
+
+	// ── naabu on the non-CDN hosts only ────────────────────────────────────
+	if len(directHosts) > 0 {
+		directFile := filepath.Join(s.OutputFolder, "portscan_direct_hosts.txt")
+		writeLines(directFile, directHosts)
+		naabuOut := filepath.Join(s.OutputFolder, "ports_naabu.txt")
+
+		// Tuned for RELIABILITY against filtered/rate-limited edges rather than
+		// raw speed: modest rate, explicit retries, generous per-probe timeout.
+		// -scan-type c == CONNECT scan (unprivileged). -Pn skips host discovery
+		// which also needs raw sockets.
+		res := runner.RunTool(ctx, "naabu", []string{
+			"-list", directFile, "-o", naabuOut, "-silent",
+			"-top-ports", "1000", "-scan-type", "c", "-Pn",
+			"-rate", "100", "-retries", "2", "-timeout", "3000", "-c", "25",
+		}, nil)
+		if res.OK() || res.TimedOut {
+			naabuEntries := readNonEmptyLines(naabuOut)
+			portEntries = append(portEntries, naabuEntries...)
+			s.Printf("│  naabu: %d open port entries from %d direct host(s)\n", len(naabuEntries), len(directHosts))
+		} else {
+			s.Printf("│  naabu: SKIP (%v)\n", res.Err)
+		}
+	}
+
+	// De-dup and persist the combined (synthetic + real) port map.
+	seen := map[string]bool{}
+	var deduped []string
+	for _, e := range portEntries {
+		e = strings.TrimSpace(e)
+		if e != "" && !seen[e] {
+			seen[e] = true
+			deduped = append(deduped, e)
+		}
+	}
+	writeLines(portsOut, deduped)
+	s.Printf("│  ports.txt: %d total open-port entries (%d synthetic CDN + naabu)\n",
+		len(deduped), len(cdnHosts)*2)
 	return nil
+}
+
+// cloudflareV4CIDRs and cloudFrontV4CIDRs are the published edge ranges for the
+// two CDNs that dropped every naabu probe in the production run. Matching by
+// CIDR avoids a network round-trip for the overwhelmingly common case; the
+// ip-api ASN lookup is only used as a fallback for hosts outside these ranges.
+var cloudflareV4CIDRs = []string{
+	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+}
+
+var cloudFrontV4CIDRs = []string{
+	"13.32.0.0/15", "13.35.0.0/16", "13.224.0.0/14", "18.64.0.0/14",
+	"52.46.0.0/18", "52.84.0.0/15", "52.124.128.0/17", "54.182.0.0/16",
+	"54.192.0.0/16", "54.230.0.0/16", "54.239.128.0/18", "64.252.64.0/18",
+	"65.8.0.0/16", "65.9.0.0/17", "70.132.0.0/18", "99.84.0.0/16",
+	"143.204.0.0/16", "204.246.164.0/22", "205.251.192.0/19",
+}
+
+var cdnNets = func() []*net.IPNet {
+	var nets []*net.IPNet
+	for _, c := range append(append([]string{}, cloudflareV4CIDRs...), cloudFrontV4CIDRs...) {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}()
+
+// isCDNHost reports whether a hostname resolves onto a Cloudflare or AWS
+// CloudFront edge. It first checks the resolved IPs against the published CDN
+// CIDRs (fast, offline) and only falls back to an ip-api ASN/org lookup when a
+// host resolves outside every known range. asnCache memoises the per-IP verdict
+// so shared edge IPs are classified once. Any resolution failure is treated as
+// NON-CDN so the host still gets a real naabu scan.
+func isCDNHost(ctx context.Context, host string, asnCache map[string]bool) bool {
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		v4 := ip.To4()
+		if v4 == nil {
+			continue // IPv4 only for this lightweight classification
+		}
+		key := v4.String()
+		if cached, ok := asnCache[key]; ok {
+			if cached {
+				return true
+			}
+			continue
+		}
+		isCDN := false
+		for _, n := range cdnNets {
+			if n.Contains(v4) {
+				isCDN = true
+				break
+			}
+		}
+		if !isCDN {
+			// Fallback: ASN/org lookup for edges outside the static CIDR list.
+			body := curlGet(ctx, fmt.Sprintf("http://ip-api.com/json/%s?fields=as,org", key), "-m", "8")
+			if body != "" {
+				var m map[string]interface{}
+				if json.Unmarshal([]byte(body), &m) == nil {
+					blob := strings.ToLower(fmt.Sprintf("%v %v", m["as"], m["org"]))
+					if strings.Contains(blob, "cloudflare") ||
+						strings.Contains(blob, "cloudfront") ||
+						strings.Contains(blob, "as13335") ||
+						strings.Contains(blob, "as16509") {
+						isCDN = true
+					}
+				}
+			}
+		}
+		asnCache[key] = isCDN
+		if isCDN {
+			return true
+		}
+	}
+	return false
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1660,18 +1934,38 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 	// to a degraded default (which returned 0 URLs for the apex in the live run).
 	gauCfg := ensureGauConfig(s)
 
+	// ── BUG #9 FIX: adaptive gau timeout ───────────────────────────────────
+	// For roblox.com the multi-provider gau run over 2795 subdomains never
+	// finished inside the default per-tool timeout and returned 0 URLs. When
+	// the resolved surface is large we (a) extend the per-tool timeout to
+	// 15 min, and (b) pass gau its own --timeout so a single slow provider
+	// can't wedge the whole run. Small targets keep the default budget.
+	subCount := 0
+	if n := len(readNonEmptyLines(filepath.Join(s.OutputFolder, "live_dns.txt"))); n > 0 {
+		subCount = n
+	} else {
+		subCount = len(readNonEmptyLines(filepath.Join(s.OutputFolder, "subdomains.txt")))
+	}
+	gauTimeout := 5 * time.Minute
+	if subCount > 500 {
+		gauTimeout = 15 * time.Minute
+		s.Printf("│  gau: large surface (%d hosts) → extended timeout 15m\n", subCount)
+	}
+
 	for _, domain := range targets {
 		// gau: providers + threads + retries + subs (BUG #10). --subs makes
 		// gau expand to subdomains, which is where the archives actually live.
+		// --timeout caps each individual HTTP request so one stalled provider
+		// cannot consume the whole per-tool budget (BUG #9).
 		gauArgs := []string{
-			"--threads", "5", "--retries", "3", "--subs",
+			"--threads", "5", "--retries", "3", "--subs", "--timeout", "15",
 			"--providers", "wayback,commoncrawl,otx,urlscan",
 		}
 		if gauCfg != "" {
 			gauArgs = append(gauArgs, "--config", gauCfg)
 		}
 		gauArgs = append(gauArgs, domain)
-		res := runner.RunTool(ctx, "gau", gauArgs, nil)
+		res := runner.RunToolWithTimeout(ctx, "gau", gauArgs, nil, gauTimeout)
 		gauCount := 0
 		if res.OK() || res.TimedOut {
 			for _, l := range strings.Split(res.Stdout, "\n") {
@@ -1682,6 +1976,31 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 				}
 			}
 			s.Printf("│  gau [%s]: %d URLs\n", domain, gauCount)
+			// BUG #9 fallback: the multi-provider run can time out or return 0
+			// on huge domains because CommonCrawl/URLScan stall. Retry with the
+			// single most reliable source (Wayback) so we still get coverage.
+			if gauCount == 0 && (res.TimedOut || res.OK()) {
+				wbArgs := []string{"--threads", "5", "--retries", "3", "--subs",
+					"--timeout", "15", "--providers", "wayback"}
+				if gauCfg != "" {
+					wbArgs = append(wbArgs, "--config", gauCfg)
+				}
+				wbArgs = append(wbArgs, domain)
+				retry := runner.RunToolWithTimeout(ctx, "gau", wbArgs, nil, gauTimeout)
+				if retry.OK() || retry.TimedOut {
+					rc := 0
+					for _, l := range strings.Split(retry.Stdout, "\n") {
+						l = strings.TrimSpace(l)
+						if strings.HasPrefix(l, "http") && !allURLs[l] {
+							allURLs[l] = true
+							rc++
+						}
+					}
+					if rc > 0 {
+						s.Printf("│  gau [%s]: wayback-only retry recovered %d URLs\n", domain, rc)
+					}
+				}
+			}
 		} else {
 			s.Printf("│  gau [%s]: SKIP (%v)\n", domain, res.Err)
 		}

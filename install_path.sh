@@ -76,7 +76,7 @@ TOOLS=(
     getJS paramspider arjun
     ffuf feroxbuster dirsearch
     nuclei dalfox kxss sqlmap ghauri
-    dontgo403 kr crlfuzz smuggler
+    nomore403 dontgo403 kiterunner kr crlfuzz smuggler
     cloud_enum s3scanner interactsh-client gf
 )
 
@@ -254,14 +254,19 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         relink_existing "amass"
     fi
 
-    # ── paramspider (git clone install — pip pkg is stale) ───────────────────
+    # ── paramspider (V6: Kali apt package — installs to /usr/bin) ─────────────
+    # BUG #1: on Kali the canonical paramspider ships as an apt package that
+    # lands at /usr/bin/paramspider. Prefer it; only fall back to the git/pip
+    # install on non-apt systems. The apt route is what the production box used.
     if ! command -v paramspider &>/dev/null; then
-        _info "Installing paramspider..."
-        if git clone --depth 1 https://github.com/devanshbatham/paramspider.git "$OPT_DIR/paramspider_src" 2>/dev/null; then
-            pip3 install --quiet --break-system-packages "$OPT_DIR/paramspider_src" 2>/dev/null \
-                || pip3 install --quiet --user "$OPT_DIR/paramspider_src" 2>/dev/null \
-                || pip3 install --quiet "$OPT_DIR/paramspider_src" 2>/dev/null || true
-        fi
+        _info "Installing paramspider (apt preferred)..."
+        $SUDO apt-get install -y -qq paramspider 2>/dev/null || {
+            if git clone --depth 1 https://github.com/devanshbatham/paramspider.git "$OPT_DIR/paramspider_src" 2>/dev/null; then
+                pip3 install --quiet --break-system-packages "$OPT_DIR/paramspider_src" 2>/dev/null \
+                    || pip3 install --quiet --user "$OPT_DIR/paramspider_src" 2>/dev/null \
+                    || pip3 install --quiet "$OPT_DIR/paramspider_src" 2>/dev/null || true
+            fi
+        }
         relink_existing "paramspider"
         command -v paramspider &>/dev/null && _log "paramspider installed" || _warn "paramspider install failed"
     fi
@@ -275,23 +280,33 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         relink_existing "dirsearch"
     fi
 
-    # ── dontgo403 (go build from source) ──────────────────────────────────────
-    if ! command -v dontgo403 &>/dev/null; then
-        _info "Building dontgo403..."
-        if git clone --depth 1 https://github.com/devploit/dontgo403.git "$TMP_BUILD/dontgo403" 2>/dev/null; then
-            ( cd "$TMP_BUILD/dontgo403" && go build -o dontgo403 . 2>/dev/null \
-                && cp dontgo403 "$OPT_DIR/dontgo403" 2>/dev/null && link_tool "$OPT_DIR/dontgo403" "dontgo403" )
-            command -v dontgo403 &>/dev/null && _log "dontgo403 installed" || _warn "dontgo403 build failed"
+    # ── dontgo403 → nomore403 (V6: repo renamed) ──────────────────────────────
+    # BUG (Section 2): devploit/dontgo403 was renamed to devploit/nomore403. The
+    # old go build target no longer resolves. Install via `go install` and expose
+    # BOTH names so callers using the legacy "dontgo403" binary keep working.
+    if ! command -v dontgo403 &>/dev/null && ! command -v nomore403 &>/dev/null; then
+        _info "Installing nomore403 (formerly dontgo403)..."
+        install_go_tool "github.com/devploit/nomore403@latest" "nomore403"
+        if command -v nomore403 &>/dev/null; then
+            # Symlink the legacy name to the new binary.
+            link_tool "$(command -v nomore403)" "dontgo403"
+            _log "nomore403 installed (dontgo403 symlink created)"
+        else
+            _warn "nomore403 install failed"
         fi
     fi
 
-    # ── kiterunner (kr) ───────────────────────────────────────────────────────
-    if ! command -v kr &>/dev/null; then
-        _info "Building kiterunner (kr)..."
-        if git clone --depth 1 https://github.com/assetnote/kiterunner.git "$TMP_BUILD/kiterunner" 2>/dev/null; then
-            ( cd "$TMP_BUILD/kiterunner" && (make build 2>/dev/null || go build -o dist/kr ./cmd/kiterunner 2>/dev/null) \
-                && cp dist/kr "$OPT_DIR/kr" 2>/dev/null && link_tool "$OPT_DIR/kr" "kr" )
-            command -v kr &>/dev/null && _log "kiterunner (kr) installed" || _warn "kiterunner build failed"
+    # ── kiterunner (kr) (V6: go install + kr/kiterunner symlinks) ─────────────
+    # Section 2: install straight from the module path — the source build was
+    # flaky. Expose both the "kiterunner" module binary AND the short "kr" alias.
+    if ! command -v kr &>/dev/null && ! command -v kiterunner &>/dev/null; then
+        _info "Installing kiterunner (kr)..."
+        install_go_tool "github.com/assetnote/kiterunner/cmd/kiterunner@latest" "kiterunner"
+        if command -v kiterunner &>/dev/null; then
+            link_tool "$(command -v kiterunner)" "kr"
+            _log "kiterunner installed (kr symlink created)"
+        else
+            _warn "kiterunner install failed"
         fi
     fi
 
@@ -303,14 +318,31 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         install_py_wrapper "$OPT_DIR/smuggler/smuggler.py" "smuggler"
     fi
 
-    # ── cloud_enum (python wrapper) ───────────────────────────────────────────
+    # ── cloud_enum (V6: git clone /opt + requests-futures + bash wrapper) ─────
+    # BUG #2: the Go runner expects a `cloud_enum` binary on PATH. cloud_enum is
+    # a python script, so we clone it to /opt/cloud_enum, install its deps
+    # (requirements.txt PLUS requests-futures, which the requirements file omits
+    # on some tags and whose absence makes cloud_enum crash on import), and drop
+    # a bash wrapper on PATH that execs the script. This is the exact recipe
+    # proven on the Kali production box.
     if ! command -v cloud_enum &>/dev/null; then
         _info "Installing cloud_enum..."
         git clone --depth 1 https://github.com/initstring/cloud_enum.git "$OPT_DIR/cloud_enum" 2>/dev/null \
             || git -C "$OPT_DIR/cloud_enum" pull 2>/dev/null || true
         pip3 install --quiet --break-system-packages -r "$OPT_DIR/cloud_enum/requirements.txt" 2>/dev/null \
             || pip3 install --quiet -r "$OPT_DIR/cloud_enum/requirements.txt" 2>/dev/null || true
-        install_py_wrapper "$OPT_DIR/cloud_enum/cloud_enum.py" "cloud_enum"
+        # requests-futures is required at import time but missing from some tags.
+        pip3 install --quiet --break-system-packages requests-futures 2>/dev/null \
+            || pip3 install --quiet requests-futures 2>/dev/null || true
+        # Bash wrapper (not a python-import wrapper) so `cloud_enum <args>` works
+        # from any CWD and lands on PATH as a real executable.
+        cat > "$OPT_DIR/cloud_enum_wrapper.sh" <<EOF
+#!/usr/bin/env bash
+exec python3 "$OPT_DIR/cloud_enum/cloud_enum.py" "\$@"
+EOF
+        chmod +x "$OPT_DIR/cloud_enum_wrapper.sh"
+        link_tool "$OPT_DIR/cloud_enum_wrapper.sh" "cloud_enum"
+        command -v cloud_enum &>/dev/null && _log "cloud_enum installed" || _warn "cloud_enum install failed"
     fi
 else
     _warn "SKIP_INSTALL=1 — skipping downloads, only linking + PATH enforcement."
