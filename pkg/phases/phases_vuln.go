@@ -190,13 +190,19 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 		return nil
 	}
 
-	// EXPANSION 4 (speed tuning): hard-cap the fuzzing wordlist to the top
-	// 10,000 high-priority routes. A raft/seclists file can hold 100k+ entries
-	// which, multiplied across 15 targets, blows well past the < 90 minute
-	// budget. capWordlist writes a trimmed copy and returns its path.
-	if capped, n := capWordlist(s, wordlist, 10000); capped != "" {
+	// ── BUG #10 FIX ────────────────────────────────────────────────────────
+	// In the production run Phase 17 burned 75 minutes for 0 results: a 10k
+	// wordlist × 15 targets, with no per-request timeout and matching too many
+	// status codes (so every WAF challenge/soft-404 counted as a "hit" and had
+	// to be fetched). We now:
+	//   (1) cap the wordlist to the top 5,000 high-signal routes,
+	//   (2) cap targets to 10,
+	//   (3) add -rate 100 -timeout 10 and a tighter -mc 200,301,302,403,
+	//   (4) wrap the WHOLE phase in a hard 15-minute deadline so it can never
+	//       run away again.
+	if capped, n := capWordlist(s, wordlist, 5000); capped != "" {
 		wordlist = capped
-		s.Printf("│  ffuf wordlist: capped to top %d routes (speed tuning)\n", n)
+		s.Printf("│  ffuf wordlist: capped to top %d routes (BUG #10 speed tuning)\n", n)
 	}
 
 	// Prefer live endpoints from httpx; fall back to any http URL.
@@ -204,13 +210,18 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(seeds) == 0 {
 		seeds = dedupeURLs(s.URLs)
 	}
-	if len(seeds) > 15 {
-		seeds = seeds[:15]
+	if len(seeds) > 10 {
+		seeds = seeds[:10]
 	}
 	if len(seeds) == 0 {
 		s.Printf("│  ffuf: SKIP (no targets)\n")
 		return nil
 	}
+
+	// BUG #10: hard phase-level ceiling. Even if a single ffuf invocation
+	// misbehaves, the phase as a whole cannot exceed 15 minutes.
+	phaseCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
 
 	fuzzOut := filepath.Join(s.OutputFolder, "fuzz_results.txt")
 	// FIX #5: Tier 1 DIRECT — never routes fuzzing through Burp.
@@ -219,21 +230,28 @@ func (p *FuzzingPhase) Execute(ctx context.Context, s *engine.State) error {
 	hits := 0
 
 	for i, u := range seeds {
+		if phaseCtx.Err() != nil {
+			s.Printf("│  ffuf: 15m phase budget reached — stopping after %d/%d targets\n", i, len(seeds))
+			break
+		}
 		if !strings.HasPrefix(u, "http") {
 			continue
 		}
 		base := strings.TrimRight(u, "/")
 		outFile := filepath.Join(s.OutputFolder, fmt.Sprintf("ffuf_%d.json", i))
 
+		// BUG #10: -timeout 10 (per request) + tighter -mc keeps ffuf from
+		// chasing WAF challenge pages, and -rate 100 respects edge rate limits.
 		args := []string{"-u", base + "/FUZZ", "-w", wordlist,
-			"-mc", "200,204,301,302,307,401,403", "-t", "20",
-			"-rate", "100", "-o", outFile, "-of", "json", "-s"}
+			"-mc", "200,301,302,403", "-t", "20",
+			"-rate", "100", "-timeout", "10",
+			"-o", outFile, "-of", "json", "-s"}
 		// FIX #5 (Tier 1 DIRECT): fuzzing is high-volume discovery noise and
 		// must NEVER flood Burp. px is inert under selective routing.
 		if px.Active {
 			args = append(args, "-x", px.ProxyURL)
 		}
-		res := runner.RunTool(ctx, "ffuf", args, nil)
+		res := runner.RunToolWithTimeout(phaseCtx, "ffuf", args, nil, 15*time.Minute)
 		if res.OK() || res.TimedOut {
 			if data, err := os.ReadFile(outFile); err == nil {
 				allResults = append(allResults, string(data))
@@ -665,15 +683,29 @@ func (p *OpenRedirectPhase) Execute(ctx context.Context, s *engine.State) error 
 	}
 	redirectJSONL := filepath.Join(s.OutputFolder, "redirect_results.jsonl")
 
+	// ── BUG #11 FIX ────────────────────────────────────────────────────────
+	// In the production run Phase 22 spent 20 minutes on 0 results because the
+	// full param-URL list (tens of thousands of entries) was fed to nuclei with
+	// no ceiling. Open-redirect templates are cheap per-URL but the volume was
+	// the problem. We cap the input to the first 50 param URLs and enforce a
+	// hard 5-minute deadline so the phase can never run away.
+	scanFile := paramsFile
+	if lines := readNonEmptyLines(paramsFile); len(lines) > 50 {
+		scanFile = filepath.Join(s.OutputFolder, "redirect_targets_top50.txt")
+		writeLines(scanFile, lines[:50])
+		s.Printf("│  Open Redirect: capped %d param URLs → top 50 (BUG #11)\n", len(lines))
+	}
+
 	// FIX #5: Tier 2 BURP.
 	px := s.PhaseProxy(proxy.ProxyModeSelective)
-	args := []string{"-l", paramsFile, "-tags", "redirect", "-jsonl", "-o", redirectJSONL,
+	args := []string{"-l", scanFile, "-tags", "redirect", "-jsonl", "-o", redirectJSONL,
 		"-silent", "-nc", "-rl", "100"}
 	if px.Active {
 		args = append(args, "-proxy", px.ProxyURL)
 	}
 
-	res := runner.RunTool(ctx, "nuclei", args, nil)
+	// BUG #11: hard 5-minute ceiling on the whole redirect scan.
+	res := runner.RunToolWithTimeout(ctx, "nuclei", args, nil, 5*time.Minute)
 	if res.OK() || res.TimedOut {
 		count := 0
 		for _, line := range readNonEmptyLines(redirectJSONL) {
