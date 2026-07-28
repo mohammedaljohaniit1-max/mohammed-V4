@@ -1,17 +1,47 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# MOHAMMED v4 — Configuration File
+# MOHAMMED V7 QUANTUM — Configuration File
+# Autonomous Attack Surface & Exploit Engine
+# 45+ phases · 50+ OSINT sources · 5-gate false-positive validation
 # Copy this file and fill in your API keys before running.
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── API Keys ──────────────────────────────────────────────────────────────────
+# All keys are OPTIONAL. The V7 OSINT engine (Phase 02b) uses 25+ key-LESS
+# certificate-transparency / passive-DNS / archive sources; keys below merely
+# unlock the extra premium sources (VirusTotal, SecurityTrails, Chaos, …).
 api_keys:
-  github: ""           # GitHub PAT: https://github.com/settings/tokens
-  shodan: ""           # Shodan API: https://account.shodan.io
-  virustotal: ""       # VirusTotal API: https://www.virustotal.com/gui/my-apikey
-  alienvault: ""       # AlienVault OTX: https://otx.alienvault.com/api
-  securitytrails: ""   # SecurityTrails: https://securitytrails.com/app/account/credentials
-  chaos: ""            # Chaos (ProjectDiscovery): https://chaos.projectdiscovery.io
-  censys: ""           # Censys: https://search.censys.io/account/api
+  github: ""           # GitHub PAT (code search):  https://github.com/settings/tokens
+  shodan: ""           # Shodan API (dns/domain):   https://account.shodan.io
+  virustotal: ""       # VirusTotal subdomains:      https://www.virustotal.com/gui/my-apikey
+  alienvault: ""       # AlienVault OTX passive-dns: https://otx.alienvault.com/api
+  securitytrails: ""   # SecurityTrails subdomains:  https://securitytrails.com/app/account/credentials
+  chaos: ""            # Chaos (ProjectDiscovery):   https://chaos.projectdiscovery.io
+  censys: ""           # Censys (id:secret base64):  https://search.censys.io/account/api
+  haveibeenpwned: ""   # HIBP breach intel:          https://haveibeenpwned.com/API/Key
+
+# ── V7 Exploit Phases (Section 3: phases 31-45) ──────────────────────────────
+# The custom exploit engines run REAL attack logic (differential IDOR, SSTI
+# arithmetic oracle, race-condition burst, business-logic tampering, API
+# security, correlation). Every candidate MUST clear the 5-gate false-positive
+# validator (Section 4) before it becomes a finding.
+exploit:
+  enabled: true
+  # Per-phase URL budget — the highest-signal head of the deduplicated corpus.
+  max_urls_per_phase: 120
+  # Race-condition burst size (release-barrier concurrency).
+  race_concurrency: 20
+  # Route every crafted exploit request through Burp when selective_routing is
+  # on, so an operator can review the full attack in the sitemap (Section 5).
+  route_through_burp: true
+
+# ── V7 5-Gate False-Positive Validation (Section 4) ──────────────────────────
+# Gate 1 baseline diff (SPA catch-all) · Gate 2 private data · Gate 3
+# exploitability · Gate 4 in-scope · Gate 5 reproducible. Known-FP patterns
+# (AWSALB cookies, CloudFront error pages, wildcard-CORS on public pages) are
+# rejected pre-gate.
+validation:
+  enabled: true
+  baseline_comparison: true   # probe a random path and discard SPA catch-alls
 
 # ── Ollama — Local AI (No cloud, no data leaks) ──────────────────────────────
 ollama:

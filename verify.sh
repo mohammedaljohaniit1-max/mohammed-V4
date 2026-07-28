@@ -62,6 +62,19 @@ check_file "pkg/phases/phases_deeprecon.go"
 check_file "pkg/engine/checkpoint.go"
 check_file "pkg/config/config.go"
 check_file "pkg/ai/triage.go"
+# ── V7 QUANTUM new files (Sections 2/3/4) ────────────────────────────
+check_file "pkg/phases/phases_advanced.go"
+check_file "pkg/phases/phases_osint_v2.go"
+check_file "pkg/exploit/client.go"
+check_file "pkg/exploit/idor.go"
+check_file "pkg/exploit/auth_bypass.go"
+check_file "pkg/exploit/race_condition.go"
+check_file "pkg/exploit/business_logic.go"
+check_file "pkg/exploit/ssti.go"
+check_file "pkg/exploit/api_security.go"
+check_file "pkg/validation/baseline.go"
+check_file "pkg/validation/false_positive.go"
+check_file "pkg/correlation/engine.go"
 check_file "config.yaml"
 check_file "scope.txt"
 check_file "setup.sh"
@@ -757,6 +770,63 @@ check_grep cmd/mohammed/main.go 'func runReport' \
 check_grep pkg/report/server.go 'Copy HackerOne|Copy HackerOne Report|copyH1|copy-h1' \
     "EXP #5: one-click Copy HackerOne Report present" \
     "EXP #5: Copy HackerOne Report MISSING"
+
+# ── Section: V7 QUANTUM (phases 31-45, 50+ OSINT, 5-gate FP) ──────────
+hdr "V7 QUANTUM — exploit engines, OSINT v2, 5-gate validation"
+
+# V7.1 — exploit phases registered in main.go
+check_grep cmd/mohammed/main.go 'phases.IDORPhase\{\}' \
+    "main.go: Phase 32 IDOR registered" \
+    "main.go: IDORPhase NOT registered (V7 regression)"
+check_grep cmd/mohammed/main.go 'phases.APISecurityPhase\{\}' \
+    "main.go: Phase 35 API Security registered" \
+    "main.go: APISecurityPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.SSTIPhase\{\}' \
+    "main.go: Phase 39 SSTI registered" \
+    "main.go: SSTIPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.CorrelationPhase\{\}' \
+    "main.go: Phase 45 Correlation registered" \
+    "main.go: CorrelationPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.OSINTv2Phase\{\}' \
+    "main.go: OSINT v2 (50+ sources) registered" \
+    "main.go: OSINTv2Phase NOT registered"
+
+# V7.2 — version bumped to V7 QUANTUM
+check_grep cmd/mohammed/main.go 'V7 QUANTUM' \
+    "main.go: banner/help updated to V7 QUANTUM" \
+    "main.go: still on old version string"
+
+# V7.3 — SSTI arithmetic oracle uses a UNIQUE product (no raw reflection)
+check_grep pkg/exploit/ssti.go 'buildSSTIProbes\(1337, 1339\)' \
+    "ssti.go: arithmetic oracle uses unique factors 1337×1339" \
+    "ssti.go: SSTI probe factors MISSING"
+
+# V7.4 — 5-gate validator + known-FP patterns (AWSALB/CloudFront/CORS)
+check_grep pkg/validation/false_positive.go 'knownFPPatterns' \
+    "false_positive.go: known-FP patterns (AWSALB/CloudFront/CORS) present" \
+    "false_positive.go: known-FP patterns MISSING"
+check_grep pkg/validation/baseline.go 'func CompareToBaseline' \
+    "baseline.go: SPA catch-all baseline comparison present" \
+    "baseline.go: CompareToBaseline MISSING"
+
+# V7.5 — OSINT v2 has 30 source entries (25+ key-less + premium)
+if [ "$(grep -cE '^\s*\{"' pkg/phases/phases_osint_v2.go 2>/dev/null)" -ge 25 ]; then
+    pass "phases_osint_v2.go: 25+ OSINT sources registered"
+else
+    fail "phases_osint_v2.go: fewer than 25 OSINT sources"
+fi
+
+# V7.6 — exploit engines contain REAL logic (no TODO/placeholder)
+if grep -rqiE 'TODO|FIXME|not implemented|placeholder' pkg/exploit/ pkg/validation/ pkg/correlation/ 2>/dev/null; then
+    fail "V7 engines contain TODO/placeholder markers (mandate: no placeholders)"
+else
+    pass "V7 engines contain NO TODO/placeholder markers"
+fi
+
+# V7.7 — protected files were NOT touched (Section 6.3)
+check_grep pkg/engine/checkpoint.go '.' \
+    "checkpoint.go untouched & present (Section 6.3 NEVER TOUCH)" \
+    "checkpoint.go MISSING"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

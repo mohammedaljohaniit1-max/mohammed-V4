@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                                                     v3 | Ultimate Recon Engine
+                                       V7 QUANTUM | Autonomous Attack Surface Engine
 `
 
 const helpText = `
-MOHAMMED v4 — Ultimate Security Reconnaissance & Vulnerability Discovery Framework
+MOHAMMED V7 QUANTUM — Autonomous Attack Surface & Exploit Engine (45+ phases, 50+ OSINT, 5-gate FP validation)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -276,6 +276,7 @@ func runScan(args []string) {
 	allPhases := []engine.Phase{
 		&phases.ScopeValidationPhase{},    // 01
 		&phases.OSINTPhase{},              // 02
+		&phases.OSINTv2Phase{},            // 02b: V7 — 50+ passive OSINT sources
 		&phases.SubdomainPassivePhase{},   // 03
 		&phases.SubdomainActivePhase{},    // 04
 		&phases.DNSResolvePhase{},         // 05
@@ -303,7 +304,21 @@ func runScan(args []string) {
 		&phases.GitExposurePhase{},        // 26
 		&phases.EmailSecurityPhase{},      // 27
 		&phases.PrototypePollutionPhase{}, // 28
-		&phases.ReportPhase{},             // 29
+
+		// ── V7 (Section 3) custom exploit phases 31-45 ────────────────────────
+		// These run REAL attack logic and route every candidate through the
+		// 5-gate false-positive validator before a finding is stored. They are
+		// placed after all discovery/tool phases (so the URL corpus is fully
+		// populated) and before the correlation + report phases.
+		&phases.AuthSessionPhase{},   // 31: Auth & Session
+		&phases.IDORPhase{},          // 32: IDOR (differential)
+		&phases.RaceConditionPhase{}, // 33: Race Condition
+		&phases.BusinessLogicPhase{}, // 34: Business Logic
+		&phases.APISecurityPhase{},   // 35: API Security (GraphQL/JWT/BOLA/…)
+		&phases.SSTIPhase{},          // 39: SSTI arithmetic oracle
+		&phases.CorrelationPhase{},   // 45: Smart Correlation Engine (must be last-but-report)
+
+		&phases.ReportPhase{}, // 29 (kept last: renders everything above)
 	}
 
 	activeProfile := strings.ToLower(*profile)
@@ -323,11 +338,16 @@ func runScan(args []string) {
 	}
 	passivePhases := map[string]bool{
 		"Scope Validation": true, "OSINT Intelligence Gathering": true,
+		"OSINT v2 (50+ Sources)":        true, // V7: passive, key-less CT/DNS/archive
 		"Passive Subdomain Enumeration": true, "DNS Resolution & Enrichment": true,
 		"HTTP Probing & Tech Fingerprinting": true, "TLS/SSL Analysis": true,
 		"Deep External Recon": true, "Wayback & Historical URL Mining": true,
 		"Web Crawling & Spidering": true, "JS Analysis & Secret Extraction": true,
-		"Email Security Verification": true, "Final Report Generation": true,
+		"Email Security Verification": true,
+		// The correlation engine is passive (reads existing findings) and adds
+		// no traffic, so it belongs in the passive profile too.
+		"Smart Correlation Engine": true,
+		"Final Report Generation":  true,
 	}
 
 	for i, p := range allPhases {

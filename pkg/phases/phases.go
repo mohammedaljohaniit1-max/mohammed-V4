@@ -663,42 +663,67 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 	for _, domain := range apexDomains {
 		s.Printf("│  [Apex passive enum: %s]\n", domain)
 
-		// amass — apex only. BUG #3 FIX (V6): version-aware invocation.
-		//   v4+: amass enum -passive -d <domain> -timeout 3 -o <out>   (NO -config)
-		//   v3 : amass enum -passive -d <domain> -config <ini> -o <out> -timeout 4
+		// amass — apex only. V7 Section 1.1 FIX: amass v5 (5.x, tested on Kali
+		// 2026.2) REMOVED the -o flag and changed the config format again, so a
+		// v4-style `-o out.txt` invocation makes v5 error out and return 0. We
+		// now branch three ways and parse the RIGHT source in each case:
+		//   v5+     : amass enum -passive -d <domain> -timeout 3          → STDOUT
+		//   v4      : amass enum -passive -d <domain> -timeout 3 -o <out> → file
+		//   v3      : amass enum -passive -d <domain> -config <ini> -o<out> → file
+		//   unknown : treat as v5 (modern) and read STDOUT (the -o-less form is
+		//             the only one that is safe across every version — a v3/v4
+		//             binary still prints results to stdout too).
 		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
 		amCount := 0
 		var amArgs []string
-		if amassMajor >= 4 || amassMajor == 0 {
-			// v4+ (or unknown → assume modern): CLI-only, no config file.
+		amUsesStdout := false
+		switch {
+		case amassMajor >= 5 || amassMajor == 0:
+			// v5+ / unknown: NO -o flag; capture stdout.
+			amArgs = []string{"enum", "-passive", "-d", domain, "-timeout", "3"}
+			amUsesStdout = true
+		case amassMajor == 4:
 			amArgs = []string{"enum", "-passive", "-d", domain, "-timeout", "3", "-o", amOut}
-		} else {
+		default: // v3
 			amArgs = []string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}
 			if amassCfg != "" {
 				amArgs = append(amArgs, "-config", amassCfg)
 			}
 		}
 		res := runner.RunTool(ctx, "amass", amArgs, nil)
-		if res.OK() || res.TimedOut {
-			for _, l := range readNonEmptyLines(amOut) {
-				l = strings.ToLower(l)
-				if strings.HasSuffix(l, domain) && !found[l] {
-					found[l] = true
-					amCount++
-				}
+		// collectAmass ingests hosts from either stdout (v5) or the -o file
+		// (v3/v4). amass stdout lines look like "sub.example.com (FQDN) -->" on
+		// some versions, so we scan every whitespace token for an in-scope host.
+		collectAmass := func(r *runner.Result) {
+			var lines []string
+			if amUsesStdout {
+				lines = strings.Split(strings.ReplaceAll(r.Stdout, "\r", ""), "\n")
+				_ = writeAmassStdout(amOut, r.Stdout) // persist for the report
+			} else {
+				lines = readNonEmptyLines(amOut)
 			}
-			if amCount == 0 && res.OK() {
-				// One retry without any config, in case a stale INI is interfering.
-				retryArgs := []string{"enum", "-passive", "-d", domain, "-timeout", "3", "-o", amOut}
-				retry := runner.RunTool(ctx, "amass", retryArgs, nil)
-				if retry.OK() || retry.TimedOut {
-					for _, l := range readNonEmptyLines(amOut) {
-						l = strings.ToLower(l)
-						if strings.HasSuffix(l, domain) && !found[l] {
-							found[l] = true
+			for _, l := range lines {
+				for _, tok := range strings.Fields(strings.ToLower(l)) {
+					tok = strings.Trim(tok, ".,()<>\"'")
+					if tok == domain || strings.HasSuffix(tok, "."+domain) {
+						if !found[tok] {
+							found[tok] = true
 							amCount++
 						}
 					}
+				}
+			}
+		}
+		if res.OK() || res.TimedOut {
+			collectAmass(res)
+			if amCount == 0 && res.OK() {
+				// One stdout-only retry (safe on every version) in case a stale
+				// config or a removed flag interfered with the first attempt.
+				retry := runner.RunTool(ctx, "amass",
+					[]string{"enum", "-passive", "-d", domain, "-timeout", "3"}, nil)
+				if retry.OK() || retry.TimedOut {
+					amUsesStdout = true
+					collectAmass(retry)
 				}
 			}
 			verNote := ""
@@ -1073,6 +1098,13 @@ func detectAmassMajor(ctx context.Context) int {
 		}
 	}
 	return 0
+}
+
+// writeAmassStdout persists amass v5 stdout (which no longer supports -o) to
+// the per-domain output file so the artifact still exists for the report and
+// for downstream re-parsing. Best-effort — errors are ignored by the caller.
+func writeAmassStdout(path, stdout string) error {
+	return os.WriteFile(path, []byte(stdout), 0644)
 }
 
 // ensureAmassConfig makes sure amass has a config file that enables data
