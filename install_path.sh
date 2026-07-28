@@ -245,10 +245,16 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     install_pip_tool "s3scanner" "s3scanner"
     install_pip_tool "ghauri" "ghauri"
 
-    # ── amass (snap or go) ────────────────────────────────────────────────────
+    # ── amass (V7 Section 1.1: prefer apt = amass v5 on Kali 2026.2) ──────────
+    # amass v5 removed the -o flag and changed the config format (handled in
+    # phases.go via stdout capture + version detection). On Kali the apt package
+    # tracks v5, so we install/reinstall via apt FIRST and only fall back to
+    # snap/go on non-apt systems. --reinstall guarantees a stale v3/v4 binary is
+    # replaced by the current package.
     if ! command -v amass &>/dev/null; then
-        _info "Installing amass..."
-        $SUDO snap install amass 2>/dev/null \
+        _info "Installing amass (apt = v5 on Kali)..."
+        $SUDO apt-get install --reinstall -y -qq amass 2>/dev/null \
+            || $SUDO snap install amass 2>/dev/null \
             || install_go_tool "github.com/owasp-amass/amass/v4/...@master" "amass" \
             || _warn "amass install failed"
         relink_existing "amass"
@@ -296,17 +302,24 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         fi
     fi
 
-    # ── kiterunner (kr) (V6: go install + kr/kiterunner symlinks) ─────────────
-    # Section 2: install straight from the module path — the source build was
-    # flaky. Expose both the "kiterunner" module binary AND the short "kr" alias.
+    # ── kiterunner (kr) (V7 Section 1.2: PRE-BUILT BINARY, not go install) ────
+    # `go install` FAILS on modern Go for kiterunner. The proven method on Kali
+    # 2026.2 is to download the v1.0.2 release tarball, drop the `kr` binary on
+    # PATH, and symlink `kiterunner` → `kr`. We fall back to `go install` only if
+    # the download is unavailable (offline mirror).
     if ! command -v kr &>/dev/null && ! command -v kiterunner &>/dev/null; then
-        _info "Installing kiterunner (kr)..."
-        install_go_tool "github.com/assetnote/kiterunner/cmd/kiterunner@latest" "kiterunner"
-        if command -v kiterunner &>/dev/null; then
-            link_tool "$(command -v kiterunner)" "kr"
-            _log "kiterunner installed (kr symlink created)"
+        _info "Installing kiterunner v1.0.2 (pre-built binary)..."
+        KR_URL="https://github.com/assetnote/kiterunner/releases/download/v1.0.2/kiterunner_1.0.2_linux_amd64.tar.gz"
+        if wget -q "$KR_URL" -O /tmp/kr.tar.gz 2>/dev/null && tar -xzf /tmp/kr.tar.gz -C /tmp 2>/dev/null && [ -f /tmp/kr ]; then
+            cp /tmp/kr "$OPT_DIR/kr" 2>/dev/null && chmod +x "$OPT_DIR/kr"
+            link_tool "$OPT_DIR/kr" "kr"
+            command -v kr &>/dev/null && link_tool "$(command -v kr)" "kiterunner"
+            rm -f /tmp/kr.tar.gz /tmp/kr 2>/dev/null || true
+            command -v kr &>/dev/null && _log "kiterunner v1.0.2 installed (kiterunner symlink created)" || _warn "kiterunner install failed"
         else
-            _warn "kiterunner install failed"
+            _warn "kiterunner binary download failed — trying go install fallback"
+            install_go_tool "github.com/assetnote/kiterunner/cmd/kiterunner@latest" "kiterunner" \
+                && command -v kiterunner &>/dev/null && link_tool "$(command -v kiterunner)" "kr"
         fi
     fi
 
@@ -332,7 +345,10 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
         pip3 install --quiet --break-system-packages -r "$OPT_DIR/cloud_enum/requirements.txt" 2>/dev/null \
             || pip3 install --quiet -r "$OPT_DIR/cloud_enum/requirements.txt" 2>/dev/null || true
         # requests-futures is required at import time but missing from some tags.
-        pip3 install --quiet --break-system-packages requests-futures 2>/dev/null \
+        # V7 Section 1.4: --ignore-installed avoids a conflict with a distro-pinned
+        # older requests-futures that pip otherwise refuses to overwrite on Kali.
+        pip3 install requests-futures --break-system-packages --ignore-installed 2>/dev/null \
+            || pip3 install --quiet --break-system-packages requests-futures 2>/dev/null \
             || pip3 install --quiet requests-futures 2>/dev/null || true
         # Bash wrapper (not a python-import wrapper) so `cloud_enum <args>` works
         # from any CWD and lands on PATH as a real executable.
