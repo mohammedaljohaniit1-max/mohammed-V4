@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                                       V7 QUANTUM | Autonomous Attack Surface Engine
+                                       V7.1 QUANTUM | Autonomous Attack Surface Engine
 `
 
 const helpText = `
-MOHAMMED V7 QUANTUM — Autonomous Attack Surface & Exploit Engine (45+ phases, 50+ OSINT, 5-gate FP validation)
+MOHAMMED V7.1 QUANTUM — Autonomous Attack Surface & Exploit Engine (50+ phases, 50+ OSINT, 20+ exploit engines, 5-gate FP validation)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -310,13 +310,19 @@ func runScan(args []string) {
 		// 5-gate false-positive validator before a finding is stored. They are
 		// placed after all discovery/tool phases (so the URL corpus is fully
 		// populated) and before the correlation + report phases.
-		&phases.AuthSessionPhase{},   // 31: Auth & Session
-		&phases.IDORPhase{},          // 32: IDOR (differential)
-		&phases.RaceConditionPhase{}, // 33: Race Condition
-		&phases.BusinessLogicPhase{}, // 34: Business Logic
-		&phases.APISecurityPhase{},   // 35: API Security (GraphQL/JWT/BOLA/…)
-		&phases.SSTIPhase{},          // 39: SSTI arithmetic oracle
-		&phases.CorrelationPhase{},   // 45: Smart Correlation Engine (must be last-but-report)
+		&phases.AuthSessionPhase{},     // 31: Auth & Session
+		&phases.IDORPhase{},            // 32: IDOR (differential)
+		&phases.RaceConditionPhase{},   // 33: Race Condition
+		&phases.BusinessLogicPhase{},   // 34: Business Logic
+		&phases.APISecurityPhase{},     // 35: API Security (GraphQL/JWT/BOLA/…)
+		&phases.WebSocketPhase{},       // 36: WebSocket Security (CSWSH) — V7.1
+		&phases.FileUploadPhase{},      // 37: File Upload Security — V7.1
+		&phases.CloudAttackPhase{},     // 38: Cloud Attack Surface — V7.1
+		&phases.SSTIPhase{},            // 39: SSTI arithmetic oracle
+		&phases.GoogleDorkPhase{},      // 40: Google Dorking — V7.1
+		&phases.CredentialIntelPhase{}, // 41: Credential Intelligence — V7.1
+		&phases.BurpIntegrationPhase{}, // 42: Deep Burp + OOB — V7.1
+		&phases.CorrelationPhase{},     // 45: Smart Correlation Engine (must be last-but-report)
 
 		&phases.ReportPhase{}, // 29 (kept last: renders everything above)
 	}
@@ -344,6 +350,11 @@ func runScan(args []string) {
 		"Deep External Recon": true, "Wayback & Historical URL Mining": true,
 		"Web Crawling & Spidering": true, "JS Analysis & Secret Extraction": true,
 		"Email Security Verification": true,
+		// V7.1: Google Dorking and Credential Intelligence are OSINT-only
+		// (they query search engines / breach APIs, not the target), so they
+		// belong in the passive profile.
+		"Google Dorking":          true,
+		"Credential Intelligence": true,
 		// The correlation engine is passive (reads existing findings) and adds
 		// no traffic, so it belongs in the passive profile too.
 		"Smart Correlation Engine": true,

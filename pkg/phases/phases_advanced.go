@@ -17,6 +17,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/mohammed-v3/core/pkg/correlation"
@@ -430,6 +432,369 @@ func (p *SSTIPhase) Execute(ctx context.Context, s *engine.State) error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Phase 36 — WebSocket Security (V7.1 GAP 2)
+// ─────────────────────────────────────────────────────────────────────────────
+type WebSocketPhase struct{}
+
+func (p *WebSocketPhase) Name() string { return "WebSocket Security (CSWSH)" }
+func (p *WebSocketPhase) Description() string {
+	return "Phase 36: mines ws://wss:// endpoints, tests cross-origin handshake (CSWSH) + message injection"
+}
+func (p *WebSocketPhase) Execute(ctx context.Context, s *engine.State) error {
+	a := newAdvCtx(s)
+	if len(a.urls) == 0 {
+		s.Printf("│  WebSocket: SKIP (no in-scope URLs)\n")
+		return nil
+	}
+	eng := exploit.NewWebSocketEngine(a.client)
+	kept := 0
+	seenWS := make(map[string]bool)
+	// Mine ws:// / wss:// references from page + JS bodies.
+	for _, u := range budget(a.urls, 60) {
+		if s.IsWAFProtected(u) {
+			continue
+		}
+		resp := a.client.Get(ctx, u)
+		if resp.Err != nil {
+			continue
+		}
+		for _, ws := range exploit.FindWebSocketRefs(resp.Body) {
+			if seenWS[ws] {
+				continue
+			}
+			seenWS[ws] = true
+			r := eng.WebSocketTest(ctx, ws)
+			if !r.CSWSH || !r.Exploitable {
+				continue
+			}
+			c := validation.Candidate{
+				Type:                   "cswsh",
+				URL:                    ws,
+				Evidence:               r.Evidence,
+				RequiresExploitability: true,
+				Exploitable:            true,
+				SkipReproduce:          true, // the cross-origin handshake IS the proof
+			}
+			if a.storeCandidate(ctx, s, c, "WebSocket CSWSH", mapSeverity(r.Severity), map[string]interface{}{
+				"origin":        r.Origin,
+				"upgraded":      r.Upgraded,
+				"ping_response": firstN(r.PingResponse, 120),
+			}) {
+				kept++
+			}
+		}
+	}
+	s.Printf("│  WebSocket: %d endpoint(s) mined, %d CSWSH confirmed\n", len(seenWS), kept)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 37 — File Upload (V7.1 GAP 2)
+// ─────────────────────────────────────────────────────────────────────────────
+type FileUploadPhase struct{}
+
+func (p *FileUploadPhase) Name() string { return "File Upload Security" }
+func (p *FileUploadPhase) Description() string {
+	return "Phase 37: finds upload endpoints; tests ext/content-type bypass, SVG XSS, traversal — verifies EXECUTION"
+}
+func (p *FileUploadPhase) Execute(ctx context.Context, s *engine.State) error {
+	a := newAdvCtx(s)
+	if len(a.urls) == 0 {
+		s.Printf("│  File Upload: SKIP (no in-scope URLs)\n")
+		return nil
+	}
+	eng := exploit.NewFileUploadEngine(a.client)
+	kept := 0
+	seenEP := make(map[string]bool)
+	for _, u := range budget(a.urls, 60) {
+		if s.IsWAFProtected(u) {
+			continue
+		}
+		resp := a.client.Get(ctx, u)
+		if resp.Err != nil {
+			continue
+		}
+		for _, ep := range exploit.FindUploadEndpoints(u, resp.Body) {
+			if seenEP[ep] {
+				continue
+			}
+			seenEP[ep] = true
+			for _, r := range eng.FileUploadTest(ctx, ep) {
+				if !r.Exploitable {
+					continue
+				}
+				c := validation.Candidate{
+					Type:                   "file-upload",
+					URL:                    ep,
+					Evidence:               r.Evidence,
+					RequiresExploitability: true,
+					Exploitable:            true,
+				}
+				if a.storeCandidate(ctx, s, c, "File Upload: "+r.TestName, mapSeverity(r.Severity), map[string]interface{}{
+					"filename":   r.Filename,
+					"executed":   r.Executed,
+					"stored_url": r.StoredURL,
+				}) {
+					kept++
+				}
+			}
+		}
+	}
+	s.Printf("│  File Upload: %d endpoint(s) tested, %d confirmed\n", len(seenEP), kept)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 38 — Cloud Attack Surface (V7.1 GAP 2)
+// ─────────────────────────────────────────────────────────────────────────────
+type CloudAttackPhase struct{}
+
+func (p *CloudAttackPhase) Name() string { return "Cloud Attack Surface" }
+func (p *CloudAttackPhase) Description() string {
+	return "Phase 38: S3 ListBucket/ACL, cloud metadata SSRF, K8s/Docker ports, .git exposure w/ extraction"
+}
+func (p *CloudAttackPhase) Execute(ctx context.Context, s *engine.State) error {
+	a := newAdvCtx(s)
+	eng := exploit.NewCloudEngine(a.client)
+	kept := 0
+
+	// 1. Mine S3 bucket refs from page/JS bodies, then probe each bucket.
+	seenBucket := make(map[string]bool)
+	for _, u := range budget(a.urls, 60) {
+		if s.IsWAFProtected(u) {
+			continue
+		}
+		resp := a.client.Get(ctx, u)
+		if resp.Err != nil {
+			continue
+		}
+		for _, b := range exploit.FindBucketRefs(resp.Body) {
+			if seenBucket[b] {
+				continue
+			}
+			seenBucket[b] = true
+			for _, r := range eng.CloudAttack(ctx, b) {
+				if !r.Exploitable {
+					continue
+				}
+				c := validation.Candidate{
+					Type:                   "cloud-s3",
+					URL:                    r.Target,
+					Evidence:               r.Evidence,
+					RequiresExploitability: true,
+					Exploitable:            true,
+					SkipReproduce:          true,
+				}
+				if a.storeCandidate(ctx, s, c, "Cloud: "+r.Kind, mapSeverity(r.Severity), map[string]interface{}{
+					"extract": firstN(r.Extract, 200),
+				}) {
+					kept++
+				}
+			}
+		}
+	}
+
+	// 2. .git exposure with content extraction (per distinct origin).
+	for _, origin := range budget(distinctOrigins(a.urls), 40) {
+		if r := eng.GitExposure(ctx, origin); r != nil && r.Exploitable {
+			c := validation.Candidate{
+				Type:                   "git-exposure",
+				URL:                    r.Target,
+				Evidence:               r.Evidence,
+				RequiresExploitability: true,
+				Exploitable:            true,
+				SkipReproduce:          true,
+			}
+			if a.storeCandidate(ctx, s, c, "Cloud: git-exposure", mapSeverity(r.Severity), map[string]interface{}{
+				"repo_url": r.Extract,
+			}) {
+				kept++
+			}
+		}
+	}
+
+	// 3. K8s / Docker control-port exposure per distinct host.
+	seenHost := make(map[string]bool)
+	for _, origin := range budget(distinctOrigins(a.urls), 20) {
+		host := filter.HostOf(origin)
+		if host == "" || seenHost[host] {
+			continue
+		}
+		seenHost[host] = true
+		for _, r := range eng.OrchestrationExposure(ctx, host) {
+			if !r.Exploitable {
+				continue
+			}
+			c := validation.Candidate{
+				Type:                   "cloud-orchestration",
+				URL:                    r.Target,
+				Evidence:               r.Evidence,
+				RequiresExploitability: true,
+				Exploitable:            true,
+				SkipReproduce:          true,
+			}
+			if a.storeCandidate(ctx, s, c, "Cloud: "+r.Kind, mapSeverity(r.Severity), nil) {
+				kept++
+			}
+		}
+	}
+	s.Printf("│  Cloud Attack: %d bucket(s) mined, %d confirmed\n", len(seenBucket), kept)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 40 — Google Dorking (V7.1 GAP 2)
+// ─────────────────────────────────────────────────────────────────────────────
+type GoogleDorkPhase struct{}
+
+func (p *GoogleDorkPhase) Name() string { return "Google Dorking" }
+func (p *GoogleDorkPhase) Description() string {
+	return "Phase 40: 20+ automated dorks (filetype/inurl/secret leaks); feeds discovered URLs to the corpus"
+}
+func (p *GoogleDorkPhase) Execute(ctx context.Context, s *engine.State) error {
+	if len(s.Scope.Domains) == 0 {
+		s.Printf("│  Google Dork: SKIP (no apex domains)\n")
+		return nil
+	}
+	a := newAdvCtx(s)
+	eng := exploit.NewGoogleDorkEngine(a.client)
+	found := 0
+	seen := make(map[string]bool)
+	for _, u := range s.URLs {
+		seen[u] = true
+	}
+	for _, domain := range s.Scope.Domains {
+		for _, dr := range eng.GoogleDork(ctx, domain) {
+			if len(dr.URLs) == 0 {
+				continue
+			}
+			s.Printf("│  dork [%s] → %d url(s)\n", dr.Dork, len(dr.URLs))
+			for _, u := range dr.URLs {
+				if seen[u] || !filter.IsInScope(u, s.Scope) {
+					continue
+				}
+				seen[u] = true
+				s.URLs = append(s.URLs, u)
+				found++
+			}
+		}
+	}
+	s.Printf("│  Google Dork: +%d new in-scope URLs added to corpus\n", found)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 41 — Credential Intelligence (V7.1 GAP 2)
+// ─────────────────────────────────────────────────────────────────────────────
+type CredentialIntelPhase struct{}
+
+func (p *CredentialIntelPhase) Name() string { return "Credential Intelligence" }
+func (p *CredentialIntelPhase) Description() string {
+	return "Phase 41: HIBP domain-breach lookup + email cross-reference (informational, NO credential stuffing)"
+}
+func (p *CredentialIntelPhase) Execute(ctx context.Context, s *engine.State) error {
+	if len(s.Scope.Domains) == 0 {
+		s.Printf("│  Cred Intel: SKIP (no apex domains)\n")
+		return nil
+	}
+	a := newAdvCtx(s)
+	eng := exploit.NewCredIntelEngine(a.client)
+	if s.Config != nil {
+		eng.HIBPKey = s.Config.APIKeys.HaveIBeenPwned
+	}
+	for _, domain := range s.Scope.Domains {
+		emails := collectEmails(s, domain)
+		res := eng.CredentialIntel(ctx, domain, emails)
+		if len(res.Breaches) == 0 && res.EmailsPwned == 0 {
+			s.Printf("│  Cred Intel [%s]: no public breach records\n", domain)
+			continue
+		}
+		s.Printf("│  Cred Intel [%s]: %s\n", domain, res.Evidence)
+		// Informational finding — added directly (not an exploitable vuln).
+		f := map[string]interface{}{
+			"type":           "Credential Exposure (Informational)",
+			"severity":       "Info",
+			"url":            "https://" + domain,
+			"target":         domain,
+			"evidence":       res.Evidence,
+			"phase":          "V7.1-cred-intel",
+			"breach_count":   len(res.Breaches),
+			"emails_checked": res.EmailsChecked,
+			"emails_pwned":   res.EmailsPwned,
+		}
+		s.AddFinding(f)
+	}
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 42 — Deep Burp Integration + OOB (V7.1 GAP 3)
+// ─────────────────────────────────────────────────────────────────────────────
+type BurpIntegrationPhase struct{}
+
+func (p *BurpIntegrationPhase) Name() string { return "Deep Burp Integration + OOB" }
+func (p *BurpIntegrationPhase) Description() string {
+	return "Phase 42: populates Burp sitemap, triggers active scan, monitors Interactsh OOB callbacks"
+}
+func (p *BurpIntegrationPhase) Execute(ctx context.Context, s *engine.State) error {
+	a := newAdvCtx(s)
+	if !a.burp {
+		s.Printf("│  Burp Integration: SKIP (Burp proxy not active this run)\n")
+		return nil
+	}
+	direct := exploit.NewClient(exploit.Options{FollowRedirects: false})
+	eng := exploit.NewBurpEngine(a.client, direct)
+
+	// 1. Sitemap population — relay every discovered URL through Burp.
+	if len(a.urls) > 0 {
+		sent := eng.PopulateSitemap(ctx, budget(a.urls, 500))
+		s.Printf("│  Burp Sitemap: relayed %d/%d URL(s) into Burp's Target tab\n", sent, len(a.urls))
+	}
+
+	// 2. Active scan trigger on the highest-value endpoints.
+	highValue := budget(apiCandidates(a.urls), 30)
+	if len(highValue) == 0 {
+		highValue = budget(a.urls, 30)
+	}
+	if len(highValue) > 0 {
+		if scan, err := eng.TriggerActiveScan(ctx, highValue); err != nil {
+			s.Printf("│  Burp Active Scan: unavailable (%v)\n", err)
+		} else {
+			s.Printf("│  Burp Active Scan: %s\n", scan.Evidence)
+		}
+	}
+
+	// 3. Interactsh OOB monitoring for blind SSRF candidates in the corpus.
+	oobConfirmed := 0
+	for _, u := range budget(ssrfCandidates(a.urls), 8) {
+		probe := eng.NewOOBProbe("ssrf", u)
+		// Inject the OOB host into likely SSRF sinks and fire the request.
+		injected := injectOOBHost(u, probe.Host)
+		_ = a.client.Get(ctx, injected)
+		res := eng.MonitorCallbacks(ctx, probe)
+		if !res.Confirmed {
+			continue
+		}
+		c := validation.Candidate{
+			Type:                   "blind-ssrf",
+			URL:                    u,
+			Evidence:               res.Evidence,
+			RequiresExploitability: true,
+			Exploitable:            true,
+			SkipReproduce:          true, // OOB callback IS the reproduction
+		}
+		if a.storeCandidate(ctx, s, c, "Blind SSRF (OOB confirmed)", "Critical", map[string]interface{}{
+			"callback_type": res.CallbackType,
+			"oob_host":      probe.Host,
+		}) {
+			oobConfirmed++
+		}
+	}
+	s.Printf("│  Burp OOB: %d blind-SSRF confirmed via Interactsh callback\n", oobConfirmed)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Phase 45 — Smart Correlation Engine
 // ─────────────────────────────────────────────────────────────────────────────
 type CorrelationPhase struct{}
@@ -586,6 +951,74 @@ func extractJWTLike(text string) []string {
 	}
 	return out
 }
+
+// emailPattern extracts RFC-ish email addresses from finding evidence.
+var emailPattern = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+
+// collectEmails harvests employee emails at the given apex domain from prior
+// findings/evidence so Cred Intel can cross-reference them against breaches.
+func collectEmails(s *engine.State, domain string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	dom := strings.ToLower(domain)
+	for _, f := range s.Findings {
+		ev, _ := f["evidence"].(string)
+		for _, m := range emailPattern.FindAllString(ev, -1) {
+			m = strings.ToLower(m)
+			if !strings.HasSuffix(m, "@"+dom) && !strings.HasSuffix(m, "."+dom) {
+				continue
+			}
+			if !seen[m] {
+				seen[m] = true
+				out = append(out, m)
+			}
+		}
+	}
+	return out
+}
+
+// ssrfCandidates keeps URLs whose query params look like a fetch/callback sink
+// so the OOB SSRF probe only fires at plausible targets.
+func ssrfCandidates(urls []string) []string {
+	signals := []string{"url=", "uri=", "next=", "target=", "dest=", "redirect=",
+		"callback=", "webhook=", "fetch=", "load=", "image=", "img=", "proxy=", "feed="}
+	var out []string
+	for _, u := range urls {
+		low := strings.ToLower(u)
+		for _, sig := range signals {
+			if strings.Contains(low, sig) {
+				out = append(out, u)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// injectOOBHost rewrites the first SSRF-like query parameter value to point at
+// the OOB callback host (http://{host}/). Falls back to appending a param.
+func injectOOBHost(rawURL, oobHost string) string {
+	payload := "http://" + oobHost + "/"
+	for _, sig := range []string{"url=", "uri=", "next=", "target=", "dest=", "redirect=",
+		"callback=", "webhook=", "fetch=", "load=", "image=", "img=", "proxy=", "feed="} {
+		if i := strings.Index(strings.ToLower(rawURL), sig); i >= 0 {
+			start := i + len(sig)
+			end := strings.IndexAny(rawURL[start:], "&#")
+			if end < 0 {
+				return rawURL[:start] + urlEsc(payload)
+			}
+			return rawURL[:start] + urlEsc(payload) + rawURL[start+end:]
+		}
+	}
+	sep := "?"
+	if strings.Contains(rawURL, "?") {
+		sep = "&"
+	}
+	return rawURL + sep + "url=" + urlEsc(payload)
+}
+
+// urlEsc percent-encodes an injected OOB payload value.
+func urlEsc(v string) string { return url.QueryEscape(v) }
 
 // ensure fmt is used (evidence formatting helper kept for future phases).
 var _ = fmt.Sprintf

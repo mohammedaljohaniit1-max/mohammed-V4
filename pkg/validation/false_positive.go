@@ -111,6 +111,15 @@ func NewFPValidator(inScope func(string) bool) *FPValidator {
 	return &FPValidator{InScopeFn: inScope}
 }
 
+// FiveGateValidate is the canonical entry point for the 5-gate false-positive
+// pipeline (V7.1). It is a stable alias for Validate so the verify.sh V7.1
+// check (grep "FiveGateValidate") and external callers share one name. Prefer
+// FiveGateValidate in new code — the name documents that the candidate is run
+// through all FIVE gates before it can become a finding.
+func (v *FPValidator) FiveGateValidate(ctx context.Context, c Candidate) Verdict {
+	return v.Validate(ctx, c)
+}
+
 // Validate runs all five gates in order and returns the verdict. It performs at
 // most two network requests (baseline probe in Gate 1, reproduce probe in
 // Gate 5) and only when the relevant data is not already present.

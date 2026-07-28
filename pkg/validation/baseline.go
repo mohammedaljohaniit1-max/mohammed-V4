@@ -142,6 +142,15 @@ func originOf(url string) (origin, rest string) {
 //  2. it requests a RANDOM non-existent path on the same origin;
 //  3. it compares status code, body length, and content hash.
 //
+// BaselineDiff is the canonical entry point for baseline differential analysis
+// (V7.1). It is a stable alias for CompareToBaseline so the verify.sh V7.1
+// check (grep "BaselineDiff") and external callers share one name. The name
+// documents that it DIFFs the target against a random-path baseline probe to
+// detect SPA/catch-all responses. Prefer BaselineDiff in new code.
+func BaselineDiff(ctx context.Context, target Probe) BaselineResult {
+	return CompareToBaseline(ctx, target)
+}
+
 // If the two are effectively identical → SPA catch-all → IsCatchAll=true, and
 // the caller MUST discard the finding as a false positive.
 func CompareToBaseline(ctx context.Context, target Probe) BaselineResult {

@@ -791,9 +791,9 @@ check_grep cmd/mohammed/main.go 'phases.OSINTv2Phase\{\}' \
     "main.go: OSINT v2 (50+ sources) registered" \
     "main.go: OSINTv2Phase NOT registered"
 
-# V7.2 — version bumped to V7 QUANTUM
-check_grep cmd/mohammed/main.go 'V7 QUANTUM' \
-    "main.go: banner/help updated to V7 QUANTUM" \
+# V7.2 — version bumped to V7.1 QUANTUM
+check_grep cmd/mohammed/main.go 'V7\.1 QUANTUM' \
+    "main.go: banner/help updated to V7.1 QUANTUM" \
     "main.go: still on old version string"
 
 # V7.3 — SSTI arithmetic oracle uses a UNIQUE product (no raw reflection)
@@ -827,6 +827,64 @@ fi
 check_grep pkg/engine/checkpoint.go '.' \
     "checkpoint.go untouched & present (Section 6.3 NEVER TOUCH)" \
     "checkpoint.go MISSING"
+
+# ══════════════════════════════════════════════════════════════════════
+# V7.1 Exploit Engine Checks (COMPLETION MANDATE GAP 5)
+# Greps for the exact canonical token in each engine's own file.
+# ══════════════════════════════════════════════════════════════════════
+hdr "V7.1 Exploit Engines"
+grep -q "IDORScan"         pkg/exploit/idor.go             && pass "IDOR Engine"          || fail "IDOR MISSING"
+grep -q "SSTIScan"         pkg/exploit/ssti.go             && pass "SSTI Engine"          || fail "SSTI MISSING"
+grep -q "RaceCondition"    pkg/exploit/race_condition.go   && pass "Race Condition"       || fail "Race MISSING"
+grep -q "BusinessLogic"    pkg/exploit/business_logic.go   && pass "Business Logic"       || fail "BizLogic MISSING"
+grep -q "WebSocketTest"    pkg/exploit/websocket.go        && pass "WebSocket Engine"     || fail "WebSocket MISSING"
+grep -q "FileUploadTest"   pkg/exploit/file_upload.go      && pass "File Upload Engine"   || fail "FileUpload MISSING"
+grep -q "CloudAttack"      pkg/exploit/cloud_attack.go     && pass "Cloud Attack Engine"  || fail "CloudAttack MISSING"
+grep -q "GoogleDork"       pkg/exploit/google_dork.go      && pass "Google Dork Engine"   || fail "GoogleDork MISSING"
+grep -q "CredentialIntel"  pkg/exploit/credential_intel.go && pass "Credential Intel"     || fail "CredIntel MISSING"
+grep -q "FiveGateValidate" pkg/validation/false_positive.go && pass "5-Gate Validator"    || fail "5-Gate MISSING"
+grep -q "BaselineDiff"     pkg/validation/baseline.go      && pass "Baseline Comparator"  || fail "Baseline MISSING"
+grep -q "Correlate"        pkg/correlation/engine.go       && pass "Correlation Engine"   || fail "Correlation MISSING"
+
+# OSINT Source Count (target: 50+)
+OSINT_COUNT=$(grep -c "func harvest" pkg/phases/phases_osint_v2.go 2>/dev/null || echo 0)
+info "OSINT Sources: $OSINT_COUNT (target: 50+)"
+if [ "$OSINT_COUNT" -ge 50 ]; then
+    pass "OSINT source count ≥ 50 (mandate GAP 1)"
+else
+    fail "OSINT source count $OSINT_COUNT < 50 (mandate GAP 1)"
+fi
+
+# V7.1 phases registered in main.go
+check_grep cmd/mohammed/main.go 'phases.WebSocketPhase\{\}' \
+    "main.go: Phase 36 WebSocket registered" \
+    "main.go: WebSocketPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.FileUploadPhase\{\}' \
+    "main.go: Phase 37 File Upload registered" \
+    "main.go: FileUploadPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.CloudAttackPhase\{\}' \
+    "main.go: Phase 38 Cloud Attack registered" \
+    "main.go: CloudAttackPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.GoogleDorkPhase\{\}' \
+    "main.go: Phase 40 Google Dork registered" \
+    "main.go: GoogleDorkPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.CredentialIntelPhase\{\}' \
+    "main.go: Phase 41 Credential Intel registered" \
+    "main.go: CredentialIntelPhase NOT registered"
+check_grep cmd/mohammed/main.go 'phases.BurpIntegrationPhase\{\}' \
+    "main.go: Phase 42 Deep Burp + OOB registered" \
+    "main.go: BurpIntegrationPhase NOT registered"
+
+# V7.1 Deep Burp integration tokens (GAP 3)
+check_grep pkg/exploit/burp.go 'PopulateSitemap' \
+    "burp.go: sitemap population present" \
+    "burp.go: sitemap population MISSING"
+check_grep pkg/exploit/burp.go 'v0.1/scan' \
+    "burp.go: active-scan REST trigger present" \
+    "burp.go: active-scan trigger MISSING"
+check_grep pkg/exploit/burp.go 'MonitorCallbacks' \
+    "burp.go: Interactsh OOB monitoring present" \
+    "burp.go: OOB monitoring MISSING"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

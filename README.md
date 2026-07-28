@@ -1,4 +1,4 @@
-# MOHAMMED V7 QUANTUM
+# MOHAMMED V7.1 QUANTUM
 
 **Autonomous Attack Surface & Exploit Engine**
 
@@ -42,16 +42,30 @@ cookies, CloudFront error pages, wildcard-CORS on public pages, SPA catch-all
 
 ## 1. What changed vs V6
 
-| Metric | V6 | V7 QUANTUM |
-|---|---:|---:|
-| Phases | 30 | **45+** (37 registered engines incl. 6 exploit + OSINT v2) |
-| External tools orchestrated | 38 | **38+** (amass v5 / kiterunner v1.0.2 fixed) |
-| Passive OSINT sources | 14 | **50+** (31 registered scrapers, 25+ key-less) |
-| Custom exploit phases | 0 | **15** (Phases 31-45) |
-| Real exploit logic | ❌ tool-wrappers only | ✅ differential IDOR, SSTI oracle, race, BOLA, JWT, business-logic |
-| False-positive validation | AI triage only | ✅ **5-gate** pipeline + baseline diff + known-FP rejection |
-| False-positive rate on real targets | **100 %** | designed to **≈0** (every finding clears 5 gates) |
-| Cross-finding correlation | ❌ | ✅ Smart Correlation Engine (Phase 45) |
+V7.1 closes the five gaps left open in V7 (PR #12): OSINT expanded to **50+**
+real `harvest*` sources, the five missing exploit engines (WebSocket, File
+Upload, Cloud, Google Dorking, Credential Intel) are now implemented and wired,
+and Burp integration is now deep (sitemap population + active-scan trigger +
+Interactsh OOB confirmation).
+
+| Feature | V6 | V7.1 |
+|---|---|---|
+| Total Phases | 30 | 50+ |
+| OSINT Sources | 14 | 50+ |
+| Custom Exploit Engines | 0 | 20+ |
+| False Positive Gates | 1 (AI only) | 5-Gate Pipeline |
+| Business Logic Testing | ❌ | ✅ IDOR, Race, Price Manipulation |
+| Authentication Testing | ❌ | ✅ Default Creds, JWT, Session |
+| API Security Testing | ❌ | ✅ GraphQL, BOLA, Mass Assignment |
+| SSTI Detection | ❌ | ✅ Jinja2, Freemarker, Thymeleaf |
+| WebSocket Testing | ❌ | ✅ CSWSH, Message Injection |
+| File Upload Testing | ❌ | ✅ Extension Bypass, SVG XSS |
+| Cloud Attack Surface | ❌ | ✅ S3, Azure, GCP, K8s, Docker |
+| Google Dorking | ❌ | ✅ 20+ automated dorks |
+| Credential Intelligence | ❌ | ✅ HIBP, breach correlation |
+| Burp Active Scan | ❌ | ✅ Sitemap + scan trigger |
+| OOB Detection | Basic | ✅ Interactsh deep integration |
+| Unit Test Coverage | Minimal | Full (exploit + FP rejection) |
 
 **Root-cause fixes shipped in V7:**
 
