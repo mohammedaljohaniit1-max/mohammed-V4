@@ -986,9 +986,107 @@ check_grep cmd/mohammed/main.go 'phases.MultiTenantBOLAPhase\{\}' \
 check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
     "main.go: Phase 53 Deep Burp + OOB registered" "main.go: Phase 53 NOT registered"
 
-# Version bump
-check_grep cmd/mohammed/main.go 'V8.0 LEVEL MAX' \
-    "main.go: V8.0 LEVEL MAX banner present" "main.go: version NOT bumped"
+# Version bump (V9.0 ABSOLUTE APEX supersedes V8.0)
+check_grep cmd/mohammed/main.go 'V9.0 ABSOLUTE APEX' \
+    "main.go: V9.0 ABSOLUTE APEX banner present" "main.go: version NOT bumped to V9.0"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V9.0 ABSOLUTE APEX checks
+# ═══════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}── V9.0 ABSOLUTE APEX checks ─────────────────────────${NC}"
+
+# S1.1 — Adaptive Rate-Limiting & Concurrency + memory shield
+check_grep pkg/exploit/stealth.go 'type StealthGovernor' \
+    "stealth.go: adaptive StealthGovernor present" "stealth.go: StealthGovernor MISSING"
+check_grep pkg/exploit/stealth.go '\bObserve\b' \
+    "stealth.go: 429/503/403 Observe backoff present" "stealth.go: Observe backoff MISSING"
+check_grep pkg/exploit/stealth.go 'enterCoolDown' \
+    "stealth.go: WAF cool-down window present" "stealth.go: cool-down MISSING"
+check_grep pkg/exploit/stealth.go 'MemBudgetBytes|memoryPressured' \
+    "stealth.go: memory shield present" "stealth.go: memory shield MISSING"
+check_grep pkg/exploit/stealth.go 'sleepJitter' \
+    "stealth.go: jittered backoff present" "stealth.go: jitter MISSING"
+check_grep pkg/exploit/stealth.go 'browserUserAgents' \
+    "stealth.go: 50+ User-Agent rotation pool present" "stealth.go: UA pool MISSING"
+UA_COUNT=$(grep -c 'Mozilla/5.0' pkg/exploit/stealth.go 2>/dev/null)
+if [ "${UA_COUNT:-0}" -ge 50 ]; then
+    echo -e "  ${GREEN}✔${NC} User-Agent pool: $UA_COUNT (>= 50)"; PASS=$((PASS+1))
+else
+    echo -e "  ${RED}✘${NC} User-Agent pool: ${UA_COUNT:-0} (< 50)"; FAIL=$((FAIL+1))
+fi
+check_grep pkg/exploit/stealth.go 'randomStealthHeaders' \
+    "stealth.go: header randomization (Sec-Fetch/Accept) present" "stealth.go: header randomization MISSING"
+check_grep pkg/exploit/client.go 'Stealth \*StealthGovernor|Options.Stealth|c.gov' \
+    "client.go: governor wired into every request" "client.go: governor NOT wired"
+check_grep pkg/engine/engine.go 'func MemoryPressure' \
+    "engine.go: runtime.ReadMemStats memory shield present" "engine.go: memory shield MISSING"
+check_grep pkg/engine/engine.go 'func AdaptiveThreads' \
+    "engine.go: adaptive thread throttle present" "engine.go: AdaptiveThreads MISSING"
+
+# S1.2 — WAF & CDN evasion
+check_grep pkg/engine/waf_evasion.go 'func FingerprintWAF' \
+    "waf_evasion.go: WAF fingerprinting present" "waf_evasion.go: FingerprintWAF MISSING"
+check_grep pkg/engine/waf_evasion.go '__cf_chl_rt_tk' \
+    "waf_evasion.go: Cloudflare challenge token detection present" "waf_evasion.go: cf challenge token MISSING"
+check_grep pkg/engine/waf_evasion.go 'WAFAkamai|akamaighost' \
+    "waf_evasion.go: Akamai detection present" "waf_evasion.go: Akamai MISSING"
+check_grep pkg/engine/waf_evasion.go 'WAFImperva|incap' \
+    "waf_evasion.go: Imperva/Incapsula detection present" "waf_evasion.go: Imperva MISSING"
+check_grep pkg/engine/waf_evasion.go 'WAFAWS|Amzn-Waf' \
+    "waf_evasion.go: AWS WAF detection present" "waf_evasion.go: AWS WAF MISSING"
+check_grep pkg/engine/waf_evasion.go 'func ShouldSkipHeavyFuzzing' \
+    "waf_evasion.go: smart stealth routing present" "waf_evasion.go: stealth routing MISSING"
+
+# S2 — Fuzzy baseline + strict 5-gate (apex edition; carried from V8, verified)
+check_grep pkg/validation/fuzzy.go 'SimHash' \
+    "fuzzy.go: SimHash present" "fuzzy.go: SimHash MISSING"
+check_grep pkg/validation/fuzzy.go 'Levenshtein' \
+    "fuzzy.go: Levenshtein present" "fuzzy.go: Levenshtein MISSING"
+check_grep pkg/validation/baseline.go 'func FuzzyBaseline' \
+    "baseline.go: multi-probe fuzzy baseline present" "baseline.go: FuzzyBaseline MISSING"
+check_grep pkg/validation/baseline.go 'looksLikeWAFChallenge' \
+    "baseline.go: SPA/WAF catch-all trap present" "baseline.go: catch-all trap MISSING"
+check_grep pkg/validation/false_positive.go 'FiveGateValidate' \
+    "false_positive.go: 5-gate pipeline present" "false_positive.go: 5-gate MISSING"
+
+# S3.1 — High-signal Burp filter
+check_grep pkg/exploit/burp.go 'func IsHighSignalURL' \
+    "burp.go: high-signal URL classifier present" "burp.go: IsHighSignalURL MISSING"
+check_grep pkg/exploit/burp.go 'func FilterHighSignal' \
+    "burp.go: high-signal filter present" "burp.go: FilterHighSignal MISSING"
+check_grep pkg/exploit/burp.go 'staticAssetExts' \
+    "burp.go: static-asset zero-noise drop present" "burp.go: static-asset drop MISSING"
+check_grep pkg/exploit/burp.go 'ConfidenceThreshold = 70' \
+    "burp.go: confidence>=70 proxy gate present" "burp.go: confidence gate MISSING"
+check_grep pkg/exploit/burp.go 'PopulateSitemapHighSignal' \
+    "burp.go: high-signal sitemap population present" "burp.go: high-signal sitemap MISSING"
+
+# S3.2 — Interactsh OOB correlation (carried apex from V8, verified)
+check_grep pkg/exploit/burp.go 'BatchMonitorCallbacks' \
+    "burp.go: Interactsh 60s OOB correlation present" "burp.go: OOB correlation MISSING"
+
+# S4 — apex-grade exploit engines (verified feature coverage)
+check_grep pkg/exploit/advanced_web.go 'CL.TE|TE.CL|TE.TE|H2.CL|H2.TE' \
+    "advanced_web.go: 5 smuggling variants present" "advanced_web.go: smuggling variants MISSING"
+check_grep pkg/exploit/advanced_web.go 'TestCacheDeception' \
+    "advanced_web.go: cache deception (path confusion) present" "advanced_web.go: cache deception MISSING"
+check_grep pkg/exploit/auth_audit.go 'ForgeJKUInjection' \
+    "auth_audit.go: JKU/JWKS injection present" "auth_audit.go: JKU injection MISSING"
+check_grep pkg/exploit/idor.go 'MultiTenantEngine' \
+    "idor.go: dual-token multi-tenant BOLA/BFLA present" "idor.go: MultiTenantEngine MISSING"
+check_grep pkg/exploit/race_condition.go 'BarrierBurst' \
+    "race_condition.go: barrier-synchronized burst present" "race_condition.go: BarrierBurst MISSING"
+
+# S5 — apex orchestration + registration
+check_grep pkg/phases/phases_apex.go 'ApexOrchestrationPhase' \
+    "phases_apex.go: apex orchestration phase present" "phases_apex.go: apex phase MISSING"
+check_grep pkg/phases/phases_apex.go 'sharedStealthGovernor' \
+    "phases_apex.go: shared per-scan governor present" "phases_apex.go: shared governor MISSING"
+check_grep pkg/phases/phases_advanced.go 'Stealth: sharedStealthGovernor' \
+    "phases_advanced.go: exploit client uses adaptive governor" "phases_advanced.go: governor NOT wired into engines"
+check_grep cmd/mohammed/main.go 'phases.ApexOrchestrationPhase\{\}' \
+    "main.go: Phase 54 Apex Orchestration registered" "main.go: Phase 54 NOT registered"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

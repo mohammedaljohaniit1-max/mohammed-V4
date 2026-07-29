@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                                    V8.0 LEVEL MAX | Autonomous Attack Surface Engine
+                              V9.0 ABSOLUTE APEX | Autonomous Attack Surface Engine
 `
 
 const helpText = `
-MOHAMMED V8.0 LEVEL MAX — Autonomous Attack Surface & Exploit Engine (53+ phases, 70+ OSINT, 30+ exploit engines, fuzzy 5-gate FP validation)
+MOHAMMED V9.0 ABSOLUTE APEX — Autonomous Attack Surface & Exploit Engine (54+ phases, 76+ OSINT, 11 apex Go exploit engines, SimHash/Levenshtein fuzzy 5-gate FP, adaptive 429/WAF stealth shield, high-signal Burp + Interactsh OOB)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -322,6 +322,15 @@ func runScan(args []string) {
 		&phases.GoogleDorkPhase{},      // 40: Google Dorking — V7.1
 		&phases.CredentialIntelPhase{}, // 41: Credential Intelligence — V7.1
 		&phases.BurpIntegrationPhase{}, // 42: Deep Burp + OOB — V7.1
+
+		// ── V9.0 ABSOLUTE APEX orchestration (Phase 54) ───────────────────────
+		// Primes the shared adaptive stealth governor, WAF/CDN-fingerprints
+		// every live host (so heavy fuzzing is skipped on protected endpoints
+		// unless --waf-bypass), and computes the high-signal Burp surface.
+		// Runs BEFORE the exploit phases so its state is populated when they
+		// start hammering — adaptive concurrency, backoff and WAF routing are
+		// shared across every downstream engine.
+		&phases.ApexOrchestrationPhase{}, // 54: Apex Orchestration (V9.0)
 
 		// ── V8.0 LEVEL MAX exploit phases 46-53 ───────────────────────────────
 		// Deep engines wired through the SAME fuzzy-baseline-aware 5-gate

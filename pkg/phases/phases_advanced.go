@@ -57,6 +57,12 @@ func newAdvCtx(s *engine.State) *advCtx {
 	client := exploit.NewClient(exploit.Options{
 		ProxyURL:        proxyURL,
 		FollowRedirects: false,
+		// V9.0 ABSOLUTE APEX: every exploit-phase request now flows through the
+		// shared adaptive stealth governor — adaptive concurrency (50→5 on
+		// 429/503/403), jittered backoff, WAF cool-down, memory-shielded
+		// parallelism, UA rotation and header randomization. One governor per
+		// scan so backoff decisions are shared across all phases/engines.
+		Stealth: sharedStealthGovernor(s),
 	})
 	scope := s.Scope
 	validator := validation.NewFPValidator(func(rawURL string) bool {
