@@ -143,6 +143,18 @@ func (v *FPValidator) Validate(ctx context.Context, c Candidate) Verdict {
 			target = Fetch(ctx, c.URL)
 		}
 		if target.Err == nil {
+			// V8: fuzzy multi-probe baseline first (SimHash + Levenshtein). It
+			// catches SPA shells with per-request nonces and WAF/CDN block pages
+			// that the exact-hash check in CompareToBaseline misses.
+			fb := FuzzyBaseline(ctx, target)
+			if fb.IsWAFChallenge {
+				return Verdict{Passed: false, Gate: 1, Reason: "V8 fuzzy baseline: " + fb.Reason}
+			}
+			if fb.IsCatchAll {
+				return Verdict{Passed: false, Gate: 1, Reason: "V8 fuzzy baseline: " + fb.Reason}
+			}
+			// Exact-hash baseline as the second, independent opinion (kept for
+			// the byte-identical catch-all case and to populate Verdict.Baseline).
 			b := CompareToBaseline(ctx, target)
 			baseline = &b
 			if b.IsCatchAll {

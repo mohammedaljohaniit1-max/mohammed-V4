@@ -596,7 +596,7 @@ hdr "16. Tool Integration Fixes (11 audit bugs)"
 check_grep pkg/phases/phases.go 'func ensureAmassConfig' \
     "TOOL #1: ensureAmassConfig present (amass free-source config)" \
     "TOOL #1: ensureAmassConfig MISSING"
-check_grep pkg/phases/phases.go 'retrying once with auto-created' \
+check_grep pkg/phases/phases.go 'One stdout-only retry' \
     "TOOL #1: amass retry-on-zero present" \
     "TOOL #1: amass retry-on-zero MISSING"
 # #2 bbot: -om json + DNS_NAME ndjson parse
@@ -791,9 +791,9 @@ check_grep cmd/mohammed/main.go 'phases.OSINTv2Phase\{\}' \
     "main.go: OSINT v2 (50+ sources) registered" \
     "main.go: OSINTv2Phase NOT registered"
 
-# V7.2 — version bumped to V7.1 QUANTUM
-check_grep cmd/mohammed/main.go 'V7\.1 QUANTUM' \
-    "main.go: banner/help updated to V7.1 QUANTUM" \
+# V8.0 — version bumped to V8.0 LEVEL MAX
+check_grep cmd/mohammed/main.go 'V8\.0 LEVEL MAX' \
+    "main.go: banner/help updated to V8.0 LEVEL MAX" \
     "main.go: still on old version string"
 
 # V7.3 — SSTI arithmetic oracle uses a UNIQUE product (no raw reflection)
@@ -885,6 +885,110 @@ check_grep pkg/exploit/burp.go 'v0.1/scan' \
 check_grep pkg/exploit/burp.go 'MonitorCallbacks' \
     "burp.go: Interactsh OOB monitoring present" \
     "burp.go: OOB monitoring MISSING"
+
+# ══════════════════════════════════════════════════════════════════════
+# V8.0 LEVEL MAX verification (GAP 1-4)
+# ══════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}── V8.0 LEVEL MAX checks ─────────────────────────────${NC}"
+
+# GAP 2 — fuzzy baseline + 5-gate
+check_grep pkg/validation/fuzzy.go 'func SimHash' \
+    "fuzzy.go: SimHash present" "fuzzy.go: SimHash MISSING"
+check_grep pkg/validation/fuzzy.go 'func LevenshteinSimilarity' \
+    "fuzzy.go: Levenshtein present" "fuzzy.go: Levenshtein MISSING"
+check_grep pkg/validation/fuzzy.go 'func FuzzyCompare' \
+    "fuzzy.go: FuzzyCompare present" "fuzzy.go: FuzzyCompare MISSING"
+check_grep pkg/validation/baseline.go 'func FuzzyBaseline' \
+    "baseline.go: FuzzyBaseline present" "baseline.go: FuzzyBaseline MISSING"
+check_grep pkg/validation/baseline.go 'IsWAFChallenge' \
+    "baseline.go: WAF-challenge detection present" "baseline.go: WAF-challenge MISSING"
+check_grep pkg/validation/false_positive.go 'FuzzyBaseline' \
+    "false_positive.go: Gate-1 fuzzy wiring present" "false_positive.go: Gate-1 fuzzy MISSING"
+
+# GAP 3A — Multi-Tenant BOLA/BFLA
+check_grep pkg/exploit/idor.go 'MultiTenantEngine' \
+    "idor.go: MultiTenantEngine present" "idor.go: MultiTenantEngine MISSING"
+check_grep pkg/exploit/idor.go 'func ExtractObjectIDs' \
+    "idor.go: ExtractObjectIDs (UUID/Mongo/hash) present" "idor.go: ExtractObjectIDs MISSING"
+check_grep pkg/exploit/idor.go '\bTestBFLA\b' \
+    "idor.go: TestBFLA present" "idor.go: TestBFLA MISSING"
+
+# GAP 3B — Barrier race
+check_grep pkg/exploit/race_condition.go '\bBarrierBurst\b' \
+    "race_condition.go: BarrierBurst present" "race_condition.go: BarrierBurst MISSING"
+check_grep pkg/exploit/race_condition.go 'StateChanged' \
+    "race_condition.go: state-delta analysis present" "race_condition.go: state-delta MISSING"
+
+# GAP 3C — Financial business logic
+check_grep pkg/exploit/business_logic.go '\bTestFinancial\b' \
+    "business_logic.go: TestFinancial present" "business_logic.go: TestFinancial MISSING"
+check_grep pkg/exploit/business_logic.go '\bTestWorkflowBypass\b' \
+    "business_logic.go: TestWorkflowBypass present" "business_logic.go: TestWorkflowBypass MISSING"
+
+# GAP 3D — advanced web
+check_grep pkg/exploit/advanced_web.go 'SmugglingEngine' \
+    "advanced_web.go: SmugglingEngine present" "advanced_web.go: SmugglingEngine MISSING"
+check_grep pkg/exploit/advanced_web.go 'CL.TE' \
+    "advanced_web.go: CL.TE smuggling variant present" "advanced_web.go: CL.TE MISSING"
+check_grep pkg/exploit/advanced_web.go '\bTestCachePoisoning\b' \
+    "advanced_web.go: cache poisoning present" "advanced_web.go: cache poisoning MISSING"
+check_grep pkg/exploit/advanced_web.go '\bTestPolyglotSSTI\b' \
+    "advanced_web.go: polyglot SSTI present" "advanced_web.go: polyglot SSTI MISSING"
+
+# GAP 3E — auth audit
+check_grep pkg/exploit/auth_audit.go '\bForgeAlgNone\b' \
+    "auth_audit.go: JWT alg:none present" "auth_audit.go: JWT alg:none MISSING"
+check_grep pkg/exploit/auth_audit.go '\bForgeKeyConfusion\b' \
+    "auth_audit.go: RS256->HS256 key confusion present" "auth_audit.go: key confusion MISSING"
+check_grep pkg/exploit/auth_audit.go '\bAnalyzeAuthorizeURL\b' \
+    "auth_audit.go: OAuth analyzer present" "auth_audit.go: OAuth analyzer MISSING"
+
+# GAP 3F — polyglot upload
+check_grep pkg/exploit/file_upload.go '\bPolyglotUploadTest\b' \
+    "file_upload.go: PolyglotUploadTest present" "file_upload.go: PolyglotUploadTest MISSING"
+
+# GAP 3G — deep cloud/repo
+check_grep pkg/exploit/cloud_attack.go '\bAzureBlobAudit\b' \
+    "cloud_attack.go: AzureBlobAudit present" "cloud_attack.go: AzureBlobAudit MISSING"
+check_grep pkg/exploit/cloud_attack.go '\bGCPBucketAudit\b' \
+    "cloud_attack.go: GCPBucketAudit present" "cloud_attack.go: GCPBucketAudit MISSING"
+check_grep pkg/exploit/cloud_attack.go 'X-aws-ec2-metadata-token' \
+    "cloud_attack.go: IMDSv2 token flow present" "cloud_attack.go: IMDSv2 MISSING"
+check_grep pkg/exploit/cloud_attack.go '\bExposedRepoScan\b' \
+    "cloud_attack.go: .git/.svn/.env/.bak scan present" "cloud_attack.go: repo scan MISSING"
+check_grep pkg/exploit/cloud_attack.go 'func harvestSecrets' \
+    "cloud_attack.go: secret harvesting present" "cloud_attack.go: secret harvest MISSING"
+
+# GAP 4 — deep Burp + OOB correlation
+check_grep pkg/exploit/burp.go '\bTriggerActiveScanDetailed\b' \
+    "burp.go: detailed active scan present" "burp.go: detailed scan MISSING"
+check_grep pkg/exploit/burp.go '\bBatchMonitorCallbacks\b' \
+    "burp.go: batch OOB correlation present" "burp.go: batch OOB MISSING"
+
+# GAP 1 — OSINT 70+ + dynamic wordlist
+check_grep pkg/phases/phases_osint_v8.go 'func osintSourcesV8' \
+    "phases_osint_v8.go: V8 sources present" "phases_osint_v8.go: V8 sources MISSING"
+check_grep pkg/phases/phases_osint_v8.go 'func DynamicWordlist' \
+    "phases_osint_v8.go: dynamic wordlist generator present" "phases_osint_v8.go: wordlist MISSING"
+V8_OSINT=$(grep -c 'func harvest' pkg/phases/phases_osint_v2.go pkg/phases/phases_osint_v8.go 2>/dev/null | awk -F: '{s+=$2} END{print s}')
+if [ "${V8_OSINT:-0}" -ge 70 ]; then
+    echo -e "  ${GREEN}✔${NC} OSINT sources: $V8_OSINT (>= 70)"; PASS=$((PASS+1))
+else
+    echo -e "  ${RED}✘${NC} OSINT sources: ${V8_OSINT:-0} (< 70)"; FAIL=$((FAIL+1))
+fi
+
+# phases_max.go orchestration + registration
+check_grep pkg/phases/phases_max.go 'func MaxPhases' \
+    "phases_max.go: MaxPhases orchestration present" "phases_max.go: MaxPhases MISSING"
+check_grep cmd/mohammed/main.go 'phases.MultiTenantBOLAPhase\{\}' \
+    "main.go: Phase 46 Multi-Tenant BOLA registered" "main.go: Phase 46 NOT registered"
+check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
+    "main.go: Phase 53 Deep Burp + OOB registered" "main.go: Phase 53 NOT registered"
+
+# Version bump
+check_grep cmd/mohammed/main.go 'V8.0 LEVEL MAX' \
+    "main.go: V8.0 LEVEL MAX banner present" "main.go: version NOT bumped"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""
