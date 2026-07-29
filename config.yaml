@@ -1,7 +1,8 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# MOHAMMED V10.0 SOVEREIGN EDITION — Configuration File
-# Autonomous Attack Surface & Exploit Engine
-# 45+ phases · 50+ OSINT sources · 5-gate false-positive validation
+# MOHAMMED V11.0 FINAL SOVEREIGN EDITION — Configuration File
+# Autonomous Attack Surface & Exploit Engine (NO-MERCY MANDATE)
+# 60+ phases · 50+ OSINT sources · 5-gate false-positive validation
+# 3-tier AI cascade · 8-WAF bypass matrix · PoE ethical boundary · 8 state machines
 # Copy this file and fill in your API keys before running.
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -43,13 +44,28 @@ validation:
   enabled: true
   baseline_comparison: true   # probe a random path and discard SPA catch-alls
 
-# ── Ollama — Local AI (No cloud, no data leaks) ──────────────────────────────
+# ── Ollama — Local AI 3-TIER COGNITIVE CASCADE (V11.0, FLAW #2 fix) ──────────
+# V10.0 used a single weak gemma:2b model for everything. V11.0 replaces it with
+# a 3-tier cascade that routes each cognitive task to the right-sized model:
+#   • fast_triage   (llama3.2:3b)   — fast FP gate / semantic triage
+#   • deep_analysis (qwen2.5:7b)    — deep payload mutation / BOLA reasoning
+#   • reasoning     (deepseek-r1:7b)— chain-of-thought state-planning / IDOR rank
+# Missing models are auto-pulled at startup when auto_pull is true. Every tier
+# fails open to deterministic heuristics when Ollama is offline.
 ollama:
   enabled: true
   endpoint: "http://127.0.0.1:11434"
-  model: "gemma:2b"    # Lightweight Google model — fast responses
+  model: "llama3.2:3b"   # legacy single-model field — coerced to fast_triage
   temperature: 0.2
-  timeout: 15          # seconds — AI triage fails open (assumes REAL) if exceeded
+  timeout: 15            # seconds — legacy default; per-tier timeouts below win
+  # ── V11.0 3-tier cascade ──────────────────────────────────────────────────
+  fast_triage: "llama3.2:3b"      # Tier 1 — fast triage / false-positive gate
+  deep_analysis: "qwen2.5:7b"     # Tier 2 — deep payload / BOLA analysis
+  reasoning: "deepseek-r1:7b"     # Tier 3 — reasoning / state-planning
+  auto_pull: true                 # auto `ollama pull` any missing tier model
+  timeout_fast: 5                 # seconds — Tier 1 timeout (fast path)
+  timeout_deep: 15                # seconds — Tier 2 timeout
+  timeout_reasoning: 30           # seconds — Tier 3 timeout (deepseek-r1 thinks)
 
 # ── AI confirmation policy (Zero-FP, FIX #7) ─────────────────────────────────
 ai:
@@ -57,6 +73,33 @@ ai:
   # "Unverified-Critical" Info if the one-time startup Ollama probe found the
   # model offline. Nothing is reported as AI-confirmed without a REAL verdict.
   require_confirmation_for_critical: true
+
+# ── V11.0 Deep Multi-WAF Bypass Matrix (FLAW #3 fix) ─────────────────────────
+# When enabled (or when --waf-bypass is passed on the CLI), the bypass engine
+# applies per-vendor evasion for Cloudflare / Akamai / AWS WAFv2 / DataDome /
+# PerimeterX / Arkose. Behavioral WAFs (DataDome/PerimeterX/Arkose) escalate to
+# a real Go-Rod browser session. The per-host request rate is HARD-CAPPED to
+# ≤10 req/s even with bypass on (Section 5, RULE 4 — responsible disclosure).
+waf_bypass:
+  enabled: false               # opt-in; --waf-bypass CLI flag also forces it on
+  http2_multiplex: true        # Cloudflare — HTTP/2 multiplexing
+  header_fragmentation: true   # Cloudflare — fragment headers across TCP packets
+  double_url_encode: true      # AWS WAFv2 — %27 → %2527 double-encoding
+  case_variation: true         # AWS WAFv2 — SeLeCt / uNiOn keyword case flips
+  comment_injection: true      # general — /**/ inline-comment obfuscation
+  behavioral_browser: true     # DataDome/PerimeterX/Arkose — Go-Rod CDP fallback
+  max_rps_per_host: 10         # ethical ceiling — never exceeded (clamped ≤10)
+
+# ── V11.0 Responsible-Disclosure BOUNDARY / PoE engine (FLAW #4 fix) ─────────
+# "Knock, don't break in." Every exploit engine PROVES a vulnerability without
+# weaponizing it: RCE=timing/DNS only, SQLi=error/timing only, SSRF=DNS callback
+# only, PathTraversal=/etc/hostname only, XSS=alert(document.domain) only. The
+# engine returns CONFIRMED_SAFE_PoC / CONFIRMED_NEEDS_MANUAL_REVIEW / NOT_VULNERABLE
+# and NEVER executes a destructive payload.
+boundary:
+  mode: "prove_only"           # prove_only — the only supported (safe) mode
+  oob_domain: ""               # optional interactsh/OOB domain for SSRF callbacks
+  timing_seconds: 5            # injected delay for time-based RCE/SQLi proofs
 
 # ── Zero-FP Filtering (FIX #1/#2) ────────────────────────────────────────────
 filter:

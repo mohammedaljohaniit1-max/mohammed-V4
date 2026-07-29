@@ -986,9 +986,11 @@ check_grep cmd/mohammed/main.go 'phases.MultiTenantBOLAPhase\{\}' \
 check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
     "main.go: Phase 53 Deep Burp + OOB registered" "main.go: Phase 53 NOT registered"
 
-# Version bump (V10.0 SOVEREIGN supersedes V9.0 ABSOLUTE APEX)
-check_grep cmd/mohammed/main.go 'V10.0 SOVEREIGN' \
-    "main.go: V10.0 SOVEREIGN banner present" "main.go: version NOT bumped to V10.0"
+# Version bump (V11.0 FINAL SOVEREIGN supersedes V10.0 SOVEREIGN)
+check_grep cmd/mohammed/main.go 'V11.0 FINAL SOVEREIGN' \
+    "main.go: V11.0 FINAL SOVEREIGN banner present" "main.go: version NOT bumped to V11.0"
+check_grep pkg/engine/engine.go 'MOHAMMED V11.0 FINAL SOVEREIGN Engine Started' \
+    "engine.go: V11.0 startup banner present" "engine.go: startup banner NOT bumped to V11.0"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # V9.0 ABSOLUTE APEX checks
@@ -1157,6 +1159,186 @@ check_grep cmd/mohammed/main.go 'phases.StatefulAttackGraphPhase\{\}' \
     "main.go: Phase 59 Stateful Attack Graph registered" "main.go: Phase 59 NOT registered"
 check_grep cmd/mohammed/main.go 'phases.AIPayloadMutationPhase\{\}' \
     "main.go: Phase 60 AI Payload Mutation registered" "main.go: Phase 60 NOT registered"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V11.0 FINAL SOVEREIGN checks (NO-MERCY MANDATE — 8 structural flaw fixes)
+# ═══════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}── V11.0 FINAL SOVEREIGN checks ──────────────────────${NC}"
+
+# New file existence (Section 1 CREATE list)
+check_file "pkg/engine/waf_bypass.go"
+check_file "pkg/engine/readiness.go"
+check_file "pkg/exploit/boundary.go"
+check_file "pkg/exploit/state_machine_v2.go"
+check_file "pkg/phases/phase_classifier.go"
+check_file "pkg/report/h1_report.go"
+check_file "RESPONSIBLE_DISCLOSURE.md"
+
+# ── FLAW #1 — CAPTCHA detection + graceful fallback ──────────────────
+echo -e "${CYAN}  [FLAW #1] CAPTCHA detection + fallback${NC}"
+check_grep pkg/exploit/autobootstrap.go 'captchaSignatures' \
+    "autobootstrap.go: CAPTCHA signature set present" "autobootstrap.go: CAPTCHA signatures MISSING"
+check_grep pkg/exploit/autobootstrap.go 'g-recaptcha|h-captcha|cf-turnstile' \
+    "autobootstrap.go: reCAPTCHA/hCaptcha/Turnstile detection present" "autobootstrap.go: CAPTCHA vendor detection MISSING"
+check_grep pkg/exploit/autobootstrap.go 'CAPTCHA_BLOCKED' \
+    "autobootstrap.go: CAPTCHA_BLOCKED clear log present" "autobootstrap.go: CAPTCHA_BLOCKED log MISSING"
+check_grep pkg/exploit/autobootstrap.go 'test_accounts_created.txt' \
+    "autobootstrap.go: RULE 3 test-account logging present" "autobootstrap.go: account logging MISSING"
+
+# ── FLAW #2 — 3-tier AI cascade ──────────────────────────────────────
+echo -e "${CYAN}  [FLAW #2] 3-tier AI cascade${NC}"
+check_grep pkg/ai/brain.go 'llama3.2:3b' \
+    "brain.go: llama3.2:3b fast-triage tier present" "brain.go: llama3.2:3b MISSING"
+check_grep pkg/ai/brain.go 'qwen2.5:7b' \
+    "brain.go: qwen2.5:7b deep-analysis tier present" "brain.go: qwen2.5:7b MISSING"
+check_grep pkg/ai/brain.go 'deepseek-r1:7b' \
+    "brain.go: deepseek-r1:7b reasoning tier present" "brain.go: deepseek-r1:7b MISSING"
+check_grep pkg/ai/brain.go 'func NewCascadeBrain' \
+    "brain.go: NewCascadeBrain constructor present" "brain.go: NewCascadeBrain MISSING"
+check_grep pkg/ai/brain.go 'func .*Brain. pullModel' \
+    "brain.go: auto-pull of missing models present" "brain.go: pullModel MISSING"
+check_grep pkg/ai/brain.go 'func stripThink|<think>' \
+    "brain.go: deepseek-r1 <think> chain-of-thought stripping present" "brain.go: stripThink MISSING"
+check_grep pkg/ai/brain.go 'generateTier' \
+    "brain.go: per-tier generation routing present" "brain.go: generateTier MISSING"
+check_grep pkg/config/config.go 'FastModel|fast_triage' \
+    "config.go: cascade OllamaConfig fields present" "config.go: cascade fields MISSING"
+check_grep pkg/config/config.go 'func AICascadeDefaults' \
+    "config.go: AICascadeDefaults present" "config.go: AICascadeDefaults MISSING"
+check_grep pkg/engine/engine.go 'ai.NewCascadeBrain' \
+    "engine.go: NewState uses the 3-tier cascade brain" "engine.go: cascade brain NOT wired into NewState"
+check_grep config.yaml 'fast_triage|deep_analysis|reasoning' \
+    "config.yaml: cascade block present" "config.yaml: cascade block MISSING"
+
+# ── FLAW #3 — 8-WAF bypass matrix ────────────────────────────────────
+echo -e "${CYAN}  [FLAW #3] Deep multi-WAF bypass matrix${NC}"
+check_grep pkg/engine/waf_bypass.go 'type BypassEngine' \
+    "waf_bypass.go: BypassEngine present" "waf_bypass.go: BypassEngine MISSING"
+check_grep pkg/engine/waf_bypass.go 'planCloudflare' \
+    "waf_bypass.go: Cloudflare HTTP/2 + header-fragmentation strategy present" "waf_bypass.go: Cloudflare strategy MISSING"
+check_grep pkg/engine/waf_bypass.go 'planAkamai' \
+    "waf_bypass.go: Akamai Vary-poison + direct-to-origin strategy present" "waf_bypass.go: Akamai strategy MISSING"
+check_grep pkg/engine/waf_bypass.go 'planAWS' \
+    "waf_bypass.go: AWS JSON + double-encode + case-variation strategy present" "waf_bypass.go: AWS strategy MISSING"
+check_grep pkg/engine/waf_bypass.go 'planBehavioral' \
+    "waf_bypass.go: DataDome/PerimeterX behavioral (browser) strategy present" "waf_bypass.go: behavioral strategy MISSING"
+check_grep pkg/engine/waf_bypass.go 'X-HTTP-Method-Override|X-Original-URL|X-Forwarded-For' \
+    "waf_bypass.go: general verb-tunnel + header-injection present" "waf_bypass.go: general evasion MISSING"
+check_grep pkg/engine/waf_bypass.go 'maxRPSPerHost.*10|maxRPSPerHost = 10' \
+    "waf_bypass.go: ≤10 req/s per-host floor enforced (RULE 4)" "waf_bypass.go: RPS floor MISSING"
+check_grep pkg/engine/waf_evasion.go 'WAFDataDome' \
+    "waf_evasion.go: DataDome vendor + detection present" "waf_evasion.go: DataDome MISSING"
+check_grep pkg/engine/waf_evasion.go 'WAFPerimeterX' \
+    "waf_evasion.go: PerimeterX/HUMAN vendor + detection present" "waf_evasion.go: PerimeterX MISSING"
+check_grep pkg/engine/waf_evasion.go 'WAFArkose' \
+    "waf_evasion.go: Arkose Labs vendor + detection present" "waf_evasion.go: Arkose MISSING"
+check_grep pkg/engine/waf_evasion.go 'datadome|_px|IsBehavioralWAF' \
+    "waf_evasion.go: behavioral-WAF cookie signatures present" "waf_evasion.go: behavioral signatures MISSING"
+check_grep config.yaml 'waf_bypass:' \
+    "config.yaml: waf_bypass block present" "config.yaml: waf_bypass block MISSING"
+
+# ── FLAW #4 — Responsible-disclosure PoE boundary ────────────────────
+echo -e "${CYAN}  [FLAW #4] PoE responsible-disclosure boundary${NC}"
+check_grep pkg/exploit/boundary.go 'type BoundaryEngine' \
+    "boundary.go: PoE BoundaryEngine present" "boundary.go: BoundaryEngine MISSING"
+check_grep pkg/exploit/boundary.go 'ConfirmedSafePoC|ConfirmedNeedsManualReview|NotVulnerable' \
+    "boundary.go: 3-value Verdict enum present" "boundary.go: Verdict enum MISSING"
+check_grep pkg/exploit/boundary.go 'denyDestructivePayload' \
+    "boundary.go: destructive-payload safety net present" "boundary.go: destructive deny MISSING"
+check_grep pkg/exploit/boundary.go 'ConfirmBlindRCE' \
+    "boundary.go: RCE timing/DNS-only proof present" "boundary.go: ConfirmBlindRCE MISSING"
+check_grep pkg/exploit/boundary.go 'ConfirmSQLi' \
+    "boundary.go: SQLi error/timing-only proof present" "boundary.go: ConfirmSQLi MISSING"
+check_grep pkg/exploit/boundary.go 'ConfirmSSRF' \
+    "boundary.go: SSRF DNS-callback-only proof present" "boundary.go: ConfirmSSRF MISSING"
+check_grep pkg/exploit/boundary.go 'ConfirmPathTraversal|/etc/hostname' \
+    "boundary.go: path-traversal /etc/hostname-only proof present" "boundary.go: ConfirmPathTraversal MISSING"
+check_grep pkg/exploit/boundary.go 'alert.document.domain' \
+    "boundary.go: XSS alert(document.domain)-only proof present" "boundary.go: safe XSS proof MISSING"
+check_grep config.yaml 'boundary:' \
+    "config.yaml: boundary block present" "config.yaml: boundary block MISSING"
+check_grep RESPONSIBLE_DISCLOSURE.md 'RULE 1|RULE 2|RULE 3|RULE 4' \
+    "RESPONSIBLE_DISCLOSURE.md: 4 rules documented" "RESPONSIBLE_DISCLOSURE.md: rules MISSING"
+
+# ── FLAW #5 — Target-adaptive Phase 0 classifier ─────────────────────
+echo -e "${CYAN}  [FLAW #5] Target-adaptive Phase 0 classifier${NC}"
+check_grep pkg/phases/phase_classifier.go 'type PhaseClassifier' \
+    "phase_classifier.go: Phase 0 classifier present" "phase_classifier.go: PhaseClassifier MISSING"
+check_grep pkg/phases/phase_classifier.go 'ClassWebApp|ClassRESTAPI|ClassSPA|ClassBackend' \
+    "phase_classifier.go: WebApp/API/SPA/Backend classes present" "phase_classifier.go: target classes MISSING"
+check_grep pkg/phases/phase_classifier.go '30.*Second|30\\*time' \
+    "phase_classifier.go: 30s Phase-0 budget cap present" "phase_classifier.go: 30s cap MISSING"
+check_grep pkg/phases/phase_classifier.go 'ShouldSkipCDPFor' \
+    "phase_classifier.go: CDP-skip decision for REST/Backend present" "phase_classifier.go: CDP-skip MISSING"
+check_grep pkg/phases/phases_sovereign.go 'ShouldSkipCDPFor' \
+    "phases_sovereign.go: CDP phases consult the classifier" "phases_sovereign.go: classifier NOT consulted"
+check_grep cmd/mohammed/main.go 'phases.PhaseClassifier\{\}' \
+    "main.go: Phase 0 Target Classifier registered" "main.go: Phase 0 NOT registered"
+
+# ── FLAW #6 — 8 stateful attack machines (SM4-SM8) ───────────────────
+echo -e "${CYAN}  [FLAW #6] 8 stateful attack machines${NC}"
+check_grep pkg/exploit/state_machine_v2.go 'func TwoFactorBypass' \
+    "state_machine_v2.go: SM4 2FA Bypass present" "state_machine_v2.go: SM4 MISSING"
+check_grep pkg/exploit/state_machine_v2.go 'func ForgotPasswordTokenReuse' \
+    "state_machine_v2.go: SM5 Forgot-Password Token Reuse present" "state_machine_v2.go: SM5 MISSING"
+check_grep pkg/exploit/state_machine_v2.go 'func OAuthCodeInterception' \
+    "state_machine_v2.go: SM6 OAuth Code Interception present" "state_machine_v2.go: SM6 MISSING"
+check_grep pkg/exploit/state_machine_v2.go 'func PaginatedIDOR' \
+    "state_machine_v2.go: SM7 Paginated IDOR present" "state_machine_v2.go: SM7 MISSING"
+check_grep pkg/exploit/state_machine_v2.go 'func PrivilegeEscalationParamPollution' \
+    "state_machine_v2.go: SM8 Privilege-Escalation Param Pollution present" "state_machine_v2.go: SM8 MISSING"
+check_grep pkg/exploit/state_machine_v2.go 'func AllV11StateMachines' \
+    "state_machine_v2.go: AllV11StateMachines aggregator present" "state_machine_v2.go: aggregator MISSING"
+check_grep pkg/phases/phases_sovereign.go 'AllV11StateMachines' \
+    "phases_sovereign.go: SM4-SM8 wired into Stateful Attack Graph" "phases_sovereign.go: SM4-SM8 NOT wired"
+
+# ── FLAW #7 — Pre-scan readiness auto-fix ────────────────────────────
+echo -e "${CYAN}  [FLAW #7] Pre-scan readiness auto-fix${NC}"
+check_grep pkg/engine/readiness.go 'func .*State. CheckReadiness' \
+    "readiness.go: CheckReadiness pre-scan audit present" "readiness.go: CheckReadiness MISSING"
+check_grep pkg/engine/readiness.go 'reconTools' \
+    "readiness.go: 38-tool recon inventory present" "readiness.go: recon inventory MISSING"
+check_grep pkg/engine/readiness.go 'probeBrowser|Chromium' \
+    "readiness.go: Chromium launch test present" "readiness.go: Chromium test MISSING"
+check_grep pkg/engine/readiness.go 'PrintReadinessReport' \
+    "readiness.go: readiness report printer present" "readiness.go: report printer MISSING"
+check_grep pkg/engine/engine.go 'CheckReadiness' \
+    "engine.go: readiness check wired into Run()" "engine.go: readiness NOT wired into Run()"
+READINESS_TOOLS=$(grep -c 'InstallCmd:' pkg/engine/readiness.go 2>/dev/null)
+if [ "${READINESS_TOOLS:-0}" -ge 38 ]; then
+    echo -e "  ${GREEN}✔${NC} readiness.go recon-tool count: $READINESS_TOOLS (>= 38)"; PASS=$((PASS+1))
+else
+    echo -e "  ${RED}✘${NC} readiness.go recon-tool count: ${READINESS_TOOLS:-0} (< 38)"; FAIL=$((FAIL+1))
+fi
+
+# ── FLAW #8 — Auto HackerOne report generation ───────────────────────
+echo -e "${CYAN}  [FLAW #8] Auto HackerOne report generation${NC}"
+check_grep pkg/report/h1_report.go 'func ExportH1Reports' \
+    "h1_report.go: per-vuln H1 report exporter present" "h1_report.go: ExportH1Reports MISSING"
+check_grep pkg/report/h1_report.go 'func GenerateH1Report' \
+    "h1_report.go: H1 markdown generator present" "h1_report.go: GenerateH1Report MISSING"
+check_grep pkg/report/h1_report.go 'CVSS:3.1' \
+    "h1_report.go: CVSS 3.1 vectors present" "h1_report.go: CVSS 3.1 MISSING"
+check_grep pkg/report/h1_report.go 'Steps to Reproduce|## Impact|## Remediation' \
+    "h1_report.go: full H1 section structure present" "h1_report.go: H1 sections MISSING"
+check_grep pkg/report/h1_report.go '_h1_report.md' \
+    "h1_report.go: {vuln_id}_h1_report.md output path present" "h1_report.go: output path MISSING"
+check_grep pkg/phases/phases_vuln.go 'ExportH1Reports' \
+    "phases_vuln.go: H1 export wired into ReportPhase" "phases_vuln.go: H1 export NOT wired"
+
+# ── Scripts + docs version bump ──────────────────────────────────────
+echo -e "${CYAN}  [V11] Scripts + docs${NC}"
+check_grep install_path.sh 'V11.0 FINAL SOVEREIGN' \
+    "install_path.sh: V11.0 header present" "install_path.sh: version NOT bumped"
+check_grep install_path.sh 'llama3.2:3b|qwen2.5:7b|deepseek-r1:7b' \
+    "install_path.sh: 3-model cascade auto-pull present" "install_path.sh: cascade auto-pull MISSING"
+check_grep setup.sh 'V11.0 FINAL SOVEREIGN' \
+    "setup.sh: V11.0 header + health checks present" "setup.sh: version NOT bumped"
+check_grep README.md 'V11.0 FINAL SOVEREIGN' \
+    "README.md: V11.0 title present" "README.md: version NOT bumped"
+check_grep README.md 'V10.0.*V11.0|V10.0 SOVEREIGN.*V11.0 FINAL' \
+    "README.md: V10.0 vs V11.0 comparison table present" "README.md: comparison table MISSING"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

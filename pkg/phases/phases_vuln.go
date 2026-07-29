@@ -1377,6 +1377,19 @@ func (p *ReportPhase) Execute(ctx context.Context, s *engine.State) error {
 		s.Printf("│  Tiered export: SKIP (%v)\n", err)
 	}
 
+	// V11.0 FINAL SOVEREIGN (FLAW #8): auto-generate a HackerOne-ready markdown
+	// report (Summary / Steps / Impact / PoC / CVSS 3.1 severity / Remediation)
+	// for every CONFIRMED finding into <output>/reports/.
+	if n, err := report.ExportH1Reports(s); err == nil {
+		if n > 0 {
+			s.Printf("│  HackerOne reports: %d written to %s/reports/\n", n, s.OutputFolder)
+		} else {
+			s.Printf("│  HackerOne reports: none (no confirmed findings cleared the gate)\n")
+		}
+	} else {
+		s.Printf("│  HackerOne report export: SKIP (%v)\n", err)
+	}
+
 	s.Printf("│  Report saved: %s\n", reportFile)
 	s.Printf("│  Critical: %d | High: %d | Medium: %d | Low: %d | Info: %d\n",
 		counts["Critical"], counts["High"], counts["Medium"], counts["Low"], counts["Info"])

@@ -341,14 +341,52 @@ if [ -x "$PROJ_DIR/mohammed" ]; then
     ( cd "$PROJ_DIR" && ./mohammed doctor ) || true
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# V11.0 FINAL SOVEREIGN — engine HEALTH CHECKS (FLAW #7)
+# Mirrors the in-engine pre-scan readiness check so the operator sees the same
+# posture from the installer. All checks are best-effort and non-fatal.
+# ═══════════════════════════════════════════════════════════════════════════
+echo ""
+log "V11.0 health checks — AI cascade / Chromium / recon tools ..."
+
+OLLAMA_ENDPOINT="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+V11_CASCADE_MODELS=("llama3.2:3b" "qwen2.5:7b" "deepseek-r1:7b")
+if command -v curl &>/dev/null && curl -fsS --max-time 3 "$OLLAMA_ENDPOINT/api/tags" &>/dev/null; then
+    INSTALLED="$(curl -fsS --max-time 3 "$OLLAMA_ENDPOINT/api/tags" 2>/dev/null \
+                 | grep -oE '"name":"[^"]+"' | cut -d'"' -f4 | tr '\n' ' ')"
+    for m in "${V11_CASCADE_MODELS[@]}"; do
+        if printf '%s' "$INSTALLED" | grep -qF "$m"; then
+            log "  AI cascade model present: $m"
+        else
+            log "  AI cascade model MISSING: $m  (auto-pulled at startup, or: ollama pull $m)"
+        fi
+    done
+else
+    log "  Ollama offline — AI cascade will fail open to deterministic heuristics"
+fi
+
+if [ -n "${CHROME_BIN:-}" ] && [ -x "${CHROME_BIN:-/nonexistent}" ]; then
+    log "  CDP Chromium ready: $CHROME_BIN"
+else
+    CHROME_GUESS="$(command -v chromium chromium-browser google-chrome google-chrome-stable 2>/dev/null | head -1)"
+    if [ -n "$CHROME_GUESS" ]; then
+        log "  CDP Chromium ready: $CHROME_GUESS"
+    else
+        log "  CDP Chromium not found — Go-Rod auto-downloads a private build on first use"
+    fi
+fi
+
 # Cleanup transient build dir (keep $OPT_DIR — smuggler/cloud_enum/resolvers live there)
 rm -rf "$TMP_BUILD"
 
 echo ""
 log "════════════════════════════════════════════════════════"
-log "  Setup complete."
+log "  MOHAMMED V11.0 FINAL SOVEREIGN — Setup complete."
 log "  1) Reload PATH:   source $SHELL_RC"
 log "  2) Verify tools:  ./mohammed doctor   (or bash verify.sh)"
-log "  3) (optional) AI: ollama serve & ollama pull gemma:2b"
+log "  3) AI cascade:    ollama serve &"
+log "                    ollama pull llama3.2:3b   # fast triage"
+log "                    ollama pull qwen2.5:7b    # deep analysis"
+log "                    ollama pull deepseek-r1:7b # reasoning"
 log "  Resolvers: $RESOLVERS"
 log "════════════════════════════════════════════════════════"

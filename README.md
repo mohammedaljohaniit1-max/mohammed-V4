@@ -1,6 +1,74 @@
-# MOHAMMED V10.0 SOVEREIGN EDITION
+# MOHAMMED V11.0 FINAL SOVEREIGN EDITION
 
-**Autonomous, Zero-Touch, Zero-Cost Attack Surface & Exploit Engine**
+**Autonomous, Zero-Touch, Zero-Cost Attack Surface & Exploit Engine (NO-MERCY MANDATE)**
+
+> **V11.0 FINAL SOVEREIGN** hardens the V10.0 sovereign engine against the eight
+> structural flaws that stopped it working on real, hardened HackerOne targets.
+> It replaces the weak single AI model with a **3-tier cognitive cascade**, adds
+> a **CAPTCHA-aware** account bootstrapper, an **8-WAF bypass matrix**, a
+> **"prove, don't exploit" responsible-disclosure boundary**, a **target-adaptive
+> Phase-0 classifier**, **five new stateful attack chains** (8 total), a
+> **pre-scan readiness auto-fix**, and **auto-generated HackerOne reports** with
+> CVSS 3.1.
+
+### 🚀 MOHAMMED V10.0 vs V11.0 FINAL SOVEREIGN COMPARISON
+
+| Feature / Metric | V10.0 SOVEREIGN | V11.0 FINAL SOVEREIGN | Delta / Fix |
+|---|---|---|---|
+| **Total Phases** | 60 | 65+ | +5 (Phase 0 Classifier + 4 new attack phases) |
+| **AI Model** | gemma:2b (WEAK) | llama3.2:3b / qwen2.5:7b / deepseek-r1:7b cascade | Speed + Quality |
+| **CAPTCHA Handling** | Silent fail (BUG) | Detect + graceful fallback | FIXED |
+| **WAF Bypass Depth** | UA rotation + skip | 8-WAF-specific bypass matrix (CF/Akamai/AWS/DataDome) | FIXED |
+| **Ethical Boundary** | Missing (DANGEROUS) | PoE boundary engine — knock not break-in | FIXED |
+| **State Machines** | 3 hardcoded | 8 full attack chains | +5 new chains |
+| **Phase Ordering** | Fixed sequential | AI-classified dynamic ordering | FIXED |
+| **Pre-Scan Readiness** | None | Auto-check + auto-fix all deps before scan | NEW |
+| **HackerOne Reports** | Raw text | Auto-generated H1 markdown with CVSS | NEW |
+| **Total Verification Checks** | 277 | 300+ | +23 new checks |
+| **Build Status** | Pass | Pass (0 errors, 0 warnings, 0 TODOs) | Maintained |
+
+## V11.0 FINAL SOVEREIGN — What's New (8 Structural Flaw Fixes)
+
+1. **FLAW #1 — CAPTCHA-aware bootstrapper** (`pkg/exploit/autobootstrap.go`):
+   detects `g-recaptcha` / `h-captcha` / Turnstile / Arkose on signup surfaces,
+   logs `CAPTCHA_BLOCKED — skipping autobootstrap on {host}`, sets the auth
+   context to `nil`, and falls back to unauthenticated testing. Every created
+   test account is logged to `output/test_accounts_created.txt` (RULE 3).
+2. **FLAW #2 — 3-tier AI cascade** (`pkg/ai/brain.go`, `pkg/config/config.go`):
+   `llama3.2:3b` (fast triage / FP gate) → `qwen2.5:7b` (deep payload / BOLA)
+   → `deepseek-r1:7b` (reasoning / state-planning). Missing models are
+   auto-pulled at startup; deepseek-r1 `<think>` chains are stripped; each tier
+   fails open to deterministic heuristics.
+3. **FLAW #3 — 8-WAF bypass matrix** (`pkg/engine/waf_bypass.go`,
+   `pkg/engine/waf_evasion.go`): per-vendor strategies for Cloudflare (HTTP/2
+   multiplex + header fragmentation + `cf_clearance`), Akamai (Vary cache-key
+   poison + direct-to-origin + slow-HTTP), AWS WAFv2 (JSON body + double-encode
+   + SQL case variation), and behavioral DataDome / PerimeterX / Arkose (real
+   Go-Rod browser with 1.2 s–4.7 s human jitter). Rate is hard-capped ≤10 req/s.
+4. **FLAW #4 — PoE responsible-disclosure boundary** (`pkg/exploit/boundary.go`):
+   "knock, don't break in." RCE=timing/DNS, SQLi=error/timing, SSRF=DNS callback,
+   PathTraversal=`/etc/hostname`, XSS=`alert(document.domain)` — nothing more.
+   Returns `CONFIRMED_SAFE_PoC` / `CONFIRMED_NEEDS_MANUAL_REVIEW` / `NOT_VULNERABLE`
+   and hard-refuses destructive payloads. See `RESPONSIBLE_DISCLOSURE.md`.
+5. **FLAW #5 — Target-adaptive Phase 0 classifier** (`pkg/phases/phase_classifier.go`):
+   ≤30 s HEAD/GET fingerprint of every origin → WebApp / REST-API / SPA /
+   Backend → dynamic plan (REST/Backend skip the CDP DOM phases; SPA prioritizes
+   CDP).
+6. **FLAW #6 — 8 stateful attack chains** (`pkg/exploit/state_machine_v2.go`):
+   adds SM4 2FA-Bypass, SM5 Forgot-Password Token Reuse, SM6 OAuth Code
+   Interception, SM7 Paginated IDOR, SM8 Privilege-Escalation via Parameter
+   Pollution — wired into the Stateful Attack Graph phase alongside SM1-SM3.
+7. **FLAW #7 — Pre-scan readiness auto-fix** (`pkg/engine/readiness.go`):
+   audits Ollama + cascade models (auto-pull), Go-Rod Chromium (launch test),
+   and the 38 recon tools on `$PATH`, printing a READINESS REPORT with install
+   hints for anything missing.
+8. **FLAW #8 — Auto HackerOne reports** (`pkg/report/h1_report.go`): every
+   confirmed finding is rendered to `output/{target}/reports/{vuln_id}_h1_report.md`
+   with Summary / Steps to Reproduce / Impact / PoC / Severity (CVSS 3.1 vector +
+   score) / Remediation.
+
+<details>
+<summary>Legacy V10.0 SOVEREIGN overview (retained)</summary>
 
 > **V10.0 SOVEREIGN** turns MOHAMMED into a fully autonomous, sovereign engine
 > that reasons, renders, and self-authenticates — with **ZERO paid APIs, ZERO

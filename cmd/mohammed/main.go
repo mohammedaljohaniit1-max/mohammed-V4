@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                              V10.0 SOVEREIGN | Zero-Touch Autonomous Attack Engine
+                        V11.0 FINAL SOVEREIGN | Zero-Touch Autonomous Attack Engine
 `
 
 const helpText = `
-MOHAMMED V10.0 SOVEREIGN — Zero-Touch Autonomous Attack & Exploit Engine (60+ phases, 76+ OSINT, 16 Go exploit engines, local Ollama AI cognitive brain, Go-Rod headless-Chrome DOM/postMessage/CORS, autonomous User A/B bootstrapper, chained stateful attack graph, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP, adaptive 429/WAF stealth shield)
+MOHAMMED V11.0 FINAL SOVEREIGN — Zero-Touch Autonomous Attack & Exploit Engine (65+ phases, 76+ OSINT, 16 Go exploit engines, 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP, adaptive 429/WAF stealth shield)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -243,6 +243,17 @@ func runScan(args []string) {
 		EnforceScopeOnJS:               yamlCfg.Filter.EnforceScopeOnJS,
 		RequireConfirmationForCritical: yamlCfg.AIExtra.RequireConfirmationForCritical,
 		WAFBypass:                      *wafBypass,
+
+		// V11.0 FINAL SOVEREIGN (FLAW #3 + #4): wire the deep multi-WAF bypass
+		// matrix and the "prove, don't exploit" responsible-disclosure boundary
+		// from the YAML config into the live scan config.
+		WAFBypassCfg: yamlCfg.WAFBypass,
+		Boundary:     yamlCfg.Boundary,
+	}
+	// The --waf-bypass CLI flag forces the bypass engine on even when the YAML
+	// config leaves it disabled (the flag is the operator's explicit opt-in).
+	if *wafBypass {
+		cfg.WAFBypassCfg.Enabled = true
 	}
 
 	config.EnsureDir(*output)
@@ -282,6 +293,11 @@ func runScan(args []string) {
 		&phases.DNSResolvePhase{},         // 05
 		&phases.TakeoverPhase{},           // 06
 		&phases.HTTPProbePhase{},          // 07
+		// V11.0 FINAL SOVEREIGN — Phase 0 Target Classifier (FLAW #5). Runs
+		// right after HTTP probing (so live origins exist) to fingerprint each
+		// target as WebApp/REST-API/SPA/Backend and publish a target-adaptive
+		// plan the CDP phases consult (REST/Backend skip CDP; SPA prioritizes).
+		&phases.PhaseClassifier{}, // 0: Target Classifier
 		&phases.TLSAnalysisPhase{},        // 08
 		&phases.DeepReconPhase{},          // 08b: zero-login deep external recon
 		&phases.PortScanPhase{},           // 09

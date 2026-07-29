@@ -33,41 +33,129 @@ import (
 	"time"
 )
 
-// DefaultModelPriority is the auto-fallback order from the mandate (Section 2.1):
-// qwen2.5-coder for code/payload work, gemma for fast response analysis, and
-// llama3.2 as the final fallback. The Brain probes /api/tags once and keeps the
-// first installed model that matches this order.
+// ─────────────────────────────────────────────────────────────────────────
+// V11.0 FINAL SOVEREIGN — Multi-Model Cascade (FLAW #2 fix)
+//
+// V10 used a single weak model (gemma:2b) that lacked the reasoning capacity for
+// serious security analysis. V11 replaces it with a THREE-TIER cascade, each
+// cognitive task routed to the model best suited for it:
+//
+//   Tier FAST      (llama3.2:3b, ~2GB)   → response classification / FP triage
+//   Tier DEEP      (qwen2.5:7b, ~4.5GB)  → payload mutation, BOLA path discovery
+//   Tier REASONING (deepseek-r1:7b, ~4.7GB) → business-logic & state-chain planning
+//
+// Missing models are auto-pulled (ollama pull) at Probe time when AutoPull is on.
+// Every tier falls back to the next-best installed model, then to deterministic
+// heuristics — the scan is NEVER blocked by the AI layer.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ModelTier selects which cascade model a cognitive call should prefer.
+type ModelTier int
+
+const (
+	// TierFast is the low-latency triage/classification tier (llama3.2:3b).
+	TierFast ModelTier = iota
+	// TierDeep is the code/API/payload analysis tier (qwen2.5:7b).
+	TierDeep
+	// TierReasoning is the chain-of-thought planning tier (deepseek-r1:7b).
+	TierReasoning
+)
+
+// DefaultFastModels / DefaultDeepModels / DefaultReasoningModels list the
+// preferred model names per tier, most-preferred first. The V10 models are kept
+// as lower-priority fallbacks so a box that already had them still works, but
+// gemma:2b is deliberately DROPPED as a primary anywhere (too weak).
+var (
+	DefaultFastModels      = []string{"llama3.2:3b", "llama3.2:latest", "llama3.2", "gemma:2b"}
+	DefaultDeepModels      = []string{"qwen2.5:7b", "qwen2.5-coder:latest", "qwen2.5-coder", "qwen2.5:latest"}
+	DefaultReasoningModels = []string{"deepseek-r1:7b", "deepseek-r1:latest", "deepseek-r1", "qwen2.5:7b"}
+)
+
+// DefaultModelPriority is the flattened auto-fallback order used when no tier is
+// specified (legacy callers). Fast → deep → reasoning → legacy V10 models.
 var DefaultModelPriority = []string{
+	"llama3.2:3b",
+	"qwen2.5:7b",
+	"deepseek-r1:7b",
+	"llama3.2:latest",
+	"llama3.2",
 	"qwen2.5-coder:latest",
 	"qwen2.5-coder",
 	"gemma:7b",
 	"gemma:2b",
 	"gemma",
-	"llama3.2:latest",
-	"llama3.2",
 }
 
-// Brain is the V10 cognitive engine. It embeds a triage Client (reusing its
-// endpoint, timeout and fail-open generate path) and layers model auto-fallback
-// plus the three cognitive methods on top.
+// CascadeConfig configures the V11 three-tier model cascade (FLAW #2). Empty
+// fields fall back to the Default*Models lists.
+type CascadeConfig struct {
+	FastModel      string // e.g. llama3.2:3b
+	DeepModel      string // e.g. qwen2.5:7b
+	ReasoningModel string // e.g. deepseek-r1:7b
+	AutoPull       bool   // ollama pull missing tier models at Probe time
+	TimeoutFast    int    // seconds
+	TimeoutDeep    int    // seconds
+	TimeoutReason  int    // seconds
+}
+
+// Brain is the V11 cognitive engine. It embeds a triage Client (reusing its
+// endpoint, timeout and fail-open generate path) and layers a three-tier model
+// cascade plus the three cognitive methods on top.
 type Brain struct {
 	// Client is the underlying Ollama connection (endpoint/timeout/http).
 	Client *Client
 	// Online reflects the last connectivity probe. When false every method
 	// returns its deterministic fallback without touching the network.
 	Online bool
-	// available is the auto-fallback model list actually installed on the server
-	// (intersection of DefaultModelPriority and /api/tags), resolved by Probe.
+	// available is the flattened auto-fallback model list actually installed on
+	// the server (intersection of DefaultModelPriority and /api/tags).
 	available []string
+
+	// cascade holds the operator's tier model preferences.
+	cascade CascadeConfig
+	// resolved maps each tier to the ordered list of installed models to try for
+	// that tier (best-first). Populated by Probe.
+	resolved map[ModelTier][]string
+	// installed is the set of models present on the server after Probe.
+	installed map[string]bool
 }
 
-// NewBrain builds a cognitive brain around an Ollama endpoint. enabled=false (or
-// an empty endpoint that turns out unreachable) yields a brain whose methods all
-// fail open. The primary model, when non-empty, is tried before the default
-// priority list so an operator override is always honoured.
+// NewBrain builds a cognitive brain around an Ollama endpoint with the default
+// V11 cascade. enabled=false (or an unreachable endpoint) yields a brain whose
+// methods all fail open. primaryModel, when non-empty, is honoured as an extra
+// candidate ahead of the cascade defaults.
 func NewBrain(enabled bool, endpoint, primaryModel string, timeoutSecs int) *Brain {
 	c := NewClient(enabled, endpoint, primaryModel, timeoutSecs)
-	return &Brain{Client: c}
+	fast, deep, reasoning := "llama3.2:3b", "qwen2.5:7b", "deepseek-r1:7b"
+	return &Brain{
+		Client:  c,
+		cascade: CascadeConfig{FastModel: fast, DeepModel: deep, ReasoningModel: reasoning, AutoPull: true, TimeoutFast: 5, TimeoutDeep: 15, TimeoutReason: 30},
+	}
+}
+
+// NewCascadeBrain builds a brain with an explicit tier cascade (FLAW #2). This
+// is the constructor the engine wires from config.OllamaConfig.
+func NewCascadeBrain(enabled bool, endpoint, primaryModel string, timeoutSecs int, cc CascadeConfig) *Brain {
+	c := NewClient(enabled, endpoint, primaryModel, timeoutSecs)
+	if cc.FastModel == "" {
+		cc.FastModel = "llama3.2:3b"
+	}
+	if cc.DeepModel == "" {
+		cc.DeepModel = "qwen2.5:7b"
+	}
+	if cc.ReasoningModel == "" {
+		cc.ReasoningModel = "deepseek-r1:7b"
+	}
+	if cc.TimeoutFast <= 0 {
+		cc.TimeoutFast = 5
+	}
+	if cc.TimeoutDeep <= 0 {
+		cc.TimeoutDeep = 15
+	}
+	if cc.TimeoutReason <= 0 {
+		cc.TimeoutReason = 30
+	}
+	return &Brain{Client: c, cascade: cc}
 }
 
 // tagsResponse is the /api/tags listing body.
@@ -118,14 +206,150 @@ func (b *Brain) Probe(ctx context.Context) bool {
 	for _, m := range tags.Models {
 		installed[strings.ToLower(strings.TrimSpace(m.Name))] = true
 	}
+
+	// V11 (FLAW #2): auto-pull any tier model that is missing, so a fresh box
+	// gets the capable cascade instead of silently degrading to a weak model.
+	if b.cascade.AutoPull {
+		for _, want := range []string{b.cascade.FastModel, b.cascade.DeepModel, b.cascade.ReasoningModel} {
+			if want == "" || installed[strings.ToLower(want)] {
+				continue
+			}
+			if b.pullModel(ctx, want) {
+				installed[strings.ToLower(want)] = true
+			}
+		}
+	}
+
+	b.installed = installed
+	b.resolved = b.resolveTiers(installed)
 	b.available = resolveModelOrder(b.Client.Model, installed)
 	b.Online = len(b.available) > 0
-	// Pin the underlying triage client to the best available model so legacy
-	// TriageFinding calls also use a model that is actually installed.
+	// Pin the underlying triage client to the FAST tier model (best installed)
+	// so legacy TriageFinding calls use a capable, installed model.
 	if b.Online {
-		b.Client.Model = b.available[0]
+		if fast := b.tierModels(TierFast); len(fast) > 0 {
+			b.Client.Model = fast[0]
+		} else {
+			b.Client.Model = b.available[0]
+		}
 	}
 	return b.Online
+}
+
+// pullModel triggers `ollama pull` via the /api/pull endpoint (non-streaming).
+// It is best-effort and bounded by a generous timeout; a failed pull just leaves
+// the model absent and the tier falls back to the next installed candidate.
+func (b *Brain) pullModel(ctx context.Context, name string) bool {
+	if b == nil || b.Client == nil || strings.TrimSpace(name) == "" {
+		return false
+	}
+	body, err := json.Marshal(map[string]interface{}{"name": name, "stream": false})
+	if err != nil {
+		return false
+	}
+	// Model pulls are large; allow up to 10 minutes but honour ctx cancellation.
+	pullCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(pullCtx, http.MethodPost, b.Client.Endpoint+"/api/pull", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.Client.http.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	var out struct {
+		Status string `json:"status"`
+		Error  string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return out.Error == ""
+}
+
+// resolveTiers computes, for each tier, the ordered list of INSTALLED models to
+// try. Preference: the operator's configured model for that tier, then the
+// tier's default list, then a cross-tier fallback so a tier is never empty when
+// ANY capable model is installed.
+func (b *Brain) resolveTiers(installed map[string]bool) map[ModelTier][]string {
+	pickList := func(primary string, defaults []string) []string {
+		var out []string
+		seen := map[string]bool{}
+		add := func(name string) {
+			key := strings.ToLower(strings.TrimSpace(name))
+			if key == "" || seen[key] || !installed[key] {
+				return
+			}
+			seen[key] = true
+			out = append(out, name)
+		}
+		add(primary)
+		for _, m := range defaults {
+			add(m)
+		}
+		// Cross-tier fallback: any installed model from the global priority list.
+		for _, m := range DefaultModelPriority {
+			add(m)
+		}
+		return out
+	}
+	return map[ModelTier][]string{
+		TierFast:      pickList(b.cascade.FastModel, DefaultFastModels),
+		TierDeep:      pickList(b.cascade.DeepModel, DefaultDeepModels),
+		TierReasoning: pickList(b.cascade.ReasoningModel, DefaultReasoningModels),
+	}
+}
+
+// tierModels returns the resolved installed models for a tier (best-first).
+func (b *Brain) tierModels(t ModelTier) []string {
+	if b == nil || b.resolved == nil {
+		return nil
+	}
+	return b.resolved[t]
+}
+
+// tierTimeout returns the per-tier timeout as a duration.
+func (b *Brain) tierTimeout(t ModelTier) time.Duration {
+	secs := b.cascade.TimeoutDeep
+	switch t {
+	case TierFast:
+		secs = b.cascade.TimeoutFast
+	case TierReasoning:
+		secs = b.cascade.TimeoutReason
+	}
+	if secs <= 0 {
+		secs = 15
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// TierModel returns the model name the given tier will use (best installed, else
+// the configured preference). Useful for banners/logs and tests.
+func (b *Brain) TierModel(t ModelTier) string {
+	if models := b.tierModels(t); len(models) > 0 {
+		return models[0]
+	}
+	switch t {
+	case TierFast:
+		return b.cascade.FastModel
+	case TierDeep:
+		return b.cascade.DeepModel
+	case TierReasoning:
+		return b.cascade.ReasoningModel
+	}
+	return b.cascade.FastModel
+}
+
+// CascadeSummary reports the resolved per-tier models for the startup banner.
+func (b *Brain) CascadeSummary() string {
+	if b == nil {
+		return "fast=? deep=? reasoning=?"
+	}
+	return "fast=" + b.TierModel(TierFast) + " deep=" + b.TierModel(TierDeep) + " reasoning=" + b.TierModel(TierReasoning)
 }
 
 // resolveModelOrder computes the auto-fallback list: the operator's primary
@@ -191,6 +415,98 @@ func (b *Brain) generate(ctx context.Context, prompt string, numPredict int) (st
 		}
 	}
 	return "", false
+}
+
+// generateTier runs a completion against the models resolved for a specific
+// cascade tier (best-first), applying that tier's timeout. Falls back to the
+// flattened available list when the tier resolved empty. Returns ("", false)
+// when offline or every candidate failed.
+func (b *Brain) generateTier(ctx context.Context, tier ModelTier, prompt string, numPredict int) (string, bool) {
+	if b == nil || b.Client == nil || !b.Client.Enabled || !b.Online {
+		return "", false
+	}
+	models := b.tierModels(tier)
+	if len(models) == 0 {
+		models = b.available
+	}
+	if len(models) == 0 {
+		models = []string{b.Client.Model}
+	}
+	timeout := b.tierTimeout(tier)
+	for _, model := range models {
+		if out, ok := b.generateWithTimeout(ctx, model, prompt, numPredict, timeout); ok {
+			return out, true
+		}
+	}
+	return "", false
+}
+
+// generateWithTimeout is generateWith with an explicit per-tier timeout instead
+// of the client-wide one.
+func (b *Brain) generateWithTimeout(ctx context.Context, model, prompt string, numPredict int, timeout time.Duration) (string, bool) {
+	if numPredict <= 0 {
+		numPredict = 200
+	}
+	reqBody := ollamaRequest{
+		Model:  model,
+		Prompt: prompt,
+		Stream: false,
+		Options: map[string]interface{}{
+			"temperature": 0.2,
+			"num_predict": numPredict,
+		},
+	}
+	payload, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", false
+	}
+	if timeout <= 0 {
+		timeout = b.Client.Timeout
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(callCtx, http.MethodPost,
+		b.Client.Endpoint+"/api/generate", bytes.NewReader(payload))
+	if err != nil {
+		return "", false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := b.Client.http.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var out ollamaResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", false
+	}
+	if out.Error != "" {
+		return "", false
+	}
+	// deepseek-r1 emits <think>…</think> chain-of-thought; strip it so callers
+	// only parse the final answer.
+	return stripThink(strings.TrimSpace(out.Response)), true
+}
+
+// stripThink removes deepseek-r1 style <think>…</think> reasoning blocks.
+func stripThink(s string) string {
+	for {
+		open := strings.Index(strings.ToLower(s), "<think>")
+		if open == -1 {
+			break
+		}
+		close := strings.Index(strings.ToLower(s), "</think>")
+		if close == -1 || close < open {
+			// Unclosed think block — drop everything up to end marker heuristically.
+			s = strings.TrimSpace(s[:open])
+			break
+		}
+		s = s[:open] + s[close+len("</think>"):]
+	}
+	return strings.TrimSpace(s)
 }
 
 // generateWith runs one completion against a specific model.
@@ -275,7 +591,8 @@ func (b *Brain) SemanticTriage(ctx context.Context, findingType, reqContext, evi
 		return heuristicSemantic(findingType, evidence)
 	}
 	prompt := formatPrompt(semanticTriagePrompt, findingType, reqContext, evidence)
-	raw, ok := b.generate(ctx, prompt, 96)
+	// FLAW #2: fast triage → llama3.2:3b tier (low latency, adequate reasoning).
+	raw, ok := b.generateTier(ctx, TierFast, prompt, 96)
 	if !ok {
 		return heuristicSemantic(findingType, evidence)
 	}
@@ -367,7 +684,8 @@ func (b *Brain) MutatePayload(ctx context.Context, vulnClass, blocked, wafRespon
 	}
 	if b != nil && b.Online {
 		prompt := formatPrompt(payloadMutationPrompt, vulnClass, blocked, wafResponse)
-		if raw, ok := b.generate(ctx, prompt, 220); ok {
+		// FLAW #2: payload mutation is deep code/syntax work → qwen2.5:7b tier.
+		if raw, ok := b.generateTier(ctx, TierDeep, prompt, 220); ok {
 			if muts := parsePayloadLines(raw, blocked); len(muts) > 0 {
 				return muts
 			}
@@ -460,7 +778,8 @@ func (b *Brain) RankIDORCandidates(ctx context.Context, endpoints []string) []st
 	}
 	if b != nil && b.Online {
 		prompt := formatPrompt(bizLogicPrompt, strings.Join(feed, "\n"))
-		if raw, ok := b.generate(ctx, prompt, 300); ok {
+		// FLAW #2: business-logic ranking is chain-of-thought → deepseek-r1 tier.
+		if raw, ok := b.generateTier(ctx, TierReasoning, prompt, 300); ok {
 			var out []string
 			seen := map[string]bool{}
 			for _, line := range strings.Split(raw, "\n") {
