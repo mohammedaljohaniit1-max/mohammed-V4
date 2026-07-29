@@ -31,8 +31,28 @@ const (
 	WAFSucuri     WAFVendor = "Sucuri"
 	WAFF5         WAFVendor = "F5 BIG-IP ASM"
 	WAFFastly     WAFVendor = "Fastly"
+	// V11.0 FINAL SOVEREIGN (FLAW #3) — behavioral / anti-bot vendors that
+	// cannot be defeated by header tricks alone and require a real browser
+	// (Go-Rod / CDP) to solve their client-side proof-of-work / device
+	// fingerprinting challenges.
+	WAFDataDome   WAFVendor = "DataDome"
+	WAFPerimeterX WAFVendor = "PerimeterX/HUMAN"
+	WAFArkose     WAFVendor = "Arkose Labs"
 	WAFGeneric    WAFVendor = "Generic WAF"
 )
+
+// BehavioralWAFs is the set of anti-bot vendors whose challenges are
+// client-side/behavioral: header fragmentation and encoding tricks will NOT
+// bypass them — the WAF-bypass engine must escalate to a real browser session.
+var BehavioralWAFs = map[WAFVendor]bool{
+	WAFDataDome:   true,
+	WAFPerimeterX: true,
+	WAFArkose:     true,
+}
+
+// IsBehavioralWAF reports whether the given vendor requires a browser-based
+// (behavioral) bypass rather than a transport/encoding-level one.
+func IsBehavioralWAF(v WAFVendor) bool { return BehavioralWAFs[v] }
 
 // WAFFingerprint is the verdict of classifying a single response.
 type WAFFingerprint struct {
@@ -89,6 +109,18 @@ var wafHeaderSignals = []wafHeaderSignal{
 	{"Server", "fastly", WAFFastly, false},
 	{"X-Served-By", "cache-", WAFFastly, false},
 	{"Fastly-Debug-Digest", "", WAFFastly, false},
+	// DataDome (V11) — behavioral anti-bot. The datadome cookie + X-DD headers.
+	{"Set-Cookie", "datadome", WAFDataDome, true},
+	{"X-DataDome", "", WAFDataDome, true},
+	{"X-DataDome-CID", "", WAFDataDome, true},
+	{"Server", "datadome", WAFDataDome, true},
+	// PerimeterX / HUMAN (V11) — _px* cookies + px response headers.
+	{"Set-Cookie", "_px", WAFPerimeterX, true},
+	{"Set-Cookie", "_pxvid", WAFPerimeterX, true},
+	{"Set-Cookie", "pxcts", WAFPerimeterX, true},
+	{"X-Px", "", WAFPerimeterX, true},
+	// Arkose Labs (V11) — FunCaptcha enforcement headers.
+	{"X-Arkose-Status", "", WAFArkose, true},
 }
 
 // wafBodySignal maps a lower-cased body substring to a vendor + challenge flag.
@@ -127,10 +159,22 @@ var wafBodySignals = []wafBodySignal{
 	// F5
 	{"the requested url was rejected", WAFF5, true},
 	{"support id is", WAFF5, true},
+	// DataDome (V11) — interstitial + captcha-delivery.com asset host.
+	{"captcha-delivery.com", WAFDataDome, true},
+	{"datadome", WAFDataDome, true},
+	{"dd_cookie", WAFDataDome, true},
+	{"geo.captcha-delivery.com", WAFDataDome, true},
+	// PerimeterX / HUMAN (V11) — px-captcha block page + JS SDK.
+	{"px-captcha", WAFPerimeterX, true},
+	{"perimeterx", WAFPerimeterX, true},
+	{"_pxappid", WAFPerimeterX, true},
+	{"px.js", WAFPerimeterX, true},
+	{"please verify you are a human", WAFPerimeterX, true},
+	// Arkose Labs (V11) — FunCaptcha SDK marker.
+	{"funcaptcha", WAFArkose, true},
+	{"arkoselabs", WAFArkose, true},
 	// Generic block/challenge vocabulary.
 	{"web application firewall", WAFGeneric, true},
-	{"captcha-delivery.com", WAFGeneric, true},
-	{"px-captcha", WAFGeneric, true},
 }
 
 // FingerprintWAF classifies a response into a WAF/CDN verdict from its status,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# MOHAMMED V10.0 SOVEREIGN EDITION — Auto-Installer & PATH Enforcer  (REPAIR #7)
+# MOHAMMED V11.0 FINAL SOVEREIGN EDITION — Auto-Installer & PATH Enforcer
 # ---------------------------------------------------------------------------
 # Root cause fixed: "Missing tools or PATH mismatch cause quiet phase skips."
 #
@@ -445,8 +445,13 @@ if command -v ollama &>/dev/null; then
 else
     _warn "Ollama not installed. Install (free, local) with:"
     _warn "    curl -fsSL https://ollama.com/install.sh | sh"
-    _warn "  then pull a model:  ollama pull qwen2.5-coder"
+    _warn "  then pull the V11 cascade:  ollama pull llama3.2:3b && ollama pull qwen2.5:7b && ollama pull deepseek-r1:7b"
 fi
+
+# V11.0 FINAL SOVEREIGN — 3-tier AI cascade models (FLAW #2). The engine also
+# auto-pulls these at startup when ollama.auto_pull is true, but pulling here
+# means the first scan is instant instead of blocking on a multi-GB download.
+V11_CASCADE_MODELS=("llama3.2:3b" "qwen2.5:7b" "deepseek-r1:7b")
 
 # Non-fatal connectivity probe — mirrors brain.Probe() /api/tags.
 if command -v curl &>/dev/null; then
@@ -455,7 +460,18 @@ if command -v curl &>/dev/null; then
         MODELS="$(curl -fsS --max-time 3 "$OLLAMA_ENDPOINT/api/tags" 2>/dev/null \
                   | grep -oE '"name":"[^"]+"' | cut -d'"' -f4 | tr '\n' ' ')"
         [ -n "$MODELS" ] && _info "installed models:$MODELS"
-        _info "preferred: qwen2.5-coder:latest → gemma:7b/2b → llama3.2:latest"
+        _info "V11 cascade: fast=llama3.2:3b  deep=qwen2.5:7b  reasoning=deepseek-r1:7b"
+        # Auto-pull any missing cascade tier model (best-effort, non-fatal).
+        if command -v ollama &>/dev/null; then
+            for m in "${V11_CASCADE_MODELS[@]}"; do
+                if ! printf '%s' "$MODELS" | grep -qF "$m"; then
+                    _info "pulling missing cascade model: $m (this may take a while)..."
+                    ollama pull "$m" >/dev/null 2>&1 \
+                        && _log "pulled $m" \
+                        || _warn "failed to pull $m — engine will retry at startup (auto_pull)"
+                fi
+            done
+        fi
     else
         _warn "Ollama not reachable at $OLLAMA_ENDPOINT — brain runs OFFLINE."
         _warn "Semantic triage & payload mutation fall back to deterministic"

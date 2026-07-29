@@ -172,14 +172,25 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 			cfg.Ollama.Model,
 			cfg.Ollama.Timeout,
 		),
-		// V10.0 SOVEREIGN cognitive brain — same endpoint/model as AI, with
-		// model auto-fallback (qwen2.5-coder → gemma → llama3.2) resolved at
-		// startup by Brain.Probe.
-		Brain: ai.NewBrain(
+		// V11.0 FINAL SOVEREIGN cognitive brain — 3-tier model cascade
+		// (llama3.2:3b fast triage → qwen2.5:7b deep analysis → deepseek-r1:7b
+		// reasoning). Missing tier models are auto-pulled at startup by
+		// Brain.Probe when AutoPull is enabled; each tier falls back to
+		// heuristics when Ollama is offline (FLAW #2 fix).
+		Brain: ai.NewCascadeBrain(
 			cfg.Ollama.Enabled,
 			cfg.Ollama.Endpoint,
 			cfg.Ollama.Model,
 			cfg.Ollama.Timeout,
+			ai.CascadeConfig{
+				FastModel:      cfg.Ollama.FastModel,
+				DeepModel:      cfg.Ollama.DeepModel,
+				ReasoningModel: cfg.Ollama.ReasoningModel,
+				AutoPull:       cfg.Ollama.AutoPull,
+				TimeoutFast:    cfg.Ollama.TimeoutFast,
+				TimeoutDeep:    cfg.Ollama.TimeoutDeep,
+				TimeoutReason:  cfg.Ollama.TimeoutReason,
+			},
 		),
 		// V10.0 SOVEREIGN headless-Chrome engine (lazy launch) + its page
 		// resource governor. Cap browser pages hard (min(threads,4)) so the
@@ -502,7 +513,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V10.0 SOVEREIGN Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V11.0 FINAL SOVEREIGN Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up
@@ -582,6 +593,16 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	if o.State.Browser != nil {
 		defer o.State.Browser.Close()
 	}
+
+	// ── V11.0 FINAL SOVEREIGN pre-scan READINESS check (FLAW #7) ─────────
+	//
+	// Before the scan proper, audit the engine's own dependencies: Ollama +
+	// the 3-tier cascade models (auto-pulled when missing), the Go-Rod
+	// Chromium launch, and the 38 recon tools on $PATH. The report makes any
+	// degradation explicit instead of silently dropping to the HTTP path. It
+	// never aborts the scan — readiness is advisory.
+	readiness := o.State.CheckReadiness(ctx)
+	o.State.PrintReadinessReport(readiness)
 
 	fmt.Println()
 

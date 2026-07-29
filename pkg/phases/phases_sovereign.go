@@ -171,11 +171,19 @@ func (p *DOMXSSPhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	scanner := exploit.NewDOMScanner(s.Browser)
 	kept := 0
+	skippedCDP := 0
 	for _, u := range budget(a.urls, 30) {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
+		}
+		// V11.0 FLAW #5: skip CDP DOM analysis on origins Phase 0 classified as
+		// REST-API/Backend (no meaningful DOM) so the CDP budget is spent on
+		// the WebApp/SPA origins that actually have client-side attack surface.
+		if ShouldSkipCDPFor(originString(u)) {
+			skippedCDP++
+			continue
 		}
 		release, ok := s.AcquireBrowserSlot(ctx)
 		if !ok {
@@ -206,7 +214,11 @@ func (p *DOMXSSPhase) Execute(ctx context.Context, s *engine.State) error {
 			}
 		}
 	}
-	s.Printf("│  DOM XSS & postMessage: %d confirmed (real headless-Chrome execution proof)\n", kept)
+	s.Printf("│  DOM XSS & postMessage: %d confirmed (real headless-Chrome execution proof)", kept)
+	if skippedCDP > 0 {
+		s.Printf(" | %d URL(s) skipped by Phase-0 classifier (REST/Backend — no DOM)", skippedCDP)
+	}
+	s.Printf("\n")
 	return nil
 }
 
@@ -359,6 +371,24 @@ func (p *StatefulAttackGraphPhase) Execute(ctx context.Context, s *engine.State)
 		machines = append(machines, exploit.EmailVerificationBypass(origin, sovereignBootstrap.userB))
 		// SM3: order-state manipulation as the authenticated attacker.
 		machines = append(machines, exploit.OrderStateManipulation(origin, priv))
+
+		// V11.0 FINAL SOVEREIGN (FLAW #6): the FIVE new stateful chains — SM4
+		// 2FA-bypass, SM5 forgot-password token reuse, SM6 OAuth code
+		// interception, SM7 paginated IDOR, SM8 privilege-escalation via
+		// parameter pollution — bringing the total to EIGHT full attack graphs.
+		attackerEmail := "attacker@example-mohammed.test"
+		if haveBootstrap && sovereignBootstrap.userB.Email != "" {
+			attackerEmail = sovereignBootstrap.userB.Email
+		}
+		_, std, _ := bootstrappedAuthContexts()
+		machines = append(machines, exploit.AllV11StateMachines(
+			origin,
+			sovereignBootstrap.userB, // attacker identity
+			sovereignBootstrap.userA, // victim identity
+			priv,                     // User A auth context
+			std,                      // User B auth context
+		)...)
+		_ = attackerEmail
 
 		for _, sm := range machines {
 			res := eng.Run(ctx, sm, exploit.StateBag{})

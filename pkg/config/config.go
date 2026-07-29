@@ -34,6 +34,10 @@ type Config struct {
 	EnforceScopeOnJS               bool
 	RequireConfirmationForCritical bool
 	WAFBypass                      bool // --waf-bypass (Genius #4)
+
+	// V11.0 FINAL SOVEREIGN engine controls.
+	WAFBypassCfg WAFBypassConfig // FLAW #3 — multi-WAF bypass matrix
+	Boundary     BoundaryConfig  // FLAW #4 — ethical PoE boundary
 }
 
 type APIKeys struct {
@@ -53,6 +57,47 @@ type OllamaConfig struct {
 	Model       string  `yaml:"model"`
 	Temperature float64 `yaml:"temperature"`
 	Timeout     int     `yaml:"timeout"`
+
+	// V11.0 FINAL SOVEREIGN — Multi-Model Cascade (FLAW #2 fix). The single weak
+	// gemma:2b model is replaced by a tiered cascade: a fast triage model, a deep
+	// analysis model, and a chain-of-thought reasoning model. Each cognitive task
+	// is routed to the appropriate tier. When a tier's model is not installed the
+	// Brain auto-pulls it (AutoPull) and, failing that, falls back to the next
+	// installed model, then to deterministic heuristics — the scan never blocks.
+	FastModel      string `yaml:"fast_triage"`     // e.g. llama3.2:3b
+	DeepModel      string `yaml:"deep_analysis"`   // e.g. qwen2.5:7b
+	ReasoningModel string `yaml:"reasoning"`       // e.g. deepseek-r1:7b
+	AutoPull       bool   `yaml:"auto_pull"`       // ollama pull missing models
+	TimeoutFast    int    `yaml:"timeout_fast"`    // seconds (default 5)
+	TimeoutDeep    int    `yaml:"timeout_deep"`    // seconds (default 15)
+	TimeoutReason  int    `yaml:"timeout_reason"`  // seconds (default 30)
+}
+
+// AICascadeDefaults returns the V11 default cascade model names. Centralized so
+// the Brain, config loader, readiness engine and verify script agree.
+func AICascadeDefaults() (fast, deep, reasoning string) {
+	return "llama3.2:3b", "qwen2.5:7b", "deepseek-r1:7b"
+}
+
+// WAFBypassConfig controls the V11 multi-WAF bypass matrix (FLAW #3 fix).
+type WAFBypassConfig struct {
+	Enabled            bool `yaml:"enabled"`             // master switch (mirrors --waf-bypass)
+	HTTP2Multiplex     bool `yaml:"http2_multiplex"`     // Cloudflare
+	HeaderFragmentation bool `yaml:"header_fragmentation"` // Cloudflare/Akamai
+	DoubleURLEncode    bool `yaml:"double_url_encode"`   // AWS WAFv2
+	CaseVariation      bool `yaml:"case_variation"`      // AWS/Imperva
+	CommentInjection   bool `yaml:"comment_injection"`   // AWS/generic
+	BehavioralBrowser  bool `yaml:"behavioral_browser"`  // DataDome/PerimeterX via Go-Rod
+	MaxRPSPerHost      int  `yaml:"max_rps_per_host"`    // RULE 4: hard cap even with bypass
+}
+
+// BoundaryConfig controls the V11 ethical Proof-of-Existence boundary (FLAW #4).
+// It can never be turned "off" in a way that weaponizes exploits — the code path
+// only ever confirms. These toggles bound WHICH confirmation techniques run.
+type BoundaryConfig struct {
+	Mode          string `yaml:"mode"`            // "prove_only" (enforced; other values ignored)
+	OOBDomain     string `yaml:"oob_domain"`      // interactsh domain for DNS-only callbacks
+	TimingSeconds int    `yaml:"timing_seconds"`  // blind sleep probe seconds (default 5)
 }
 
 // ProxyConfig controls the two-tier Burp routing (FIX #5).
@@ -78,7 +123,12 @@ type YAMLConfig struct {
 	Ollama  OllamaConfig `yaml:"ollama"`
 	Proxy   ProxyConfig  `yaml:"proxy"`
 	Filter  FilterConfig `yaml:"filter"`
-	AIExtra AIExtra      `yaml:"ai"`
+	// AIExtra keeps the legacy `ai:` block (require_confirmation_for_critical).
+	// V11 cascade model fields live inside the `ollama:` block above so this key
+	// is untouched and old config files keep working.
+	AIExtra   AIExtra         `yaml:"ai"`
+	WAFBypass WAFBypassConfig `yaml:"waf_bypass"`
+	Boundary  BoundaryConfig  `yaml:"boundary"`
 }
 
 func LoadYAMLConfig(path string) (*YAMLConfig, error) {
@@ -89,8 +139,8 @@ func LoadYAMLConfig(path string) (*YAMLConfig, error) {
 		// operate purely on exported keys (EXPANSION 1, Tier 1).
 		cfg.APIKeys = ResolveAPIKeys(cfg.APIKeys)
 		cfg.Ollama.Endpoint = "http://127.0.0.1:11434"
-		cfg.Ollama.Model = "gemma:2b"
-		cfg.Ollama.Timeout = 15
+		applyAICascadeDefaults(&cfg.Ollama)
+		applyBoundaryDefaults(&cfg.Boundary)
 		return cfg, nil
 	}
 	var cfg YAMLConfig
@@ -101,17 +151,57 @@ func LoadYAMLConfig(path string) (*YAMLConfig, error) {
 	if cfg.Ollama.Endpoint == "" {
 		cfg.Ollama.Endpoint = "http://127.0.0.1:11434"
 	}
-	if cfg.Ollama.Model == "" {
-		cfg.Ollama.Model = "gemma:2b"
-	}
-	if cfg.Ollama.Timeout <= 0 {
-		cfg.Ollama.Timeout = 15
-	}
+	applyAICascadeDefaults(&cfg.Ollama)
+	applyBoundaryDefaults(&cfg.Boundary)
 	// EXPANSION 1 — apply the 3-tier API-key precedence: OS environment
 	// variables (Tier 1) override the config.yaml values (Tier 2). Sources with
 	// neither fall through to the native key-less scrapers (Tier 3) at runtime.
 	cfg.APIKeys = ResolveAPIKeys(cfg.APIKeys)
 	return &cfg, nil
+}
+
+// applyAICascadeDefaults fills the V11 multi-model cascade (FLAW #2 fix) with
+// sensible, free-and-local defaults. The legacy single `model` is retained as a
+// compatibility fallback but the cascade tiers now drive cognition. gemma:2b is
+// intentionally NOT a default anywhere — it is too weak for security analysis.
+func applyAICascadeDefaults(o *OllamaConfig) {
+	fast, deep, reasoning := AICascadeDefaults()
+	if strings.TrimSpace(o.FastModel) == "" {
+		o.FastModel = fast
+	}
+	if strings.TrimSpace(o.DeepModel) == "" {
+		o.DeepModel = deep
+	}
+	if strings.TrimSpace(o.ReasoningModel) == "" {
+		o.ReasoningModel = reasoning
+	}
+	// Legacy `model` now defaults to the fast tier (was gemma:2b) so any code
+	// still reading Ollama.Model gets a capable model.
+	if strings.TrimSpace(o.Model) == "" || strings.EqualFold(strings.TrimSpace(o.Model), "gemma:2b") {
+		o.Model = o.FastModel
+	}
+	if o.Timeout <= 0 {
+		o.Timeout = 15
+	}
+	if o.TimeoutFast <= 0 {
+		o.TimeoutFast = 5
+	}
+	if o.TimeoutDeep <= 0 {
+		o.TimeoutDeep = 15
+	}
+	if o.TimeoutReason <= 0 {
+		o.TimeoutReason = 30
+	}
+}
+
+// applyBoundaryDefaults enforces the ethical Proof-of-Existence boundary
+// defaults (FLAW #4). Mode is always coerced to "prove_only" — the engine
+// physically has no "exploit" code path.
+func applyBoundaryDefaults(b *BoundaryConfig) {
+	b.Mode = "prove_only"
+	if b.TimingSeconds <= 0 {
+		b.TimingSeconds = 5
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════
