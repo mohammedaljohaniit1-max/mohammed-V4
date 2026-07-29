@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mohammed-v3/core/pkg/ai"
+	"github.com/mohammed-v3/core/pkg/browser"
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/governor"
 	"github.com/mohammed-v3/core/pkg/proxy"
@@ -37,13 +38,29 @@ type State struct {
 	Governor     *governor.Governor
 	Proxy        *proxy.ProxyManager
 	AI           *ai.Client
-	Subdomains   []string
-	LiveHosts    []string
-	URLs         []string
-	Parameters   map[string][]string
-	Findings     []map[string]interface{}
-	OutputFolder string
-	StartTime    time.Time
+	// Brain is the V10.0 SOVEREIGN local Ollama cognitive engine (semantic
+	// triage, payload mutation, business-logic ranking). Layered on the same
+	// Ollama endpoint as AI; nil-safe and fails open when offline.
+	Brain *ai.Brain
+	// Browser is the V10.0 SOVEREIGN headless-Chrome CDP engine (Go-Rod). It is
+	// lazily launched on first use and shared across the client-side phases;
+	// when Chromium is unavailable every capability degrades to the HTTP path.
+	Browser *browser.Engine
+	// BrowserSem is the resource governor for headless-Chrome pages. Each page
+	// costs real memory, so client-side phases Acquire()/Release() a slot before
+	// opening a page. Sized small so a SPA-heavy scan can never spawn dozens of
+	// Chromium tabs and OOM the host.
+	BrowserSem chan struct{}
+	// BrowserOnline records whether the one-time startup CDP probe found a
+	// usable Chromium; when false client-side phases skip cleanly.
+	BrowserOnline bool
+	Subdomains    []string
+	LiveHosts     []string
+	URLs          []string
+	Parameters    map[string][]string
+	Findings      []map[string]interface{}
+	OutputFolder  string
+	StartTime     time.Time
 
 	// WAFProtected records hosts flagged as WAF/Captcha/challenge protected
 	// during Phase 07 (HTTP probing). EXPANSION 3: such hosts are excluded from
@@ -155,6 +172,20 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 			cfg.Ollama.Model,
 			cfg.Ollama.Timeout,
 		),
+		// V10.0 SOVEREIGN cognitive brain — same endpoint/model as AI, with
+		// model auto-fallback (qwen2.5-coder → gemma → llama3.2) resolved at
+		// startup by Brain.Probe.
+		Brain: ai.NewBrain(
+			cfg.Ollama.Enabled,
+			cfg.Ollama.Endpoint,
+			cfg.Ollama.Model,
+			cfg.Ollama.Timeout,
+		),
+		// V10.0 SOVEREIGN headless-Chrome engine (lazy launch) + its page
+		// resource governor. Cap browser pages hard (min(threads,4)) so the
+		// memory shield and Chromium never fight over the host.
+		Browser:      browser.NewEngine(browser.Options{}),
+		BrowserSem:   make(chan struct{}, browserSlots(cfg.Threads)),
 		Subdomains:   make([]string, 0),
 		LiveHosts:    make([]string, 0),
 		URLs:         make([]string, 0),
@@ -238,6 +269,61 @@ func AdaptiveThreads(configured int) int {
 		}
 	}
 	return configured
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// V10.0 SOVEREIGN — Headless-Chrome resource governor (Section 5.3)
+//
+// Each Chromium page costs real memory; browserSlots caps how many can be open
+// at once, derived from the thread budget but hard-limited to 4 so a SPA-heavy
+// scan can never spawn a swarm of tabs and OOM the host the scanner runs on.
+// ─────────────────────────────────────────────────────────────────────────
+
+func browserSlots(threads int) int {
+	const maxSlots = 4
+	if threads <= 0 {
+		return 2
+	}
+	if threads < maxSlots {
+		return threads
+	}
+	return maxSlots
+}
+
+// AcquireBrowserSlot blocks until a headless-Chrome page slot is free (or ctx is
+// cancelled), returning a release func. Client-side phases call this before
+// opening a page so browser memory stays bounded. Nil-safe.
+func (s *State) AcquireBrowserSlot(ctx context.Context) (release func(), ok bool) {
+	if s == nil || s.BrowserSem == nil {
+		return func() {}, true
+	}
+	select {
+	case s.BrowserSem <- struct{}{}:
+		return func() { <-s.BrowserSem }, true
+	case <-ctx.Done():
+		return func() {}, false
+	}
+}
+
+// ProbeSovereign runs the one-time V10 startup checks for the cognitive brain
+// (Ollama model discovery + auto-fallback) and the headless-Chrome engine, and
+// records their availability on state. It reports a short posture string for the
+// banner. Safe to call once from Run().
+func (s *State) ProbeSovereign(ctx context.Context) string {
+	brainStatus := "disabled"
+	if s.Brain != nil && s.Brain.Client != nil && s.Brain.Client.Enabled {
+		if s.Brain.Probe(ctx) {
+			brainStatus = "ONLINE (" + s.Brain.ActiveModel() + ")"
+		} else {
+			brainStatus = "offline (fail-open heuristics)"
+		}
+	}
+	browserStatus := "unavailable (HTTP-only fallback)"
+	if s.Browser != nil && s.Browser.Available() {
+		s.BrowserOnline = true
+		browserStatus = "ONLINE (headless Chromium)"
+	}
+	return "AI-Brain=" + brainStatus + " | CDP-Browser=" + browserStatus
 }
 
 // FingerprintAndMarkWAF classifies a captured response with the V9 WAF/CDN
@@ -416,7 +502,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V9.0 ABSOLUTE APEX Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V10.0 SOVEREIGN Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up
@@ -483,6 +569,20 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		o.State.AIOnline = false
 		fmt.Printf("[*] Ollama: disabled — AI confirmation OFF (findings needing AI will be downgraded)\n")
 	}
+
+	// ── V10.0 SOVEREIGN subsystems: local AI cognitive brain + headless-Chrome
+	// CDP engine. Probed ONCE here so every downstream phase knows whether
+	// semantic reasoning and real DOM execution proofs are available. Both fail
+	// open: the scan continues on the deterministic/HTTP path if either is down.
+	fmt.Printf("[*] Sovereign subsystems: probing local AI brain + headless-Chrome CDP ... ")
+	posture := o.State.ProbeSovereign(ctx)
+	fmt.Printf("\n[+] %s\n", posture)
+	// Ensure the headless browser is torn down when the scan ends (frees the
+	// Chromium process + leakless guard). No-op when it was never launched.
+	if o.State.Browser != nil {
+		defer o.State.Browser.Close()
+	}
+
 	fmt.Println()
 
 	// ── Live timer goroutine (every 1 second, single line with \r) ──

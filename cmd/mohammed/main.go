@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                              V9.0 ABSOLUTE APEX | Autonomous Attack Surface Engine
+                              V10.0 SOVEREIGN | Zero-Touch Autonomous Attack Engine
 `
 
 const helpText = `
-MOHAMMED V9.0 ABSOLUTE APEX — Autonomous Attack Surface & Exploit Engine (54+ phases, 76+ OSINT, 11 apex Go exploit engines, SimHash/Levenshtein fuzzy 5-gate FP, adaptive 429/WAF stealth shield, high-signal Burp + Interactsh OOB)
+MOHAMMED V10.0 SOVEREIGN — Zero-Touch Autonomous Attack & Exploit Engine (60+ phases, 76+ OSINT, 16 Go exploit engines, local Ollama AI cognitive brain, Go-Rod headless-Chrome DOM/postMessage/CORS, autonomous User A/B bootstrapper, chained stateful attack graph, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP, adaptive 429/WAF stealth shield)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -344,6 +344,20 @@ func runScan(args []string) {
 		&phases.PolyglotUploadPhase{},  // 51: Polyglot File Upload
 		&phases.DeepCloudRepoPhase{},   // 52: Deep Cloud & Repo Exposure
 		&phases.DeepBurpOOBPhase{},     // 53: Deep Burp + OOB Batch Correlation
+
+		// ── V10.0 SOVEREIGN autonomous phases 55-60 ───────────────────────────
+		// Zero-touch cognitive + client-side layer: local Ollama AI brain, Go-Rod
+		// headless-Chrome DOM/postMessage/storage/CORS auditing, autonomous
+		// User A/B account bootstrap feeding BOLA, and chained multi-step state
+		// machines. Placed after the V8 exploit engines (they consume the same
+		// URL corpus and the bootstrapped sessions) and before correlation so
+		// their confirmed findings feed the correlation engine.
+		&phases.SovereignOrchestrationPhase{}, // 55: Sovereign Orchestration
+		&phases.AutonomousBootstrapPhase{},    // 56: Autonomous Account Bootstrap
+		&phases.DOMXSSPhase{},                 // 57: DOM XSS & postMessage (CDP)
+		&phases.ClientSideSecretPhase{},       // 58: Client-Side Secret & CORS (CDP)
+		&phases.StatefulAttackGraphPhase{},    // 59: Stateful Attack Graph
+		&phases.AIPayloadMutationPhase{},      // 60: AI Payload Mutation (WAF bypass)
 
 		&phases.CorrelationPhase{}, // 45: Smart Correlation Engine (must be last-but-report)
 

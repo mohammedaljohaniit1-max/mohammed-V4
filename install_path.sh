@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# MOHAMMED V9.0 ABSOLUTE APEX — 38-Tool Auto-Installer & PATH Enforcer  (REPAIR #6)
+# MOHAMMED V10.0 SOVEREIGN EDITION — Auto-Installer & PATH Enforcer  (REPAIR #7)
 # ---------------------------------------------------------------------------
 # Root cause fixed: "Missing tools or PATH mismatch cause quiet phase skips."
 #
@@ -383,6 +383,84 @@ for d in "${PATH_DIRS[@]}"; do add_dir "$d"; done
 if ! grep -qF "export GOPATH=$GOPATH" "$SHELL_RC" 2>/dev/null; then
     echo "export GOPATH=$GOPATH" >> "$SHELL_RC"
     _info "persisted GOPATH=$GOPATH → $SHELL_RC"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V10.0 SOVEREIGN PHASE — Chromium / Go-Rod headless engine + Ollama brain
+# ═══════════════════════════════════════════════════════════════════════════
+_log "V10.0 SOVEREIGN: provisioning headless Chromium + probing Ollama brain ..."
+
+# ── Chromium for the Go-Rod CDP engine (pkg/browser/cdp.go) ─────────────────
+# Go-Rod auto-downloads a private Chromium on first run, but on air-gapped /
+# minimal boxes we prefer a system browser. Detect an existing binary and, if
+# absent, try the distro package. Either way we export CHROME_BIN so cdp.go's
+# NewEngine() picks it up (it honours CHROME_BIN / ROD_BROWSER_BIN).
+CHROME_FOUND=""
+for cand in chromium chromium-browser google-chrome google-chrome-stable chrome; do
+    if command -v "$cand" &>/dev/null; then
+        CHROME_FOUND="$(command -v "$cand")"
+        break
+    fi
+done
+for cand in /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome \
+            /snap/bin/chromium /root/.cache/rod/browser/*/chrome; do
+    [ -n "$CHROME_FOUND" ] && break
+    if [ -x "$cand" ]; then CHROME_FOUND="$cand"; break; fi
+done
+
+if [ -z "$CHROME_FOUND" ]; then
+    _info "No system Chromium detected — attempting package install (best-effort)..."
+    if command -v apt-get &>/dev/null; then
+        (apt-get update -y && apt-get install -y chromium || \
+         apt-get install -y chromium-browser) &>/dev/null || true
+    elif command -v dnf &>/dev/null; then
+        dnf install -y chromium &>/dev/null || true
+    elif command -v pacman &>/dev/null; then
+        pacman -Sy --noconfirm chromium &>/dev/null || true
+    fi
+    for cand in chromium chromium-browser google-chrome google-chrome-stable; do
+        if command -v "$cand" &>/dev/null; then CHROME_FOUND="$(command -v "$cand")"; break; fi
+    done
+fi
+
+if [ -n "$CHROME_FOUND" ]; then
+    _log "Chromium ready for Go-Rod CDP engine → $CHROME_FOUND"
+    if ! grep -qF "export CHROME_BIN=" "$SHELL_RC" 2>/dev/null; then
+        echo "export CHROME_BIN=$CHROME_FOUND"      >> "$SHELL_RC"
+        echo "export ROD_BROWSER_BIN=$CHROME_FOUND" >> "$SHELL_RC"
+        _info "persisted CHROME_BIN=$CHROME_FOUND → $SHELL_RC"
+    fi
+    export CHROME_BIN="$CHROME_FOUND"
+    export ROD_BROWSER_BIN="$CHROME_FOUND"
+else
+    _warn "No system Chromium found — Go-Rod will auto-download a private build"
+    _warn "on first scan (network required). The CDP engine FAILS OPEN otherwise:"
+    _warn "DOM/CORS phases skip cleanly, the scan never crashes."
+fi
+
+# ── Ollama local AI cognitive brain (pkg/ai/brain.go) ───────────────────────
+OLLAMA_ENDPOINT="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+if command -v ollama &>/dev/null; then
+    _log "Ollama binary present → $(command -v ollama)"
+else
+    _warn "Ollama not installed. Install (free, local) with:"
+    _warn "    curl -fsSL https://ollama.com/install.sh | sh"
+    _warn "  then pull a model:  ollama pull qwen2.5-coder"
+fi
+
+# Non-fatal connectivity probe — mirrors brain.Probe() /api/tags.
+if command -v curl &>/dev/null; then
+    if curl -fsS --max-time 3 "$OLLAMA_ENDPOINT/api/tags" &>/dev/null; then
+        _log "Ollama reachable at $OLLAMA_ENDPOINT — cognitive brain ONLINE"
+        MODELS="$(curl -fsS --max-time 3 "$OLLAMA_ENDPOINT/api/tags" 2>/dev/null \
+                  | grep -oE '"name":"[^"]+"' | cut -d'"' -f4 | tr '\n' ' ')"
+        [ -n "$MODELS" ] && _info "installed models:$MODELS"
+        _info "preferred: qwen2.5-coder:latest → gemma:7b/2b → llama3.2:latest"
+    else
+        _warn "Ollama not reachable at $OLLAMA_ENDPOINT — brain runs OFFLINE."
+        _warn "Semantic triage & payload mutation fall back to deterministic"
+        _warn "heuristics (fail-open). No paid APIs are ever used."
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
