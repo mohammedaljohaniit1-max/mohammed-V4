@@ -986,9 +986,9 @@ check_grep cmd/mohammed/main.go 'phases.MultiTenantBOLAPhase\{\}' \
 check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
     "main.go: Phase 53 Deep Burp + OOB registered" "main.go: Phase 53 NOT registered"
 
-# Version bump (V9.0 ABSOLUTE APEX supersedes V8.0)
-check_grep cmd/mohammed/main.go 'V9.0 ABSOLUTE APEX' \
-    "main.go: V9.0 ABSOLUTE APEX banner present" "main.go: version NOT bumped to V9.0"
+# Version bump (V10.0 SOVEREIGN supersedes V9.0 ABSOLUTE APEX)
+check_grep cmd/mohammed/main.go 'V10.0 SOVEREIGN' \
+    "main.go: V10.0 SOVEREIGN banner present" "main.go: version NOT bumped to V10.0"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # V9.0 ABSOLUTE APEX checks
@@ -1087,6 +1087,76 @@ check_grep pkg/phases/phases_advanced.go 'Stealth: sharedStealthGovernor' \
     "phases_advanced.go: exploit client uses adaptive governor" "phases_advanced.go: governor NOT wired into engines"
 check_grep cmd/mohammed/main.go 'phases.ApexOrchestrationPhase\{\}' \
     "main.go: Phase 54 Apex Orchestration registered" "main.go: Phase 54 NOT registered"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# V10.0 SOVEREIGN checks
+# ═══════════════════════════════════════════════════════════════════════════
+echo ""
+echo -e "${BOLD}── V10.0 SOVEREIGN checks ────────────────────────────${NC}"
+
+# S2 — Local Ollama AI Cognitive Brain
+check_grep pkg/ai/brain.go 'type Brain struct' \
+    "brain.go: Ollama cognitive Brain present" "brain.go: Brain MISSING"
+check_grep pkg/ai/brain.go 'qwen2.5-coder' \
+    "brain.go: model auto-fallback priority (qwen2.5-coder/gemma/llama3.2)" "brain.go: model priority MISSING"
+check_grep pkg/ai/brain.go 'func .*Brain. SemanticTriage' \
+    "brain.go: semantic response triage present" "brain.go: SemanticTriage MISSING"
+check_grep pkg/ai/brain.go 'func .*Brain. MutatePayload' \
+    "brain.go: dynamic payload mutation present" "brain.go: MutatePayload MISSING"
+check_grep pkg/ai/brain.go 'RankIDORCandidates' \
+    "brain.go: business-logic IDOR/BOLA ranking present" "brain.go: RankIDORCandidates MISSING"
+
+# S3 — Go-Rod CDP Headless Chrome Engine
+check_grep pkg/browser/cdp.go 'go-rod/rod' \
+    "cdp.go: native Go-Rod CDP engine present" "cdp.go: Go-Rod MISSING"
+check_grep pkg/browser/cdp.go 'func .*Engine. Render' \
+    "cdp.go: SPA render + DOM/route/endpoint extraction" "cdp.go: Render MISSING"
+check_grep pkg/browser/cdp.go 'func .*Engine. ScanDOMXSS' \
+    "cdp.go: DOM XSS + postMessage scanner" "cdp.go: ScanDOMXSS MISSING"
+check_grep pkg/browser/cdp.go 'func .*Engine. HarvestStorage' \
+    "cdp.go: local/session storage secret harvester" "cdp.go: HarvestStorage MISSING"
+check_grep pkg/browser/cdp.go 'func .*Engine. VerifyCORS' \
+    "cdp.go: in-browser credentialed CORS/CSP verification" "cdp.go: VerifyCORS MISSING"
+
+# S4.1 — Autonomous Account Bootstrapper
+check_grep pkg/exploit/autobootstrap.go 'BootstrapDualAccounts' \
+    "autobootstrap.go: autonomous User A/B bootstrapper" "autobootstrap.go: bootstrapper MISSING"
+check_grep pkg/exploit/autobootstrap.go 'extractToken' \
+    "autobootstrap.go: token/cookie harvest present" "autobootstrap.go: token harvest MISSING"
+
+# S4.2 — Chained Stateful Attack Engine
+check_grep pkg/exploit/state_machine.go 'type StateMachine struct' \
+    "state_machine.go: chained multi-step state machine present" "state_machine.go: StateMachine MISSING"
+check_grep pkg/exploit/state_machine.go 'PasswordResetHijack' \
+    "state_machine.go: SM1 Password Reset Hijack present" "state_machine.go: SM1 MISSING"
+check_grep pkg/exploit/state_machine.go 'OrderStateManipulation' \
+    "state_machine.go: SM3 Order State Manipulation present" "state_machine.go: SM3 MISSING"
+
+# S3/S5.1 — DOM XSS orchestrator
+check_grep pkg/exploit/dom_xss.go 'type DOMScanner struct' \
+    "dom_xss.go: DOM XSS orchestrator present" "dom_xss.go: DOMScanner MISSING"
+
+# S5 — Sovereign orchestration + resource governor + registration
+check_grep pkg/phases/phases_sovereign.go 'func SovereignPhases' \
+    "phases_sovereign.go: sovereign phase set present" "phases_sovereign.go: SovereignPhases MISSING"
+check_grep pkg/engine/engine.go 'Brain \*ai.Brain' \
+    "engine.go: Brain wired into State" "engine.go: Brain NOT wired"
+check_grep pkg/engine/engine.go 'BrowserSem' \
+    "engine.go: Go-Rod resource governor (BrowserSem)" "engine.go: browser governor MISSING"
+check_grep pkg/engine/engine.go 'ProbeSovereign' \
+    "engine.go: sovereign posture probe present" "engine.go: ProbeSovereign MISSING"
+check_grep cmd/mohammed/main.go 'phases.SovereignOrchestrationPhase\{\}' \
+    "main.go: Phase 55 Sovereign Orchestration registered" "main.go: Phase 55 NOT registered"
+check_grep cmd/mohammed/main.go 'phases.AutonomousBootstrapPhase\{\}' \
+    "main.go: Phase 56 Autonomous Bootstrap registered" "main.go: Phase 56 NOT registered"
+check_grep cmd/mohammed/main.go 'phases.DOMXSSPhase\{\}' \
+    "main.go: Phase 57 DOM XSS registered" "main.go: Phase 57 NOT registered"
+check_grep cmd/mohammed/main.go 'phases.ClientSideSecretPhase\{\}' \
+    "main.go: Phase 58 Client-Side Secret registered" "main.go: Phase 58 NOT registered"
+check_grep cmd/mohammed/main.go 'phases.StatefulAttackGraphPhase\{\}' \
+    "main.go: Phase 59 Stateful Attack Graph registered" "main.go: Phase 59 NOT registered"
+check_grep cmd/mohammed/main.go 'phases.AIPayloadMutationPhase\{\}' \
+    "main.go: Phase 60 AI Payload Mutation registered" "main.go: Phase 60 NOT registered"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""
