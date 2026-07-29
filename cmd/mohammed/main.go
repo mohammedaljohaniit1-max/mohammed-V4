@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                                       V7.1 QUANTUM | Autonomous Attack Surface Engine
+                                    V8.0 LEVEL MAX | Autonomous Attack Surface Engine
 `
 
 const helpText = `
-MOHAMMED V7.1 QUANTUM — Autonomous Attack Surface & Exploit Engine (50+ phases, 50+ OSINT, 20+ exploit engines, 5-gate FP validation)
+MOHAMMED V8.0 LEVEL MAX — Autonomous Attack Surface & Exploit Engine (53+ phases, 70+ OSINT, 30+ exploit engines, fuzzy 5-gate FP validation)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -322,7 +322,21 @@ func runScan(args []string) {
 		&phases.GoogleDorkPhase{},      // 40: Google Dorking — V7.1
 		&phases.CredentialIntelPhase{}, // 41: Credential Intelligence — V7.1
 		&phases.BurpIntegrationPhase{}, // 42: Deep Burp + OOB — V7.1
-		&phases.CorrelationPhase{},     // 45: Smart Correlation Engine (must be last-but-report)
+
+		// ── V8.0 LEVEL MAX exploit phases 46-53 ───────────────────────────────
+		// Deep engines wired through the SAME fuzzy-baseline-aware 5-gate
+		// validator. Placed after V7 phases (full URL corpus) and before
+		// correlation so their confirmed findings feed the correlation engine.
+		&phases.MultiTenantBOLAPhase{}, // 46: Multi-Tenant BOLA/BFLA
+		&phases.BarrierRacePhase{},     // 47: Barrier Race Condition
+		&phases.FinancialLogicPhase{},  // 48: Financial Business Logic
+		&phases.AdvancedWebPhase{},     // 49: Smuggling / Cache / Polyglot-SSTI
+		&phases.AuthAuditPhase{},       // 50: JWT / OAuth Audit
+		&phases.PolyglotUploadPhase{},  // 51: Polyglot File Upload
+		&phases.DeepCloudRepoPhase{},   // 52: Deep Cloud & Repo Exposure
+		&phases.DeepBurpOOBPhase{},     // 53: Deep Burp + OOB Batch Correlation
+
+		&phases.CorrelationPhase{}, // 45: Smart Correlation Engine (must be last-but-report)
 
 		&phases.ReportPhase{}, // 29 (kept last: renders everything above)
 	}

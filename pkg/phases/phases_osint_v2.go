@@ -90,6 +90,7 @@ func (p *OSINTv2Phase) Execute(ctx context.Context, s *engine.State) error {
 		}
 	}
 	sources := osintSources()
+	sources = append(sources, osintSourcesV8()...) // V8.0 GAP 1: extend past 70 sources
 	s.Printf("│  OSINT v2: querying %d sources × %d apex domain(s)\n", len(sources), len(apexes))
 
 	results := make(chan string, 8192)
