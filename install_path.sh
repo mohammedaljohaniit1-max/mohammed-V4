@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# MOHAMMED v5 — 38-Tool Auto-Installer & PATH Enforcer  (REPAIR #6)
+# MOHAMMED V9.0 ABSOLUTE APEX — 38-Tool Auto-Installer & PATH Enforcer  (REPAIR #6)
 # ---------------------------------------------------------------------------
 # Root cause fixed: "Missing tools or PATH mismatch cause quiet phase skips."
 #

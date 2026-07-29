@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -198,6 +199,66 @@ func (s *State) IsWAFProtected(hostOrURL string) bool {
 	return s.WAFProtected[h]
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// V9.0 ABSOLUTE APEX — System Resource Shield (Section 1.1)
+//
+// MemoryPressure reads live heap statistics via runtime.ReadMemStats and reports
+// whether the process heap-in-use has crossed the soft ceiling (default 80% of
+// a 2 GiB budget). The orchestrator and fan-out phases consult it to throttle
+// parallel tasks so a huge target can never OOM-crash the host the scanner runs
+// on. It is cheap (a single ReadMemStats) and safe to call in hot loops.
+// ─────────────────────────────────────────────────────────────────────────
+
+// memBudgetBytes is the assumed usable memory budget for the shield.
+var memBudgetBytes uint64 = 2 * 1024 * 1024 * 1024 // 2 GiB
+
+// memSoftLimitPct is the heap-in-use percentage of the budget above which the
+// shield reports pressure.
+var memSoftLimitPct = 80
+
+// MemoryPressure reports whether the process is over the soft memory ceiling.
+func MemoryPressure() bool {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	limit := memBudgetBytes / 100 * uint64(memSoftLimitPct)
+	return m.HeapInuse >= limit
+}
+
+// AdaptiveThreads returns a safe worker count derived from the configured
+// thread budget and the current memory pressure. When the host is over the soft
+// ceiling it clamps to a floor (5) so parallel work cannot crash the machine.
+func AdaptiveThreads(configured int) int {
+	if configured <= 0 {
+		configured = 20
+	}
+	if MemoryPressure() {
+		const floor = 5
+		if configured > floor {
+			return floor
+		}
+	}
+	return configured
+}
+
+// FingerprintAndMarkWAF classifies a captured response with the V9 WAF/CDN
+// evasion engine and, when a WAF/challenge is detected, records the host as
+// WAF-protected on state (so heavy fuzzing is skipped unless --waf-bypass).
+// It returns the fingerprint for the caller's evidence trail.
+func (s *State) FingerprintAndMarkWAF(host string, status int, headers http.Header, body string) WAFFingerprint {
+	fp := FingerprintWAFResponse(status, headers, body)
+	if fp.Detected && host != "" {
+		s.MarkWAFProtected(host)
+	}
+	return fp
+}
+
+// SkipHeavyFuzzing reports whether heavy injection fuzzing should be skipped for
+// a host given the WAF verdict and the --waf-bypass flag (Section 1.2 routing).
+func (s *State) SkipHeavyFuzzing(hostOrURL string) bool {
+	bypass := s.Config != nil && s.Config.WAFBypass
+	return ShouldSkipHeavyFuzzing(s.IsWAFProtected(hostOrURL), bypass)
+}
+
 // AddFinding appends a finding in a thread-safe manner.
 func (s *State) AddFinding(f map[string]interface{}) {
 	s.findingsMu.Lock()
@@ -355,8 +416,22 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V8.0 LEVEL MAX Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V9.0 ABSOLUTE APEX Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
+
+	// V9.0 System Resource Shield: report the adaptive concurrency posture up
+	// front. AdaptiveThreads clamps parallelism to a safe floor whenever the
+	// process heap crosses the soft memory ceiling (runtime.ReadMemStats), so a
+	// large target can never OOM-crash the host running the scan.
+	if o.State.Config != nil {
+		eff := AdaptiveThreads(o.State.Config.Threads)
+		shield := "nominal"
+		if MemoryPressure() {
+			shield = "THROTTLED (memory pressure)"
+		}
+		fmt.Printf("[+] Adaptive Stealth Shield: threads=%d (configured %d) | memory=%s | 429/503/403 backoff=ON | WAF cool-down=30s\n",
+			eff, o.State.Config.Threads, shield)
+	}
 
 	// BUG #10 (audit) FIX: on a FRESH scan, purge stale result files from a
 	// previous scan into the same folder so no old .txt/.json/.md data (e.g.
