@@ -13,6 +13,7 @@ package phases
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -158,35 +159,73 @@ type SQLiCandidate struct {
 //  4. de-dupes by param signature (Genius #2 cheap pass)
 //  5. orders by parameter priority and caps the count (FIX #6 step 3)
 func PrepareSQLiURLs(rawURLs []string, scope *config.Scope, maxN int) []string {
+	out, _ := PrepareSQLiURLsVerbose(rawURLs, scope, maxN)
+	return out
+}
+
+// SQLiElimination tallies exactly WHY candidate URLs were dropped. V12.1 FIX #2:
+// the Temu scan reduced 742 raw URLs to a SINGLE candidate with no explanation.
+// This struct makes the funnel auditable so we can see whether the scope filter,
+// the CF-strip, the no-param drop, or the dedup is over-pruning.
+type SQLiElimination struct {
+	Raw          int // total input URLs
+	CFChallenge  int // dropped: Cloudflare challenge URL
+	NoParam      int // dropped: no injectable parameter after strip
+	OutOfScope   int // dropped: host not in scope
+	DupSignature int // dropped: duplicate parameter signature
+	CappedOff    int // in-scope+testable but beyond maxN cap
+	Kept         int // final candidate count
+}
+
+// String renders the elimination funnel for a single log line.
+func (e SQLiElimination) String() string {
+	return fmt.Sprintf(
+		"raw=%d → kept=%d | eliminated: cf-challenge=%d no-param=%d out-of-scope=%d dup-signature=%d over-cap=%d",
+		e.Raw, e.Kept, e.CFChallenge, e.NoParam, e.OutOfScope, e.DupSignature, e.CappedOff)
+}
+
+// PrepareSQLiURLsVerbose is PrepareSQLiURLs with a per-reason elimination tally.
+// V12.1 FIX #2: it prioritizes URLs that actually carry a parameter (?id=,
+// ?user=, ?search=, …) via bestParamRank and reports precisely why every dropped
+// URL was dropped.
+func PrepareSQLiURLsVerbose(rawURLs []string, scope *config.Scope, maxN int) ([]string, SQLiElimination) {
+	elim := SQLiElimination{Raw: len(rawURLs)}
 	seenSig := map[string]bool{}
 	var cands []SQLiCandidate
 	for _, raw := range rawURLs {
 		if filter.IsCloudflareChallenge(raw) {
+			elim.CFChallenge++
 			continue
 		}
 		cleaned, testable := filter.StripNoisyParams(raw)
 		if !testable {
+			elim.NoParam++
 			continue
 		}
 		if scope != nil && !filter.IsInScope(cleaned, scope) {
+			elim.OutOfScope++
 			continue
 		}
 		sig := filter.ParamSignature(cleaned)
 		if sig != "" && seenSig[sig] {
+			elim.DupSignature++
 			continue
 		}
 		seenSig[sig] = true
 		cands = append(cands, SQLiCandidate{URL: cleaned, Rank: bestParamRank(cleaned)})
 	}
+	// Prioritize parameterized, high-value URLs first (lowest rank == best).
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Rank < cands[j].Rank })
 	out := make([]string, 0, maxN)
 	for _, c := range cands {
 		if len(out) >= maxN {
-			break
+			elim.CappedOff++
+			continue
 		}
 		out = append(out, c.URL)
 	}
-	return out
+	elim.Kept = len(out)
+	return out, elim
 }
 
 // ─────────────────────────────────────────────────────────────────────────

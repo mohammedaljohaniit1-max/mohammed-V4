@@ -1,9 +1,10 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# MOHAMMED V12.0 OMEGA — Configuration File
+# MOHAMMED V12.1 ZERO-TOLERANCE — Configuration File
 # Zero-Touch Autonomous Attack & Discovery Engine (FINAL MANDATE)
 # 65+ phases · 50+ OSINT sources · 5-gate false-positive validation
 # 3-tier AI cascade · 8-WAF bypass matrix · PoE ethical boundary · 8 state machines
 # 5 Secret Weapons: API Hunter · Response Differential · Smart Fuzz · JS Deep · Subdomain Intel
+# V12.1: +7 modern tools (chaos · alterx · cdncheck · uncover · cariddi · trufflehog · ppmap)
 # Copy this file and fill in your API keys before running.
 # ══════════════════════════════════════════════════════════════════════════════
 

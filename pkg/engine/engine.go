@@ -33,11 +33,11 @@ type Phase interface {
 // State: shared data across all phases
 // ─────────────────────────────────────────
 type State struct {
-	Config       *config.Config
-	Scope        *config.Scope
-	Governor     *governor.Governor
-	Proxy        *proxy.ProxyManager
-	AI           *ai.Client
+	Config   *config.Config
+	Scope    *config.Scope
+	Governor *governor.Governor
+	Proxy    *proxy.ProxyManager
+	AI       *ai.Client
 	// Brain is the V10.0 SOVEREIGN local Ollama cognitive engine (semantic
 	// triage, payload mutation, business-logic ranking). Layered on the same
 	// Ollama endpoint as AI; nil-safe and fails open when offline.
@@ -63,9 +63,9 @@ type State struct {
 	// before hardened production. Empty until Phase 65 runs.
 	PriorityTargets []string
 	Parameters      map[string][]string
-	Findings      []map[string]interface{}
-	OutputFolder  string
-	StartTime     time.Time
+	Findings        []map[string]interface{}
+	OutputFolder    string
+	StartTime       time.Time
 
 	// WAFProtected records hosts flagged as WAF/Captcha/challenge protected
 	// during Phase 07 (HTTP probing). EXPANSION 3: such hosts are excluded from
@@ -291,12 +291,14 @@ func AdaptiveThreads(configured int) int {
 // V10.0 SOVEREIGN — Headless-Chrome resource governor (Section 5.3)
 //
 // Each Chromium page costs real memory; browserSlots caps how many can be open
-// at once, derived from the thread budget but hard-limited to 4 so a SPA-heavy
-// scan can never spawn a swarm of tabs and OOM the host the scanner runs on.
+// at once, derived from the thread budget but hard-limited so a SPA-heavy scan
+// can never spawn a swarm of tabs and OOM the host the scanner runs on.
+// V12.1 FIX #6: the hard cap is 3 concurrent tabs (was 4) to keep Chrome's RSS
+// under the ~500 MB recycle threshold the DOM-XSS recovery governor enforces.
 // ─────────────────────────────────────────────────────────────────────────
 
 func browserSlots(threads int) int {
-	const maxSlots = 4
+	const maxSlots = 3 // FIX #6: max 3 concurrent CDP tabs
 	if threads <= 0 {
 		return 2
 	}
@@ -518,7 +520,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V12.0 OMEGA Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V12.1 ZERO-TOLERANCE Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up

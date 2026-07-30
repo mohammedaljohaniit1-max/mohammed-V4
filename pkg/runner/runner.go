@@ -61,10 +61,24 @@ var toolTimeouts = map[string]time.Duration{
 	// amass passive can spend minutes contacting sources. V12.0 OMEGA BUG #1:
 	// the old 6-minute cap hard-killed amass mid-run (the Temu scan proved it
 	// ran exactly 00:02:29→00:08:29 == 6m then died with 0 results). The apex
-	// passive phase now streams amass through its own dedicated 10-minute
-	// deadline (runAmassStreaming), but this map value governs any other amass
-	// call path (e.g. -version), so it is raised to 10m for consistency.
-	"amass": 10 * time.Minute,
+	// passive phase now streams amass through its own dedicated deadline
+	// (runAmassV5 → streamAmassOnce), but this map value governs any other amass
+	// call path (e.g. -version). V12.1 ZERO-TOLERANCE: raised to 15m — amass is
+	// SLOW ("not 2, not 5, not 10").
+	"amass": 15 * time.Minute,
+	// chaos-client (ProjectDiscovery Chaos) — V12.1 amass replacement/backup.
+	"chaos": 5 * time.Minute,
+	// V12.1 modern recon tooling.
+	"alterx":   3 * time.Minute,
+	"cdncheck": 3 * time.Minute,
+	"uncover":  5 * time.Minute,
+	"cariddi":  10 * time.Minute,
+	// trufflehog deep secret scanning (git history / filesystem) is slow.
+	"trufflehog": 10 * time.Minute,
+	// notify just pushes to Slack/Discord/Telegram — fast.
+	"notify": 60 * time.Second,
+	// ppmap prototype-pollution probe per target.
+	"ppmap": 3 * time.Minute,
 	// nuclei full-template scans on many hosts are long-running.
 	"nuclei": 20 * time.Minute,
 	// sqlmap per-URL deep tests.
@@ -162,8 +176,8 @@ func toolSearchDirs() []string {
 		"/usr/bin",         // Kali apt packages (paramspider, sqlmap)
 		"/usr/sbin",
 		"/bin",
-		"/snap/bin",          // snap-installed tools (amass)
-		"/opt/homebrew/bin",  // macOS brew
+		"/snap/bin",         // snap-installed tools (amass)
+		"/opt/homebrew/bin", // macOS brew
 		"/home/linuxbrew/.linuxbrew/bin",
 	} {
 		add(d)

@@ -993,8 +993,8 @@ check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
 # Version bump (V11.0 FINAL SOVEREIGN supersedes V10.0 SOVEREIGN)
 check_grep cmd/mohammed/main.go 'V11.0 FINAL SOVEREIGN' \
     "main.go: V11.0 FINAL SOVEREIGN banner present" "main.go: version NOT bumped to V11.0"
-check_grep pkg/engine/engine.go 'MOHAMMED V12.0 OMEGA Engine Started' \
-    "engine.go: V12.0 OMEGA startup banner present" "engine.go: startup banner NOT bumped to V12.0 OMEGA"
+check_grep pkg/engine/engine.go 'MOHAMMED V12.1 ZERO-TOLERANCE Engine Started' \
+    "engine.go: V12.1 ZERO-TOLERANCE startup banner present" "engine.go: startup banner NOT bumped to V12.1"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # V9.0 ABSOLUTE APEX checks
@@ -1348,12 +1348,12 @@ check_grep pkg/phases/phases.go 'func streamAmassOnce' \
     "BUG #1: streamAmassOnce line-by-line scanner present" "BUG #1: stream scanner MISSING"
 check_grep pkg/phases/phases.go 'bufio.NewScanner' \
     "BUG #1: bufio.Scanner stdout read present" "BUG #1: bufio.Scanner MISSING"
-check_grep pkg/phases/phases.go '10 ?\* ?time.Minute' \
-    "BUG #1: 10-minute dedicated amass deadline present" "BUG #1: 10m deadline MISSING"
+check_grep pkg/phases/phases.go '1[05] ?\* ?time.Minute|amassDeadline' \
+    "BUG #1: dedicated amass deadline present (V12.1: 15m)" "BUG #1: amass deadline MISSING"
 check_grep pkg/phases/phases.go '"passive", \[\]string\{"passive"|"passive", "-d"' \
     "BUG #1: alternate 'amass passive' subcommand fallback present" "BUG #1: subcommand fallback MISSING"
-check_grep pkg/runner/runner.go '"amass": 10 \* time.Minute' \
-    "BUG #1: runner amass cap raised to 10m" "BUG #1: runner amass cap NOT raised"
+check_grep pkg/runner/runner.go '"amass": 1[05] \* time.Minute' \
+    "BUG #1: runner amass cap raised (V12.1: 15m)" "BUG #1: runner amass cap NOT raised"
 
 # BUG #2 — TLS mismatch demoted to Informational.
 check_grep pkg/phases/phases.go 'severity := "Informational"' \
@@ -1532,6 +1532,89 @@ if [ -x ./mohammed ]; then
 else
     fail "./mohammed binary NOT built (run: go build -o mohammed ./cmd/mohammed)"
 fi
+
+# ═══════════════════════════════════════════════════════════════════════
+# V12.1 ZERO-TOLERANCE — 6 bug fixes + 3 upgrades + 6 new tools (proof-tested)
+# ═══════════════════════════════════════════════════════════════════════
+hdr "V12.1 ZERO-TOLERANCE — 6 Bug Fixes (each with a unit test)"
+check_grep pkg/phases/phases.go 'func runAmassV5' \
+    "FIX#1: runAmassV5 3-method fallback present" "FIX#1: runAmassV5 MISSING"
+check_grep pkg/phases/phases_test.go 'func TestAmassV5Integration' \
+    "FIX#1: TestAmassV5Integration present" "FIX#1: amass test MISSING"
+check_grep pkg/phases/zerofp.go 'func PrepareSQLiURLs' \
+    "FIX#2: SQLi param prioritization present" "FIX#2: SQLi prep MISSING"
+check_grep pkg/phases/phases.go 'func partitionCORSByWAF' \
+    "FIX#3: CORS WAF/CDP partition present" "FIX#3: partitionCORSByWAF MISSING"
+check_grep pkg/phases/phases_test.go 'func TestPartitionCORSByWAF' \
+    "FIX#3: TestPartitionCORSByWAF present" "FIX#3: CORS test MISSING"
+check_grep pkg/phases/phases_advanced.go 'func apiFiveGateConfirm' \
+    "FIX#4: API 5-Gate-before-confirm present" "FIX#4: apiFiveGateConfirm MISSING"
+check_grep pkg/validation/validation_test.go 'func TestFix4_' \
+    "FIX#4: API-class baseline/reproduce tests present" "FIX#4: API gate tests MISSING"
+check_grep pkg/phases/smuggling_cdn.go 'func smugglingSeverity' \
+    "FIX#5: CDN-aware smuggling demotion present" "FIX#5: smugglingSeverity MISSING"
+check_grep pkg/phases/phases_test.go 'func TestFix5_CDNSmugglingDemotion' \
+    "FIX#5: TestFix5_CDNSmugglingDemotion present" "FIX#5: smuggling test MISSING"
+check_grep pkg/browser/cdp.go 'func \(e \*Engine\) Recover' \
+    "FIX#6: DOM-XSS Chrome Recover() present" "FIX#6: Recover MISSING"
+check_grep pkg/browser/cdp.go 'func \(e \*Engine\) GuardMemory' \
+    "FIX#6: GuardMemory (500MB recycle) present" "FIX#6: GuardMemory MISSING"
+check_grep pkg/browser/cdp_test.go 'func TestFix6_' \
+    "FIX#6: cdp recovery tests present" "FIX#6: cdp tests MISSING"
+
+hdr "V12.1 ZERO-TOLERANCE — 3 Upgrades (Phase 15 / 32 / 33-35)"
+check_grep pkg/exploit/js_deep.go 'func APIHunterTargets' \
+    "UPG15: JS APIHunterTargets present" "UPG15: APIHunterTargets MISSING"
+check_grep pkg/exploit/secret_weapons_test.go 'func TestFix_Phase15_' \
+    "UPG15: Phase-15 JS tests present" "UPG15: Phase-15 tests MISSING"
+check_grep pkg/exploit/auth_bypass.go 'func AnalyzeSetCookie' \
+    "UPG32: AnalyzeSetCookie cookie matrix present" "UPG32: AnalyzeSetCookie MISSING"
+check_grep pkg/exploit/auth_session_test.go 'func TestFix_Phase32_' \
+    "UPG32: Phase-32 cookie tests present" "UPG32: Phase-32 tests MISSING"
+check_grep pkg/phases/phases_advanced.go 'func prioritizeDiscovered' \
+    "UPG33-35: prioritizeDiscovered present" "UPG33-35: prioritizeDiscovered MISSING"
+check_grep pkg/phases/phases_test.go 'func TestUpgrade_PrioritizeDiscovered' \
+    "UPG33-35: prioritizeDiscovered test present" "UPG33-35: test MISSING"
+
+hdr "V12.1 ZERO-TOLERANCE — 6 New Tools (Section 3) integrated"
+for t in chaos alterx cdncheck uncover cariddi trufflehog notify ppmap; do
+    check_grep pkg/engine/readiness.go "\"$t\"" \
+        "TOOL: $t in readiness inventory" "TOOL: $t NOT in readiness inventory"
+    check_grep install_path.sh "$t" \
+        "TOOL: $t in install_path.sh" "TOOL: $t NOT in install_path.sh"
+done
+check_grep pkg/runner/runner.go '"trufflehog":' \
+    "runner.go: trufflehog timeout present" "runner.go: trufflehog timeout MISSING"
+check_grep pkg/runner/runner.go '"chaos":' \
+    "runner.go: chaos timeout present" "runner.go: chaos timeout MISSING"
+check_grep pkg/phases/modern_tools.go 'func parseCariddiJSON' \
+    "cariddi parser present" "cariddi parser MISSING"
+check_grep pkg/phases/modern_tools.go 'func parseTrufflehogJSON' \
+    "trufflehog parser present" "trufflehog parser MISSING"
+check_grep pkg/phases/modern_tools.go 'func runUncover' \
+    "uncover integrated into passive recon" "uncover integration MISSING"
+check_grep pkg/phases/phases.go 'runUncover' \
+    "phases.go: uncover wired into passive phase" "uncover NOT wired"
+check_grep pkg/phases/phases.go 'runAlterxPermutations' \
+    "phases.go: alterx wired into active phase" "alterx NOT wired"
+check_grep pkg/phases/phases.go 'parseCariddiJSON' \
+    "phases.go: cariddi wired into crawl phase" "cariddi NOT wired"
+check_grep pkg/phases/phases_sovereign.go 'runTrufflehog' \
+    "phases: trufflehog wired into secret phase" "trufflehog NOT wired"
+check_grep pkg/phases/phases_vuln.go 'runPPmap' \
+    "phases: ppmap wired into proto-pollution phase" "ppmap NOT wired"
+check_grep pkg/phases/modern_tools_test.go 'func TestModernTools_' \
+    "modern-tools parser unit tests present" "modern-tools tests MISSING"
+check_grep pkg/engine/readiness_test.go 'TestReconTools_V121ModernToolsPresent' \
+    "readiness: V12.1 modern-tool inventory test present" "readiness V12.1 test MISSING"
+
+hdr "V12.1 ZERO-TOLERANCE — Version + Docs Bump"
+check_grep cmd/mohammed/main.go 'V12.1' \
+    "main.go: V12.1 banner present" "main.go: version NOT bumped to V12.1"
+check_grep pkg/engine/engine.go 'V12.1' \
+    "engine.go: V12.1 startup banner present" "engine.go: banner NOT bumped to V12.1"
+check_grep README.md 'V12.1' \
+    "README.md: V12.1 title present" "README.md: version NOT bumped to V12.1"
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

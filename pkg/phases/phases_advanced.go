@@ -170,7 +170,7 @@ type AuthSessionPhase struct{}
 
 func (p *AuthSessionPhase) Name() string { return "Auth & Session Analysis" }
 func (p *AuthSessionPhase) Description() string {
-	return "Phase 31: discovers login surfaces and audits session-cookie flags & entropy"
+	return "Phase 31: login-surface discovery + full session-cookie audit (HttpOnly/Secure/SameSite/expiry>30d/entropy) — V12.1 UPGRADE Phase 32"
 }
 func (p *AuthSessionPhase) Execute(ctx context.Context, s *engine.State) error {
 	a := newAdvCtx(s)
@@ -222,7 +222,8 @@ func (p *IDORPhase) Execute(ctx context.Context, s *engine.State) error {
 	a := newAdvCtx(s)
 	eng := exploit.NewIDOREngine(a.client)
 	kept := 0
-	for _, u := range budget(a.urls, 120) {
+	// V12.1 UPGRADE Phase 33: test discovered API/priority endpoints first.
+	for _, u := range budget(prioritizeDiscovered(s, a.urls), 120) {
 		if s.IsWAFProtected(u) {
 			continue
 		}
@@ -265,7 +266,9 @@ func (p *RaceConditionPhase) Execute(ctx context.Context, s *engine.State) error
 	// Race testing is intrusive; only run on endpoints that look like state
 	// mutations (coupon/redeem/apply/vote/transfer) to stay non-destructive on
 	// everything else.
-	for _, u := range budget(raceCandidates(a.urls), 20) {
+	// V12.1 UPGRADE Phase 34: include discovered priority endpoints when
+	// looking for state-mutating targets (cart/coupon/checkout live there).
+	for _, u := range budget(raceCandidates(prioritizeDiscovered(s, a.urls)), 20) {
 		if s.IsWAFProtected(u) {
 			continue
 		}
@@ -305,7 +308,9 @@ func (p *BusinessLogicPhase) Execute(ctx context.Context, s *engine.State) error
 	a := newAdvCtx(s)
 	eng := &exploit.BusinessLogicEngine{Client: a.client}
 	kept := 0
-	for _, u := range budget(a.urls, 120) {
+	// V12.1 UPGRADE Phase 35: test discovered checkout/cart/order + priority
+	// endpoints first (price=0/-1/0.01, qty=-1/999999, currency swap).
+	for _, u := range budget(prioritizeDiscovered(s, a.urls), 120) {
 		if s.IsWAFProtected(u) {
 			continue
 		}
@@ -340,12 +345,13 @@ type APISecurityPhase struct{}
 
 func (p *APISecurityPhase) Name() string { return "API Security" }
 func (p *APISecurityPhase) Description() string {
-	return "Phase 35: GraphQL introspection, verb tampering, mass assignment, JWT, versioning bypass, BOLA"
+	return "Phase 35: GraphQL introspection, verb tampering, mass assignment, JWT, versioning bypass, BOLA (V12.1 FIX #4: 5-Gate confirmed BEFORE marking exploitable)"
 }
 func (p *APISecurityPhase) Execute(ctx context.Context, s *engine.State) error {
 	a := newAdvCtx(s)
 	eng := exploit.NewAPIEngine(a.client)
 	kept := 0
+	preGateReject := 0
 	apiURLs := budget(apiCandidates(a.urls), 120)
 	for _, u := range apiURLs {
 		if s.IsWAFProtected(u) {
@@ -363,6 +369,15 @@ func (p *APISecurityPhase) Execute(ctx context.Context, s *engine.State) error {
 			if r == nil || !r.Exploitable {
 				continue
 			}
+			// ── V12.1 FIX #4 ──────────────────────────────────────────────
+			// ROOT CAUSE: API finding *classes* (graphql-introspection,
+			// verb-tampering, …) do NOT match needsBaseline()/needsReproduce()
+			// keywords, so when they reached the generic validator Gates 1 & 5
+			// were no-ops — a WAF/error/catch-all API response could be marked
+			// CONFIRMED here only for Phase 45 to reject it later (the mandate's
+			// "6 confirmed that Phase 45 rejected"). We now run an EXPLICIT
+			// 5-Gate confirmation that fetches the live API response and rejects
+			// WAF/error/catch-all pages BEFORE the candidate is ever stored.
 			c := validation.Candidate{
 				Type:                   r.Class,
 				URL:                    r.URL,
@@ -370,8 +385,15 @@ func (p *APISecurityPhase) Execute(ctx context.Context, s *engine.State) error {
 				RequiresExploitability: true,
 				Exploitable:            true,
 			}
+			if reason, ok := apiFiveGateConfirm(ctx, a, s, c); !ok {
+				preGateReject++
+				s.Printf("│  API 5-GATE reject [%s] %s → %s\n", r.Class, r.URL, reason)
+				continue
+			}
 			if a.storeCandidate(ctx, s, c, "API: "+r.Class, mapSeverity(r.Severity), map[string]interface{}{
 				"api_method": r.Method,
+				"api_5gate":  "confirmed_before_report",
+				"fix":        "v12.1-fix4",
 			}) {
 				kept++
 			}
@@ -393,8 +415,35 @@ func (p *APISecurityPhase) Execute(ctx context.Context, s *engine.State) error {
 			}
 		}
 	}
-	s.Printf("│  API Security: %d confirmed\n", kept)
+	s.Printf("│  API Security: %d confirmed, %d rejected by pre-report 5-Gate (V12.1 FIX #4)\n", kept, preGateReject)
 	return nil
+}
+
+// apiFiveGateConfirm is the V12.1 FIX #4 pre-report validation for API findings.
+// It fetches the LIVE API response into the candidate's Target so the 5-gate
+// pipeline actually has HTTP evidence to judge (API finding classes otherwise
+// bypass the baseline/reproduce gates), then runs the canonical FiveGateValidate.
+// It returns (reason, true) when the finding survives all five gates and
+// (reason, false) — naming the failing gate — when it must NOT be marked
+// exploitable. It never mutates state; the caller stores the finding on ok.
+func apiFiveGateConfirm(ctx context.Context, a *advCtx, s *engine.State, c validation.Candidate) (string, bool) {
+	// Populate the response the gates will judge. A transport error means we
+	// could not even reach the endpoint → cannot honestly claim exploitable.
+	if c.Target.BodySHA256 == "" && c.Target.Err == nil {
+		c.Target = validation.Fetch(ctx, c.URL)
+	}
+	if c.Target.Err != nil {
+		return "unreachable on re-fetch: " + c.Target.Err.Error(), false
+	}
+	c.InScope = filter.IsInScope(c.URL, s.Scope)
+	if !c.InScope {
+		return "out of scope", false
+	}
+	verdict := a.validator.FiveGateValidate(ctx, c)
+	if !verdict.Passed {
+		return fmt.Sprintf("gate %d: %s", verdict.Gate, verdict.Reason), false
+	}
+	return "5-gate passed", true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -895,6 +944,36 @@ func raceCandidates(urls []string) []string {
 			}
 		}
 	}
+	return out
+}
+
+// prioritizeDiscovered reorders the exploit corpus so the endpoints discovered
+// by the JS analyzer / crawler (state.PriorityTargets — /admin, /internal, and
+// flagged API paths) are tested FIRST, followed by API-shaped URLs, then the
+// rest. V12.1 UPGRADE Phase 33-35: these phases returned 0 on Temu because they
+// had no endpoints to test; now that Phase 15 feeds real endpoints into the
+// corpus we make the intrusive phases consume that discovered surface up front.
+// The result is deduplicated and preserves scope filtering already applied by
+// advCandidateURLs.
+func prioritizeDiscovered(s *engine.State, urls []string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	push := func(list []string) {
+		for _, u := range list {
+			if u == "" || seen[u] {
+				continue
+			}
+			// PriorityTargets may be absolute; only include in-scope ones.
+			if !filter.IsInScope(u, s.Scope) {
+				continue
+			}
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	push(s.PriorityTargets)   // discovered /admin, /internal, flagged API
+	push(apiCandidates(urls)) // API-shaped surface next
+	push(urls)                // everything else
 	return out
 }
 

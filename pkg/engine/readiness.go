@@ -29,9 +29,9 @@ import (
 
 // ToolStatus is the readiness of a single external recon binary.
 type ToolStatus struct {
-	Name      string
-	Present   bool
-	Path      string
+	Name       string
+	Present    bool
+	Path       string
 	InstallCmd string // one-line install hint printed when absent
 }
 
@@ -52,8 +52,10 @@ type ReadinessReport struct {
 	Overall string
 }
 
-// reconTools is the canonical 38-tool recon inventory MOHAMMED wraps, each with
-// a copy-paste install hint. Kept sorted for a stable readiness report.
+// reconTools is the canonical 45-tool recon inventory MOHAMMED wraps, each with
+// a copy-paste install hint. Kept sorted for a stable readiness report. V12.1
+// added 7 modern tools (chaos, alterx, cdncheck, uncover, cariddi, trufflehog,
+// ppmap) per Section 3 of the ZERO-TOLERANCE mandate.
 var reconTools = []ToolStatus{
 	{Name: "subfinder", InstallCmd: "go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"},
 	{Name: "amass", InstallCmd: "go install github.com/owasp-amass/amass/v4/...@master"},
@@ -93,6 +95,21 @@ var reconTools = []ToolStatus{
 	{Name: "nikto", InstallCmd: "apt-get install -y nikto"},
 	{Name: "whatweb", InstallCmd: "apt-get install -y whatweb"},
 	{Name: "cero", InstallCmd: "go install github.com/glebarez/cero@latest"},
+	// ── V12.1 modern tooling (Section 3) ────────────────────────────────
+	// chaos-client: ProjectDiscovery Chaos passive subdomain DB — amass backup.
+	{Name: "chaos", InstallCmd: "go install github.com/projectdiscovery/chaos-client/cmd/chaos@latest"},
+	// alterx: pattern-based subdomain permutation wordlist generator.
+	{Name: "alterx", InstallCmd: "go install github.com/projectdiscovery/alterx/cmd/alterx@latest"},
+	// cdncheck: accurate CDN/WAF/cloud detection (beats header heuristics).
+	{Name: "cdncheck", InstallCmd: "go install github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest"},
+	// uncover: unified Shodan/Censys/FOFA/Hunter exposed-host search.
+	{Name: "uncover", InstallCmd: "go install github.com/projectdiscovery/uncover/cmd/uncover@latest"},
+	// cariddi: crawl + extract endpoints/secrets/errors from HTTP responses.
+	{Name: "cariddi", InstallCmd: "go install github.com/edoardottt/cariddi/cmd/cariddi@latest"},
+	// trufflehog: deep verified-secret scanning across code/commits/files.
+	{Name: "trufflehog", InstallCmd: "go install github.com/trufflesecurity/trufflehog/v3@latest"},
+	// ppmap: prototype-pollution detection (replaces generic nuclei probe).
+	{Name: "ppmap", InstallCmd: "git clone https://github.com/kleiton0x00/ppmap /opt/ppmap && go build -C /opt/ppmap -o /usr/local/bin/ppmap"},
 }
 
 // CheckReadiness runs the full pre-scan readiness audit and returns a report.

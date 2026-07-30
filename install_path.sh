@@ -163,7 +163,7 @@ install_py_wrapper() {
 # INSTALL PHASE (skippable with SKIP_INSTALL=1)
 # ═══════════════════════════════════════════════════════════════════════════
 if [ "${SKIP_INSTALL:-0}" != "1" ]; then
-    _log "Installing the 38 MOHAMMED tools (idempotent — present tools skipped)..."
+    _log "Installing the 45 MOHAMMED tools (V12.1: +7 modern tools; idempotent — present tools skipped)..."
 
     # System deps needed by several tools (nmap, dig, ruby gems, libpcap for naabu).
     if command -v apt-get &>/dev/null; then
@@ -208,6 +208,26 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     install_go_tool "github.com/003random/getJS/v2@latest"                                "getJS"
     install_go_tool "github.com/d3mondev/puredns/v2@latest"                               "puredns"
     install_go_tool "github.com/ffuf/ffuf/v2@latest"                                      "ffuf"
+
+    # ── V12.1 SECTION 3: modern recon/vuln tooling (2024-2026) ──────────────
+    install_go_tool "github.com/projectdiscovery/chaos-client/cmd/chaos@latest"           "chaos"
+    install_go_tool "github.com/projectdiscovery/alterx/cmd/alterx@latest"                "alterx"
+    install_go_tool "github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest"            "cdncheck"
+    install_go_tool "github.com/projectdiscovery/uncover/cmd/uncover@latest"              "uncover"
+    install_go_tool "github.com/projectdiscovery/notify/cmd/notify@latest"                "notify"
+    install_go_tool "github.com/edoardottt/cariddi/cmd/cariddi@latest"                    "cariddi"
+    install_go_tool "github.com/trufflesecurity/trufflehog/v3@latest"                     "trufflehog"
+
+    # ── ppmap (source build — no go install path; git clone + go build) ─────
+    if ! command -v ppmap &>/dev/null && command -v go &>/dev/null; then
+        _info "Building ppmap from source..."
+        if git clone --depth 1 https://github.com/kleiton0x00/ppmap.git "$TMP_BUILD/ppmap" 2>/dev/null; then
+            ( cd "$TMP_BUILD/ppmap" && go build -o "$OPT_DIR/ppmap" . >/dev/null 2>&1 && link_tool "$OPT_DIR/ppmap" "ppmap" )
+            command -v ppmap &>/dev/null && _log "ppmap installed" || _warn "ppmap build failed"
+        else
+            _warn "ppmap clone failed"
+        fi
+    fi
 
     # ── massdns (source build — required by puredns/shuffledns) ─────────────
     if ! command -v massdns &>/dev/null; then

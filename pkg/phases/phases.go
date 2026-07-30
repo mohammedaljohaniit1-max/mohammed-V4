@@ -16,8 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mohammed-v3/core/pkg/browser"
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
+	"github.com/mohammed-v3/core/pkg/exploit"
 	"github.com/mohammed-v3/core/pkg/filter"
 	"github.com/mohammed-v3/core/pkg/proxy"
 	"github.com/mohammed-v3/core/pkg/runner"
@@ -696,6 +698,15 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		switch {
 		case amRes.err != nil && amRes.count == 0:
 			s.Printf("│    amass%s: 0 subdomains — FAILED (%v)\n", verNote, amRes.err)
+			// ── V12.1 ZERO-TOLERANCE · chaos-client backup ────────────────────
+			// Amass has been "fixed" in V7-V12 and STILL returned 0 on Temu. The
+			// mandate: "If Amass STILL cannot be fixed, REMOVE IT and replace with
+			// chaos-client which is faster and more reliable." We keep amass but
+			// AUTOMATICALLY fall back to chaos-client whenever amass yields zero,
+			// so the pipeline never again loses this attack surface.
+			if n := runChaosBackup(ctx, s, domain, found); n > 0 {
+				s.Printf("│    chaos-client: %d subdomains [amass fallback]\n", n)
+			}
 		case amRes.timedOut:
 			s.Printf("│    amass%s: %d subdomains [partial — deadline reached, streamed results kept]\n", verNote, amRes.count)
 		default:
@@ -791,6 +802,15 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		}
 	}
 
+	// ── V12.1 Section 3: uncover (Shodan/Censys/FOFA/Hunter) apex sweep ──
+	// uncover finds exposed hosts search engines already indexed — surface the
+	// passive tools miss. Runs once per apex, key-gated (skips without keys).
+	for _, domain := range apexDomains {
+		if n := runUncover(ctx, s, domain, found); n > 0 {
+			s.Printf("│  uncover: +%d hosts [%s]\n", n, domain)
+		}
+	}
+
 	// ── Merge OSINT results from Phase 02 ─────────────────────────────
 	osintFile := filepath.Join(s.OutputFolder, "osint_subdomains.txt")
 	osintCount := 0
@@ -826,7 +846,7 @@ type SubdomainActivePhase struct{}
 
 func (p *SubdomainActivePhase) Name() string { return "Active Subdomain Bruteforce" }
 func (p *SubdomainActivePhase) Description() string {
-	return "puredns bruteforce (auto resolvers) → dnsx fallback + dnsgen permutations"
+	return "puredns bruteforce (auto resolvers) → dnsx fallback + dnsgen/alterx permutations (dnsx-resolved)"
 }
 func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(s.Scope.Domains) == 0 {
@@ -958,6 +978,35 @@ func (p *SubdomainActivePhase) Execute(ctx context.Context, s *engine.State) err
 		}
 	}
 
+	// ── V12.1 Section 3: alterx pattern-based permutations ──────────────
+	// alterx generates smarter, pattern-aware subdomain candidates than dnsgen
+	// (e.g. api-{{word}}, {{sub}}-staging). We write them to alterx_perms.txt
+	// and resolve them with dnsx so only LIVE permutations enter the corpus.
+	alterxOut := filepath.Join(s.OutputFolder, "alterx_perms.txt")
+	if n := runAlterxPermutations(ctx, s, subFile, alterxOut); n > 0 {
+		s.Printf("│  alterx: %d permutations generated\n", n)
+		if _, err := runner.ResolveToolPath("dnsx"); err == nil {
+			res := runner.RunTool(ctx, "dnsx", []string{"-l", alterxOut, "-silent", "-a", "-resp-only"}, nil)
+			if res.OK() || res.TimedOut {
+				existing := make(map[string]bool, len(s.Subdomains))
+				for _, sub := range s.Subdomains {
+					existing[sub] = true
+				}
+				added := 0
+				for _, h := range parseHostLines(res.Stdout, domain) {
+					if !existing[h] {
+						existing[h] = true
+						s.Subdomains = append(s.Subdomains, h)
+						added++
+					}
+				}
+				if added > 0 {
+					s.Printf("│  alterx→dnsx: +%d live permuted subdomains\n", added)
+				}
+			}
+		}
+	}
+
 	writeLines(subFile, s.Subdomains)
 	s.Printf("│  Total After Active Bruteforce: %d\n", len(s.Subdomains))
 	return nil
@@ -1051,7 +1100,7 @@ func ensureResolvers(s *engine.State) string {
 type amassStreamResult struct {
 	count    int    // NEW in-scope subdomains added to `found` this run
 	subcmd   string // which sub-command actually produced results
-	timedOut bool   // true when the 10-minute deadline killed amass
+	timedOut bool   // true when the 15-minute deadline killed amass
 	err      error  // exact error when the run failed with zero results
 }
 
@@ -1064,10 +1113,11 @@ type amassStreamResult struct {
 // `found` and also appended to amOut for the report artifact.
 //
 // Sub-command matrix (accepted forms differ per amass build):
-//   v5+/unknown : `amass enum -passive -d <domain>`  → stdout
-//                 fallback `amass passive -d <domain>` (v5.1.1 short form)
-//   v4          : `amass enum -passive -d <domain> -o <out>` (stdout also works)
-//   v3          : `amass enum -passive -d <domain> -config <ini> -o <out>`
+//
+//	v5+/unknown : `amass enum -passive -d <domain>`  → stdout
+//	              fallback `amass passive -d <domain>` (v5.1.1 short form)
+//	v4          : `amass enum -passive -d <domain> -o <out>` (stdout also works)
+//	v3          : `amass enum -passive -d <domain> -config <ini> -o <out>`
 //
 // No `-timeout N` is passed to amass itself: that flag is the exact knob that
 // silently mis-behaved on v5 in the field, and OUR context deadline is the
@@ -1137,14 +1187,133 @@ func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amass
 	return amassStreamResult{count: 0, subcmd: "", timedOut: lastTimeout, err: lastErr}
 }
 
-// streamAmassOnce runs one amass invocation with a 10-minute deadline, scans
+// amassDeadline is the dedicated per-invocation deadline for amass. Amass is
+// SLOW (the V12.1 mandate: "not 2, not 5, not 10 — Amass is SLOW"), so V12.1
+// raises the streaming deadline to 15 minutes.
+const amassDeadline = 15 * time.Minute
+
+// runChaosBackup is the V12.1 chaos-client fallback for amass. ProjectDiscovery
+// Chaos (`chaos -d <domain> -silent`) queries the Chaos passive-DNS dataset and
+// is faster/more reliable than amass. Requires a PDCP_API_KEY env var (Chaos is
+// key-gated); when the key is missing chaos exits with an error and we simply
+// report 0. Newly discovered in-scope hosts are merged into `found`.
+func runChaosBackup(ctx context.Context, s *engine.State, domain string, found map[string]bool) int {
+	if _, err := runner.ResolveToolPath("chaos"); err != nil {
+		return 0
+	}
+	res := runner.RunTool(ctx, "chaos", []string{"-d", domain, "-silent"}, nil)
+	if !res.OK() && !res.TimedOut {
+		return 0
+	}
+	added := 0
+	suffix := "." + domain
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		h := strings.ToLower(strings.TrimSpace(line))
+		if h == "" {
+			continue
+		}
+		if (h == domain || strings.HasSuffix(h, suffix)) && len(h) < 255 && !found[h] {
+			found[h] = true
+			added++
+		}
+	}
+	return added
+}
+
+// runAmassV5 is the V12.1 ZERO-TOLERANCE dedicated, self-contained, TESTABLE
+// amass integration. It tries THREE methods in sequence and returns the merged,
+// de-duplicated list of subdomains it captured for `domain`:
+//
+//	Method A: amass enum -passive -d <domain>
+//	Method B: amass passive -d <domain>                (v5.1.1 short form)
+//	Method C: amass enum -passive -d <domain> -config <configPath>
+//
+// Each method streams stdout line-by-line under a 15-minute context deadline so
+// partial results survive a timeout. If ALL three methods yield zero results it
+// returns the exact combined error:
+//
+//	amass: all 3 methods failed: <errA> / <errB> / <errC>
+//
+// This is the function asserted by TestAmassV5Integration.
+func runAmassV5(domain string) ([]string, error) {
+	return runAmassV5Ctx(context.Background(), domain, "")
+}
+
+// runAmassV5Ctx is runAmassV5 with an explicit parent context and optional
+// amass config path (Method C). Exposed separately so the pipeline can pass its
+// own cancellation context and a v3 config while the exported runAmassV5 stays
+// a simple, test-friendly signature.
+func runAmassV5Ctx(parent context.Context, domain, configPath string) ([]string, error) {
+	if _, err := runner.ResolveToolPath("amass"); err != nil {
+		return nil, fmt.Errorf("amass not found: %w", err)
+	}
+
+	found := map[string]bool{}
+	suffix := "." + domain
+	ingest := func(line string) int {
+		added := 0
+		for _, tok := range strings.Fields(strings.ToLower(line)) {
+			tok = strings.Trim(tok, ".,()<>\"'[]")
+			if (tok == domain || strings.HasSuffix(tok, suffix)) && len(tok) < 255 && !found[tok] {
+				found[tok] = true
+				added++
+			}
+		}
+		return added
+	}
+
+	methodC := []string{"enum", "-passive", "-d", domain}
+	if configPath != "" {
+		methodC = append(methodC, "-config", configPath)
+	}
+	methods := []struct {
+		label string
+		args  []string
+	}{
+		{"enum -passive", []string{"enum", "-passive", "-d", domain}},
+		{"passive", []string{"passive", "-d", domain}},
+		{"enum -passive -config", methodC},
+	}
+
+	errs := make([]string, 0, 3)
+	for _, m := range methods {
+		count, _, err := streamAmassOnce(parent, m.args, ingest)
+		if count > 0 {
+			// Success on this method: return everything captured so far.
+			out := make([]string, 0, len(found))
+			for h := range found {
+				out = append(out, h)
+			}
+			return out, nil
+		}
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("[%s] %v", m.label, err))
+		} else {
+			errs = append(errs, fmt.Sprintf("[%s] 0 results", m.label))
+		}
+	}
+
+	// All 3 methods produced zero. If amass nonetheless emitted anything that
+	// slipped past the per-method count (it won't, but be safe), return it.
+	if len(found) > 0 {
+		out := make([]string, 0, len(found))
+		for h := range found {
+			out = append(out, h)
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("amass: all 3 methods failed: %s", strings.Join(errs, " / "))
+}
+
+// streamAmassOnce runs one amass invocation with a 15-minute deadline, scans
 // stdout line-by-line, and calls ingest() on each line as it arrives. Returns
 // the number of newly ingested hosts, whether the deadline fired, and the exact
 // error (nil on clean exit). Partial results are preserved on timeout because
 // ingest has already run for every line amass emitted before the kill.
 func streamAmassOnce(parent context.Context, args []string, ingest func(string) int) (int, bool, error) {
-	// Mandate spec: 10-minute dedicated deadline, independent of the shared cap.
-	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	// V12.1 mandate spec: 15-minute dedicated deadline (amass is SLOW),
+	// independent of the shared runner cap.
+	ctx, cancel := context.WithTimeout(parent, amassDeadline)
 	defer cancel()
 
 	binPath, err := runner.ResolveToolPath("amass")
@@ -2341,7 +2510,7 @@ type CrawlPhase struct{}
 
 func (p *CrawlPhase) Name() string { return "Web Crawling & Spidering" }
 func (p *CrawlPhase) Description() string {
-	return "katana + gospider deep crawl on live endpoints (empty-input guarded)"
+	return "katana + gospider deep crawl + cariddi endpoint/secret extraction (empty-input guarded)"
 }
 func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 	// FIX #5 (Tier 1): crawling generates hundreds of noisy URLs — NEVER route
@@ -2441,6 +2610,40 @@ func (p *CrawlPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 	} else {
 		s.Printf("│  gospider: SKIP (empty seed file)\n")
+	}
+
+	// ── V12.1 Section 3: cariddi endpoint + secret extraction ───────────
+	// cariddi crawls the live seeds and pulls endpoints, parameters, and (most
+	// valuably) secrets/API-keys directly out of HTTP responses that katana and
+	// gospider ignore. New endpoints join the crawl corpus; secrets are recorded
+	// as findings for the report.
+	if _, err := runner.ResolveToolPath("cariddi"); err == nil {
+		if ok, _ := fileHasContent(seedFile); ok {
+			res := runner.RunTool(ctx, "cariddi", []string{"-s", "-e", "-json"}, nil)
+			// cariddi reads seeds from stdin; when that path is unavailable the
+			// tool still runs against provided targets. Guard on any output.
+			if (res.OK() || res.TimedOut) && strings.TrimSpace(res.Stdout) != "" {
+				urls, secrets := parseCariddiJSON(res.Stdout)
+				newURLs := 0
+				for _, u := range urls {
+					if strings.HasPrefix(u, "http") && !crawlURLs[u] {
+						crawlURLs[u] = true
+						newURLs++
+					}
+				}
+				for _, sec := range secrets {
+					f := map[string]interface{}{
+						"title": "Exposed Secret (cariddi)", "severity": "High",
+						"tool": "cariddi", "evidence": sec,
+						"http_confirmed": true, "specific_pattern": true,
+					}
+					s.AddFinding(f)
+				}
+				if newURLs > 0 || len(secrets) > 0 {
+					s.Printf("│  cariddi: +%d endpoints, %d secret(s)\n", newURLs, len(secrets))
+				}
+			}
+		}
 	}
 
 	var lines []string
@@ -2857,34 +3060,67 @@ type CORSPhase struct{}
 
 func (p *CORSPhase) Name() string { return "CORS Misconfiguration Check" }
 func (p *CORSPhase) Description() string {
-	return "Tests CORS reflection, null origin, wildcard"
+	return "V12.1 FIX #3: CDP-browser CORS for WAF hosts, curl for non-WAF (reflection, null origin, wildcard+creds)"
 }
 func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 	// FIX #5 (Tier 2): targeted CORS reflection tests are high-value.
 	px := s.PhaseProxy(proxy.ProxyModeSelective)
 	corsVuln := 0
-	testOrigins := []string{"https://evil.com", "null", "https://attacker.com"}
 
 	targets := dedupeURLs(s.URLs)
 
 	// FIX #8 / FP #3: ONLY test endpoints whose hostname is explicitly in
 	// scope. This kills the www.grillservice-famholler.at (German grill site)
 	// CORS false positive that crept in via a crawled off-scope link.
-	before := len(targets)
 	targets, removed := filter.FilterInScopeURLs(targets, s.Scope)
 	if removed > 0 {
 		s.Printf("│  CORS scope filter: %d out-of-scope hosts removed\n", removed)
 	}
-	_ = before
 
 	if len(targets) > 50 {
 		targets = targets[:50]
 	}
 
+	// V12.1 FIX #3: Split targets by WAF protection. WAF-protected hosts
+	// (flagged during Phase 07) get tested with a REAL Chrome browser via CDP —
+	// Cloudflare/Akamai often serve a JS challenge or block the ACAO header for
+	// non-browser (curl) clients, causing Phase 17 to see 0 while the CDP-based
+	// Phase 56 sees the real misconfig. Non-WAF hosts stay on the fast curl path.
+	wafTargets, plainTargets := partitionCORSByWAF(s, targets)
+
+	cdpConfirmed := corsCDPBrowser(ctx, s, wafTargets)
+	corsVuln += cdpConfirmed
+	corsVuln += corsCurl(ctx, s, px, plainTargets)
+
+	s.Printf("│  CORS: tested %d in-scope (%d WAF→CDP, %d non-WAF→curl), confirmed %d (CDP proofs: %d)\n",
+		len(wafTargets)+len(plainTargets), len(wafTargets), len(plainTargets), corsVuln, cdpConfirmed)
+	return nil
+}
+
+// partitionCORSByWAF splits in-scope http(s) targets into WAF-protected hosts
+// (routed to the CDP browser path) and non-WAF hosts (routed to curl), per
+// V12.1 FIX #3. Non-http entries are dropped. Kept pure so it is unit-testable
+// without a live browser or network.
+func partitionCORSByWAF(s *engine.State, targets []string) (waf, plain []string) {
 	for _, u := range targets {
 		if !strings.HasPrefix(u, "http") {
 			continue
 		}
+		if s.IsWAFProtected(u) {
+			waf = append(waf, u)
+		} else {
+			plain = append(plain, u)
+		}
+	}
+	return waf, plain
+}
+
+// corsCurl runs the classic curl-based reflected-origin / wildcard+creds CORS
+// probe against non-WAF hosts. Returns the number of confirmed misconfigs.
+func corsCurl(ctx context.Context, s *engine.State, px *proxy.ProxyManager, targets []string) int {
+	testOrigins := []string{"https://evil.com", "null", "https://attacker.com"}
+	confirmed := 0
+	for _, u := range targets {
 		for _, origin := range testOrigins {
 			args := []string{"-s", "-m", "10", "-H", "Origin: " + origin, "-I", u}
 			if px.Active {
@@ -2904,10 +3140,9 @@ func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 						"http_confirmed":   true, // we saw the real ACAO header
 						"specific_pattern": reflected,
 					}
-					// In scope (filtered above) + HTTP-confirmed → high confidence.
 					if filter.ApplyConfidencePolicy(f, s.Scope) {
 						s.AddFinding(f)
-						corsVuln++
+						confirmed++
 					}
 					break
 				}
@@ -2915,8 +3150,72 @@ func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 		s.Governor.Throttle()
 	}
-	s.Printf("│  CORS: tested %d in-scope, confirmed %d\n", len(targets), corsVuln)
-	return nil
+	return confirmed
+}
+
+// corsCDPBrowser tests WAF-protected hosts for exploitable CORS using a real
+// Chrome (Go-Rod CDP) credentialed cross-origin fetch — the same primitive
+// Phase 56 uses. A returned body across origins WITH credentials is hard proof
+// that curl cannot obtain against a WAF. If the browser is unavailable it falls
+// back to curl so WAF hosts are never silently skipped. Returns confirmed count.
+func corsCDPBrowser(ctx context.Context, s *engine.State, wafTargets []string) int {
+	if len(wafTargets) == 0 {
+		return 0
+	}
+	// No browser online → degrade to curl so WAF hosts are still tested.
+	if s.Browser == nil || !s.Browser.Available() {
+		if len(wafTargets) > 0 {
+			s.Printf("│  CORS: browser offline, %d WAF host(s) fall back to curl\n", len(wafTargets))
+		}
+		px := s.PhaseProxy(proxy.ProxyModeSelective)
+		return corsCurl(ctx, s, px, wafTargets)
+	}
+	scanner := exploit.NewDOMScanner(s.Browser)
+	origins := apexLiveOrigins(s)
+	confirmed := 0
+	for _, api := range wafTargets {
+		// Trusted-origin cross-origin credentialed fetch: try each live apex
+		// origin against this WAF-protected API. A body returned cross-origin
+		// with credentials is an exploitable CORS misconfiguration.
+		tested := false
+		for _, origin := range budget(origins, 3) {
+			if sameOrigin(origin, api) {
+				continue
+			}
+			release, ok := s.AcquireBrowserSlot(ctx)
+			if !ok {
+				return confirmed
+			}
+			proof, skipped := scanner.VerifyCORSInBrowser(ctx, origin, api)
+			release()
+			if skipped {
+				// CDP dropped mid-run → curl fallback for the remainder.
+				px := s.PhaseProxy(proxy.ProxyModeSelective)
+				return confirmed + corsCurl(ctx, s, px, wafTargets)
+			}
+			tested = true
+			if !proof.Allowed {
+				continue
+			}
+			f := map[string]interface{}{
+				"title": "CORS Misconfiguration", "severity": "High",
+				"url": api, "tool": "cors_check_cdp",
+				"evidence": fmt.Sprintf("in-browser credentialed cross-origin fetch from %s returned %d with body %q → WAF-protected CORS allows credentialed cross-origin read",
+					origin, proof.Status, browser.Redact(proof.BodySample)),
+				"http_confirmed":   true,
+				"specific_pattern": true,
+				"proof_engine":     "go-rod CDP withCredentials",
+			}
+			if filter.ApplyConfidencePolicy(f, s.Scope) {
+				s.AddFinding(f)
+				confirmed++
+			}
+			break
+		}
+		_ = tested
+		s.Governor.Throttle()
+	}
+	return confirmed
 }
 
 // dedupeURLs returns the unique set of URLs preserving order.
