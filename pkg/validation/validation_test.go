@@ -111,6 +111,57 @@ func TestValidCandidatePasses(t *testing.T) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// V12.0 OMEGA BUG #3: Cloudflare/WAF 520-530 responses must be auto-rejected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestBug3_CloudflareStatusRejected(t *testing.T) {
+	v := NewFPValidator(alwaysInScope)
+	for _, code := range []int{520, 521, 522, 523, 524, 525, 526, 527, 530} {
+		c := Candidate{
+			Type:    "Reflected XSS",
+			URL:     "https://target.com/?q=x",
+			InScope: true,
+			Target:  Probe{StatusCode: code, BodySample: "web server is returning an unknown error"},
+		}
+		verdict := v.Validate(context.Background(), c)
+		if verdict.Passed {
+			t.Fatalf("HTTP %d (Cloudflare error) must be rejected, got passed", code)
+		}
+	}
+}
+
+func TestBug3_CloudflareBodySignatureRejected(t *testing.T) {
+	v := NewFPValidator(alwaysInScope)
+	c := Candidate{
+		Type:     "SQL Injection",
+		URL:      "https://target.com/?id=1",
+		InScope:  true,
+		Evidence: "Attention Required! | Cloudflare — Ray ID: 89ab",
+	}
+	verdict := v.Validate(context.Background(), c)
+	if verdict.Passed {
+		t.Fatalf("a Cloudflare error-page signature must be rejected, got passed")
+	}
+}
+
+func TestBug3_NormalStatusNotRejectedByCloudflareGate(t *testing.T) {
+	v := NewFPValidator(alwaysInScope)
+	c := Candidate{
+		Type:                   "ssti",
+		URL:                    "https://target.com/p?q=x",
+		InScope:                true,
+		RequiresExploitability: true,
+		Exploitable:            true,
+		SkipReproduce:          true,
+		Target:                 Probe{StatusCode: 200},
+		Evidence:               "1790243 appeared",
+	}
+	if verdict := v.Validate(context.Background(), c); !verdict.Passed {
+		t.Fatalf("a clean HTTP 200 candidate must not be caught by the Cloudflare gate, got %+v", verdict)
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Gate 2 (private data): a "sensitive file" finding with no private-data
 // signal in the evidence must be rejected as public content.
 // ─────────────────────────────────────────────────────────────────────────────

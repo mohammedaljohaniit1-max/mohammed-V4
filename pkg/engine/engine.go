@@ -57,7 +57,12 @@ type State struct {
 	Subdomains    []string
 	LiveHosts     []string
 	URLs          []string
-	Parameters    map[string][]string
+	// PriorityTargets is the staging/dev/internal-first exploit ordering
+	// produced by the Subdomain Intelligence engine (Secret Weapon #5, Phase
+	// 65). Later exploit phases may consume it to test weaker-security hosts
+	// before hardened production. Empty until Phase 65 runs.
+	PriorityTargets []string
+	Parameters      map[string][]string
 	Findings      []map[string]interface{}
 	OutputFolder  string
 	StartTime     time.Time
@@ -513,7 +518,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V11.0 FINAL SOVEREIGN Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V12.0 OMEGA Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up

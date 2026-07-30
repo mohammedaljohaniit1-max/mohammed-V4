@@ -1,16 +1,19 @@
 package phases
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mohammed-v3/core/pkg/config"
@@ -663,76 +666,40 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 	for _, domain := range apexDomains {
 		s.Printf("│  [Apex passive enum: %s]\n", domain)
 
-		// amass — apex only. V7 Section 1.1 FIX: amass v5 (5.x, tested on Kali
-		// 2026.2) REMOVED the -o flag and changed the config format again, so a
-		// v4-style `-o out.txt` invocation makes v5 error out and return 0. We
-		// now branch three ways and parse the RIGHT source in each case:
-		//   v5+     : amass enum -passive -d <domain> -timeout 3          → STDOUT
-		//   v4      : amass enum -passive -d <domain> -timeout 3 -o <out> → file
-		//   v3      : amass enum -passive -d <domain> -config <ini> -o<out> → file
-		//   unknown : treat as v5 (modern) and read STDOUT (the -o-less form is
-		//             the only one that is safe across every version — a v3/v4
-		//             binary still prints results to stdout too).
+		// amass — apex only.
+		//
+		// ── V12.0 OMEGA · BUG #1 ROOT-CAUSE FIX ───────────────────────────────
+		// A live Temu scan proved the previous integration was BROKEN: the log
+		// showed `amass (v5): 0 subdomains` while a manual CLI run in a parallel
+		// terminal produced 8,531. Root-cause analysis of the four candidate
+		// causes from the mandate:
+		//   (a) sub-command syntax  — amass v5.1.1 accepts BOTH `amass enum
+		//       -passive -d X` and the newer `amass passive -d X`; the exact
+		//       accepted form varies by build, so we now TRY the enum form and
+		//       FALL BACK to the passive form when it yields 0.
+		//   (b) premature timeout   — the runner hard-killed amass at its 6-min
+		//       cap (the Temu log ran amass 00:02:29→00:08:29 == exactly 6m).
+		//       We now give amass a dedicated 10-minute deadline (mandate spec).
+		//   (c) broken stdout read  — the old path buffered ALL stdout in memory
+		//       and only parsed it AFTER the process exited, so a SIGKILL at the
+		//       cap discarded everything amass had already emitted. We now stream
+		//       stdout LINE-BY-LINE via bufio.Scanner and ingest each host the
+		//       instant amass prints it, so a timeout keeps every partial result.
+		//   (d) missing config      — v3 only; handled by amassCfg below.
+		// The streaming runner logs the EXACT error on failure (mandate spec).
 		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
-		amCount := 0
-		var amArgs []string
-		amUsesStdout := false
+		amRes := runAmassStreaming(ctx, domain, amassMajor, amassCfg, amOut, found)
+		verNote := ""
+		if amassMajor > 0 {
+			verNote = fmt.Sprintf(" (v%d)", amassMajor)
+		}
 		switch {
-		case amassMajor >= 5 || amassMajor == 0:
-			// v5+ / unknown: NO -o flag; capture stdout.
-			amArgs = []string{"enum", "-passive", "-d", domain, "-timeout", "3"}
-			amUsesStdout = true
-		case amassMajor == 4:
-			amArgs = []string{"enum", "-passive", "-d", domain, "-timeout", "3", "-o", amOut}
-		default: // v3
-			amArgs = []string{"enum", "-passive", "-d", domain, "-o", amOut, "-timeout", "4"}
-			if amassCfg != "" {
-				amArgs = append(amArgs, "-config", amassCfg)
-			}
-		}
-		res := runner.RunTool(ctx, "amass", amArgs, nil)
-		// collectAmass ingests hosts from either stdout (v5) or the -o file
-		// (v3/v4). amass stdout lines look like "sub.example.com (FQDN) -->" on
-		// some versions, so we scan every whitespace token for an in-scope host.
-		collectAmass := func(r *runner.Result) {
-			var lines []string
-			if amUsesStdout {
-				lines = strings.Split(strings.ReplaceAll(r.Stdout, "\r", ""), "\n")
-				_ = writeAmassStdout(amOut, r.Stdout) // persist for the report
-			} else {
-				lines = readNonEmptyLines(amOut)
-			}
-			for _, l := range lines {
-				for _, tok := range strings.Fields(strings.ToLower(l)) {
-					tok = strings.Trim(tok, ".,()<>\"'")
-					if tok == domain || strings.HasSuffix(tok, "."+domain) {
-						if !found[tok] {
-							found[tok] = true
-							amCount++
-						}
-					}
-				}
-			}
-		}
-		if res.OK() || res.TimedOut {
-			collectAmass(res)
-			if amCount == 0 && res.OK() {
-				// One stdout-only retry (safe on every version) in case a stale
-				// config or a removed flag interfered with the first attempt.
-				retry := runner.RunTool(ctx, "amass",
-					[]string{"enum", "-passive", "-d", domain, "-timeout", "3"}, nil)
-				if retry.OK() || retry.TimedOut {
-					amUsesStdout = true
-					collectAmass(retry)
-				}
-			}
-			verNote := ""
-			if amassMajor > 0 {
-				verNote = fmt.Sprintf(" (v%d)", amassMajor)
-			}
-			s.Printf("│    amass%s: %d subdomains\n", verNote, amCount)
-		} else {
-			s.Printf("│    amass: SKIP (%v)\n", res.Err)
+		case amRes.err != nil && amRes.count == 0:
+			s.Printf("│    amass%s: 0 subdomains — FAILED (%v)\n", verNote, amRes.err)
+		case amRes.timedOut:
+			s.Printf("│    amass%s: %d subdomains [partial — deadline reached, streamed results kept]\n", verNote, amRes.count)
+		default:
+			s.Printf("│    amass%s: %d subdomains [via %s]\n", verNote, amRes.count, amRes.subcmd)
 		}
 
 		// bbot — apex only. BUG #4 FIX (V6): use the exact proven invocation
@@ -741,7 +708,7 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		// The old "[OK]" label on a 0 result was misleading — 0 from bbot is a
 		// FAILURE, so we now log it as such.
 		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
-		res = runner.RunTool(ctx, "bbot", []string{
+		res := runner.RunTool(ctx, "bbot", []string{
 			"-t", domain, "-p", "subdomain-enum", "-rf", "passive",
 			"-om", "json", "--force", "-y", "-o", bbotOutDir,
 		}, nil)
@@ -1080,6 +1047,174 @@ func ensureResolvers(s *engine.State) string {
 	return fallback
 }
 
+// amassStreamResult is the outcome of a streaming amass run.
+type amassStreamResult struct {
+	count    int    // NEW in-scope subdomains added to `found` this run
+	subcmd   string // which sub-command actually produced results
+	timedOut bool   // true when the 10-minute deadline killed amass
+	err      error  // exact error when the run failed with zero results
+}
+
+// runAmassStreaming is the V12.0 OMEGA BUG #1 fix. It executes amass with a
+// dedicated 10-minute deadline (independent of the shared runner cap that was
+// killing amass mid-run), reads STDOUT line-by-line via bufio.Scanner so every
+// host is ingested the instant amass prints it (a timeout keeps all partial
+// results), and — when the primary sub-command yields nothing — retries with
+// the alternate v5 sub-command. Newly discovered in-scope hosts are added to
+// `found` and also appended to amOut for the report artifact.
+//
+// Sub-command matrix (accepted forms differ per amass build):
+//   v5+/unknown : `amass enum -passive -d <domain>`  → stdout
+//                 fallback `amass passive -d <domain>` (v5.1.1 short form)
+//   v4          : `amass enum -passive -d <domain> -o <out>` (stdout also works)
+//   v3          : `amass enum -passive -d <domain> -config <ini> -o <out>`
+//
+// No `-timeout N` is passed to amass itself: that flag is the exact knob that
+// silently mis-behaved on v5 in the field, and OUR context deadline is the
+// authoritative bound now.
+func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amassCfg, amOut string, found map[string]bool) amassStreamResult {
+	if _, err := runner.ResolveToolPath("amass"); err != nil {
+		return amassStreamResult{err: fmt.Errorf("amass not found: %w", err)}
+	}
+
+	// Build the ordered list of (label, args) attempts for this version.
+	type attempt struct {
+		label string
+		args  []string
+	}
+	var attempts []attempt
+	switch {
+	case amassMajor == 4:
+		attempts = []attempt{
+			{"enum -passive (v4)", []string{"enum", "-passive", "-d", domain}},
+		}
+	case amassMajor > 0 && amassMajor < 4: // v3
+		a3 := []string{"enum", "-passive", "-d", domain}
+		if amassCfg != "" {
+			a3 = append(a3, "-config", amassCfg)
+		}
+		attempts = []attempt{{"enum -passive -config (v3)", a3}}
+	default: // v5+ / unknown — try the modern long form, then the short form.
+		attempts = []attempt{
+			{"enum -passive", []string{"enum", "-passive", "-d", domain}},
+			{"passive", []string{"passive", "-d", domain}},
+		}
+	}
+
+	// A single writer for the artifact file, appended across attempts.
+	outFile, _ := os.OpenFile(amOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if outFile != nil {
+		defer outFile.Close()
+	}
+
+	suffix := "." + domain
+	ingest := func(line string) int {
+		added := 0
+		for _, tok := range strings.Fields(strings.ToLower(line)) {
+			tok = strings.Trim(tok, ".,()<>\"'[]")
+			if tok == domain || strings.HasSuffix(tok, suffix) {
+				if len(tok) < 255 && !found[tok] {
+					found[tok] = true
+					added++
+					if outFile != nil {
+						fmt.Fprintln(outFile, tok)
+					}
+				}
+			}
+		}
+		return added
+	}
+
+	var lastErr error
+	var lastTimeout bool
+	for _, at := range attempts {
+		count, timedOut, err := streamAmassOnce(ctx, at.args, ingest)
+		lastErr, lastTimeout = err, timedOut
+		if count > 0 {
+			return amassStreamResult{count: count, subcmd: at.label, timedOut: timedOut}
+		}
+	}
+	return amassStreamResult{count: 0, subcmd: "", timedOut: lastTimeout, err: lastErr}
+}
+
+// streamAmassOnce runs one amass invocation with a 10-minute deadline, scans
+// stdout line-by-line, and calls ingest() on each line as it arrives. Returns
+// the number of newly ingested hosts, whether the deadline fired, and the exact
+// error (nil on clean exit). Partial results are preserved on timeout because
+// ingest has already run for every line amass emitted before the kill.
+func streamAmassOnce(parent context.Context, args []string, ingest func(string) int) (int, bool, error) {
+	// Mandate spec: 10-minute dedicated deadline, independent of the shared cap.
+	ctx, cancel := context.WithTimeout(parent, 10*time.Minute)
+	defer cancel()
+
+	binPath, err := runner.ResolveToolPath("amass")
+	if err != nil {
+		return 0, false, err
+	}
+	cmd := exec.Command(binPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = os.Environ()
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return 0, false, fmt.Errorf("amass stdout pipe: %w", err)
+	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+
+	if err := cmd.Start(); err != nil {
+		return 0, false, fmt.Errorf("amass start: %w", err)
+	}
+
+	// Kill the whole process group when the deadline/parent context fires.
+	killed := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			if cmd.Process != nil {
+				if pgid, e := syscall.Getpgid(cmd.Process.Pid); e == nil {
+					_ = syscall.Kill(-pgid, syscall.SIGKILL)
+				} else {
+					_ = cmd.Process.Kill()
+				}
+			}
+		case <-killed:
+		}
+	}()
+
+	count := 0
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // tolerate long FQDN lines
+	for scanner.Scan() {
+		count += ingest(scanner.Text())
+	}
+	waitErr := cmd.Wait()
+	close(killed)
+
+	timedOut := ctx.Err() == context.DeadlineExceeded
+	if timedOut {
+		return count, true, nil // partial success: results already ingested
+	}
+	if parent.Err() != nil {
+		return count, false, fmt.Errorf("scan cancelled")
+	}
+	if waitErr != nil {
+		// A non-zero exit with results is fine (amass often exits 1); only
+		// surface the error when we got nothing AND stderr has a real message.
+		if count == 0 {
+			msg := strings.TrimSpace(stderr.String())
+			if msg == "" {
+				msg = waitErr.Error()
+			}
+			if len(msg) > 200 {
+				msg = msg[:200] + "…"
+			}
+			return 0, false, fmt.Errorf("amass exited: %s", msg)
+		}
+	}
+	return count, false, nil
+}
+
 // detectAmassMajor runs `amass -version` and returns the major version number
 // (e.g. 4 for v4.2.0). Returns 0 when amass is missing or the version cannot be
 // parsed — callers treat 0 as "assume modern (v4+), CLI-only" (BUG #3 V6).
@@ -1098,13 +1233,6 @@ func detectAmassMajor(ctx context.Context) int {
 		}
 	}
 	return 0
-}
-
-// writeAmassStdout persists amass v5 stdout (which no longer supports -o) to
-// the per-domain output file so the artifact still exists for the report and
-// for downstream re-parsing. Best-effort — errors are ignored by the caller.
-func writeAmassStdout(path, stdout string) error {
-	return os.WriteFile(path, []byte(stdout), 0644)
 }
 
 // ensureAmassConfig makes sure amass has a config file that enables data
@@ -1736,16 +1864,41 @@ func (p *TLSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 	if res.OK() || res.TimedOut {
 		lines := readNonEmptyLines(tlsOut)
 		issues := 0
+		infos := 0
 		for _, l := range lines {
 			ll := strings.ToLower(l)
-			if strings.Contains(ll, "expired") || strings.Contains(ll, "self-signed") || strings.Contains(ll, "mismatched") {
-				issues++
-				s.AddFinding(map[string]interface{}{
-					"title": "TLS Issue", "severity": "Medium", "url": l, "tool": "tlsx", "evidence": l,
-				})
+			// ── V12.0 OMEGA · BUG #2 ROOT-CAUSE FIX ───────────────────────────
+			// A live Temu scan produced 9 "Medium" findings and ALL 9 were TLS
+			// hostname mismatches — pure report pollution. A hostname mismatch on
+			// a shared CDN/edge cert is expected, not a vulnerability, and it
+			// carries no exploitable impact on its own. Per the mandate we DEMOTE
+			// every tlsx mismatch to Informational so it can never enter a
+			// severity summary or CONFIRMED_VULNS.txt. Expired / self-signed
+			// certificates remain Low (still not a true bounty finding, but
+			// materially more meaningful than a mismatch).
+			isMismatch := strings.Contains(ll, "mismatch")
+			isExpired := strings.Contains(ll, "expired")
+			isSelfSigned := strings.Contains(ll, "self-signed") || strings.Contains(ll, "self signed")
+			if !(isMismatch || isExpired || isSelfSigned) {
+				continue
 			}
+			severity := "Informational"
+			title := "TLS Certificate Hostname Mismatch"
+			if isExpired || isSelfSigned {
+				// A non-mismatch cert issue keeps a low, non-noise severity.
+				severity = "Low"
+				title = "TLS Certificate Issue"
+			}
+			if severity == "Informational" {
+				infos++
+			} else {
+				issues++
+			}
+			s.AddFinding(map[string]interface{}{
+				"title": title, "severity": severity, "url": l, "tool": "tlsx", "evidence": l,
+			})
 		}
-		s.Printf("│  tlsx: %d hosts analyzed, %d TLS issues\n", len(lines), issues)
+		s.Printf("│  tlsx: %d hosts analyzed, %d TLS issues, %d informational mismatches\n", len(lines), issues, infos)
 	} else {
 		s.Printf("│  tlsx: SKIP (%v)\n", res.Err)
 	}

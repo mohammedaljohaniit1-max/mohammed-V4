@@ -208,7 +208,7 @@ func diffCascade(before, after string) []string {
 // PrintReadinessReport writes the human-readable READINESS REPORT block to the
 // state's output. Called once by the orchestrator before the scan proper.
 func (s *State) PrintReadinessReport(rep ReadinessReport) {
-	s.Printf("╭─ V11.0 PRE-SCAN READINESS REPORT ──────────────────────────────\n")
+	s.Printf("╭─ V12.0 OMEGA PRE-SCAN READINESS REPORT ──────────────────────────────\n")
 	// AI.
 	if rep.OllamaReachable {
 		s.Printf("│  AI Cascade : ONLINE  [%s]\n", rep.CascadeSummary)
