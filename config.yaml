@@ -1,8 +1,9 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# MOHAMMED V11.0 FINAL SOVEREIGN EDITION — Configuration File
-# Autonomous Attack Surface & Exploit Engine (NO-MERCY MANDATE)
-# 60+ phases · 50+ OSINT sources · 5-gate false-positive validation
+# MOHAMMED V12.0 OMEGA — Configuration File
+# Zero-Touch Autonomous Attack & Discovery Engine (FINAL MANDATE)
+# 65+ phases · 50+ OSINT sources · 5-gate false-positive validation
 # 3-tier AI cascade · 8-WAF bypass matrix · PoE ethical boundary · 8 state machines
+# 5 Secret Weapons: API Hunter · Response Differential · Smart Fuzz · JS Deep · Subdomain Intel
 # Copy this file and fill in your API keys before running.
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -131,3 +132,35 @@ context_chain:
 param_profiler:
   enabled: true
   min_priority: 1
+
+# ── V12.0 OMEGA — 5 Secret Weapons (Phases 61-65) ────────────────────────────
+# Five pure-Go, self-contained exploit algorithms — no external CLI, no network
+# tools beyond the proxy-aware exploit.Client. Every candidate they surface still
+# clears the same 5-gate false-positive validator (Section 4) and honours the
+# PoE ethical boundary — they PROVE, never weaponize.
+#
+#   SW#1 API Hunter        — classify endpoints (AUTH/DATA/MONEY/ADMIN/OAUTH) and
+#                            run the right attack sequence per class.
+#   SW#2 Response Diff     — cross-context structural JSON diff for BOLA/IDOR,
+#                            ignoring timestamps / session IDs / CSRF tokens.
+#   SW#3 Smart Fuzz        — WAF-adaptive mutation (baseline→probe→adapt), with an
+#                            optional Ollama-brain escalation; stops at first PoE.
+#   SW#4 JS Deep           — mine JS for endpoints / admin / secrets / WS / GraphQL
+#                            / S3 / source-maps; Shannon-entropy gated (reject <3.5).
+#   SW#5 Subdomain Intel   — functional grouping (production / staging-dev /
+#                            internal / infra), staging-vs-prod diff, Wayback history.
+#
+# Each weapon defaults ON. Each per-scan budget caps a huge corpus so no single
+# weapon can turn into an hours-long phase.
+secret_weapons:
+  api_hunter: true               # SW#1 — endpoint classification + per-class attacks
+  differential: true             # SW#2 — cross-context structural diff (BOLA/IDOR)
+  smart_fuzz: true               # SW#3 — WAF-adaptive mutation fuzzer
+  js_deep: true                  # SW#4 — deep JavaScript mining
+  subdomain_intel: true          # SW#5 — functional subdomain grouping + Wayback
+  api_hunter_budget: 400         # max endpoints classified/attacked (default 400)
+  differential_budget: 250       # max URLs compared cross-context (default 250)
+  smart_fuzz_budget: 150         # max parameterized URLs fuzzed (default 150)
+  js_deep_budget: 200            # max JS files mined (default 200)
+  js_entropy_floor: 3.5          # min Shannon entropy for a secret candidate (3.5)
+  wayback_history: true          # SW#5 — Wayback historical takeover-candidate diff

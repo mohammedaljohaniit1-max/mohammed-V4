@@ -38,6 +38,27 @@ type Config struct {
 	// V11.0 FINAL SOVEREIGN engine controls.
 	WAFBypassCfg WAFBypassConfig // FLAW #3 — multi-WAF bypass matrix
 	Boundary     BoundaryConfig  // FLAW #4 — ethical PoE boundary
+
+	// V12.0 OMEGA — Secret Weapon engine controls (Phases 61-65).
+	SecretWeapons SecretWeaponsConfig
+}
+
+// SecretWeaponsConfig toggles and bounds the five V12.0 OMEGA Secret Weapon
+// engines. Every weapon defaults ON (the whole point of V12.0) but each can be
+// disabled and each has a per-scan budget so a huge corpus can never turn one
+// weapon into an hours-long phase.
+type SecretWeaponsConfig struct {
+	APIHunter          bool `yaml:"api_hunter"`           // SW#1
+	Differential       bool `yaml:"differential"`         // SW#2
+	SmartFuzz          bool `yaml:"smart_fuzz"`           // SW#3
+	JSDeep             bool `yaml:"js_deep"`              // SW#4
+	SubdomainIntel     bool `yaml:"subdomain_intel"`      // SW#5
+	APIHunterBudget    int  `yaml:"api_hunter_budget"`    // max endpoints (default 400)
+	DifferentialBudget int  `yaml:"differential_budget"`  // max URLs (default 250)
+	SmartFuzzBudget    int  `yaml:"smart_fuzz_budget"`    // max param URLs (default 150)
+	JSDeepBudget       int  `yaml:"js_deep_budget"`       // max JS files (default 200)
+	JSEntropyFloor     float64 `yaml:"js_entropy_floor"`  // min Shannon entropy (default 3.5)
+	WaybackHistory     bool `yaml:"wayback_history"`      // SW#5 Wayback diff (default true)
 }
 
 type APIKeys struct {
@@ -129,6 +150,37 @@ type YAMLConfig struct {
 	AIExtra   AIExtra         `yaml:"ai"`
 	WAFBypass WAFBypassConfig `yaml:"waf_bypass"`
 	Boundary  BoundaryConfig  `yaml:"boundary"`
+	// V12.0 OMEGA — Secret Weapon engine toggles/budgets.
+	SecretWeapons SecretWeaponsConfig `yaml:"secret_weapons"`
+}
+
+// applySecretWeaponDefaults fills the V12.0 OMEGA Secret Weapon config with
+// on-by-default toggles and sane budgets. Because YAML unmarshals absent bools
+// to false, we detect a completely-empty block (all budgets zero) and treat it
+// as "use defaults" so old config files transparently gain all five weapons.
+func applySecretWeaponDefaults(sw *SecretWeaponsConfig) {
+	empty := !sw.APIHunter && !sw.Differential && !sw.SmartFuzz && !sw.JSDeep &&
+		!sw.SubdomainIntel && sw.APIHunterBudget == 0 && sw.DifferentialBudget == 0 &&
+		sw.SmartFuzzBudget == 0 && sw.JSDeepBudget == 0
+	if empty {
+		sw.APIHunter, sw.Differential, sw.SmartFuzz = true, true, true
+		sw.JSDeep, sw.SubdomainIntel, sw.WaybackHistory = true, true, true
+	}
+	if sw.APIHunterBudget == 0 {
+		sw.APIHunterBudget = 400
+	}
+	if sw.DifferentialBudget == 0 {
+		sw.DifferentialBudget = 250
+	}
+	if sw.SmartFuzzBudget == 0 {
+		sw.SmartFuzzBudget = 150
+	}
+	if sw.JSDeepBudget == 0 {
+		sw.JSDeepBudget = 200
+	}
+	if sw.JSEntropyFloor == 0 {
+		sw.JSEntropyFloor = 3.5
+	}
 }
 
 func LoadYAMLConfig(path string) (*YAMLConfig, error) {
@@ -141,6 +193,7 @@ func LoadYAMLConfig(path string) (*YAMLConfig, error) {
 		cfg.Ollama.Endpoint = "http://127.0.0.1:11434"
 		applyAICascadeDefaults(&cfg.Ollama)
 		applyBoundaryDefaults(&cfg.Boundary)
+		applySecretWeaponDefaults(&cfg.SecretWeapons)
 		return cfg, nil
 	}
 	var cfg YAMLConfig
@@ -153,6 +206,7 @@ func LoadYAMLConfig(path string) (*YAMLConfig, error) {
 	}
 	applyAICascadeDefaults(&cfg.Ollama)
 	applyBoundaryDefaults(&cfg.Boundary)
+	applySecretWeaponDefaults(&cfg.SecretWeapons)
 	// EXPANSION 1 — apply the 3-tier API-key precedence: OS environment
 	// variables (Tier 1) override the config.yaml values (Tier 2). Sources with
 	// neither fall through to the native key-less scrapers (Tier 3) at runtime.

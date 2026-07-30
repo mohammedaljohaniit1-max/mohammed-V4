@@ -1,4 +1,4 @@
-# Responsible Disclosure Policy — MOHAMMED V11.0 FINAL SOVEREIGN
+# Responsible Disclosure Policy — MOHAMMED V12.0 OMEGA
 
 > **"Knock, don't break in."**
 > MOHAMMED is an authorized-testing / bug-bounty automation engine. It is
@@ -70,6 +70,32 @@ to a hard ceiling of `10` and derives every bypass plan's minimum inter-request
 delay from that floor. Behavioral-WAF plans (DataDome/PerimeterX/Arkose) use an
 even slower, human-like 1.2 s–4.7 s jitter. The shared adaptive stealth governor
 (`pkg/exploit.StealthGovernor`) additionally backs off on 429/503/403.
+
+---
+
+## Secret Weapon PoE boundaries (V12.0 OMEGA)
+
+The five V12.0 OMEGA **Secret Weapons** (Phases 61-65) are pure-Go discovery and
+exploit-reasoning engines. They surface *more* attack surface and *more*
+candidates than any prior version — but they are bound by exactly the same four
+rules above. None of them ever weaponizes a finding; each one PROVES and STOPS.
+
+| Secret Weapon | What it does | PoE boundary (proof, and nothing more) |
+|---------------|--------------|----------------------------------------|
+| **#1 API Hunter** (`pkg/exploit/api_hunter.go`) | Classifies endpoints (AUTH/DATA/MONEY/ADMIN/OAUTH) and runs the right attack sequence per class. | MONEY/ADMIN probes are **read-only / observation-only** — it reads status + shape differentials, never submits a purchase, transfer, or destructive admin action. |
+| **#2 Response Differential** (`pkg/exploit/differential.go`) | Cross-context **structural** JSON diff for BOLA/IDOR, ignoring timestamps / session IDs / CSRF tokens. | Compares responses across identities the operator already authorized; it reads other-tenant *shape*, never exfiltrates or mutates another user's records. |
+| **#3 Smart Fuzz** (`pkg/exploit/smart_fuzz.go`) | WAF-adaptive mutation (baseline→probe→adapt) with optional Ollama-brain escalation. | **Stops at the first confirmed Proof-of-Exploit** — it fires no further payloads once a candidate is confirmed, and never escalates a confirmed XSS/SQLi/SSRF beyond the RULE 1 safe proof. |
+| **#4 JS Deep** (`pkg/exploit/js_deep.go`) | Mines JavaScript for endpoints / admin / secrets / WS / GraphQL / S3 / source-maps; Shannon-entropy gated (rejects entropy < 3.5). | It **reports** discovered secrets/endpoints for manual review; it does **not** authenticate with a discovered credential or hit a discovered admin route. In-scope enforcement (`enforce_scope_on_js`) means only in-scope JS is mined. |
+| **#5 Subdomain Intel** (`pkg/exploit/subdomain_intel.go`) | Functional grouping (production / staging-dev / internal / infra), staging-vs-prod diff, Wayback history. | Wayback dead-host takeover findings are surfaced as **candidates for manual verification** — it never claims or registers a dangling resource. It only reads publicly-archived (CDX) data and in-scope response headers. |
+
+**Code enforcement:** every candidate a Secret Weapon surfaces is routed through
+`storeCandidate()` into the same 5-gate false-positive validator
+(`pkg/validation`), so Gate-4 scope and Gate-3 exploitability still apply, and
+the Cloudflare-error / TLS-mismatch demotions from V12.0 (BUGS #2 & #3) keep
+report noise out. Each weapon also honours a per-scan **budget**
+(`secret_weapons.*_budget` in `config.yaml`) so no weapon can turn into a
+high-volume, rate-abusing phase. Every weapon can be disabled independently via
+its `secret_weapons.*` toggle.
 
 ---
 

@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                        V11.0 FINAL SOVEREIGN | Zero-Touch Autonomous Attack Engine
+                     V12.0 OMEGA | Zero-Touch Autonomous Attack & Discovery Engine
 `
 
 const helpText = `
-MOHAMMED V11.0 FINAL SOVEREIGN — Zero-Touch Autonomous Attack & Exploit Engine (65+ phases, 76+ OSINT, 16 Go exploit engines, 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP, adaptive 429/WAF stealth shield)
+MOHAMMED V12.0 OMEGA — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, streaming Amass v5 integration, adaptive 429/WAF stealth shield)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -249,6 +249,9 @@ func runScan(args []string) {
 		// from the YAML config into the live scan config.
 		WAFBypassCfg: yamlCfg.WAFBypass,
 		Boundary:     yamlCfg.Boundary,
+
+		// V12.0 OMEGA — carry the Secret Weapon toggles/budgets into the scan.
+		SecretWeapons: yamlCfg.SecretWeapons,
 	}
 	// The --waf-bypass CLI flag forces the bypass engine on even when the YAML
 	// config leaves it disabled (the flag is the operator's explicit opt-in).
@@ -374,6 +377,18 @@ func runScan(args []string) {
 		&phases.ClientSideSecretPhase{},       // 58: Client-Side Secret & CORS (CDP)
 		&phases.StatefulAttackGraphPhase{},    // 59: Stateful Attack Graph
 		&phases.AIPayloadMutationPhase{},      // 60: AI Payload Mutation (WAF bypass)
+
+		// ── V12.0 OMEGA Secret Weapon phases 61-65 ────────────────────────────
+		// Five pure-Go standalone exploit engines that turn MOHAMMED from a
+		// tool-wrapper into a vulnerability-discovery engine. They run after the
+		// sovereign layer (they consume the same URL corpus, the bootstrapped
+		// User A/B sessions, and the discovered JS/subdomain data) and before
+		// correlation so their confirmed findings feed the correlation engine.
+		&phases.APIHunterPhase{},            // 61: API Endpoint Intelligence (SW#1)
+		&phases.ResponseDifferentialPhase{}, // 62: Response Differential (SW#2)
+		&phases.SmartFuzzPhase{},            // 63: Intelligent Adaptive Fuzz (SW#3)
+		&phases.JSDeepAnalysisPhase{},       // 64: JavaScript Deep Analysis (SW#4)
+		&phases.SubdomainIntelPhase{},       // 65: Subdomain Intelligence (SW#5)
 
 		&phases.CorrelationPhase{}, // 45: Smart Correlation Engine (must be last-but-report)
 

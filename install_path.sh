@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════════════════
-# MOHAMMED V11.0 FINAL SOVEREIGN EDITION — Auto-Installer & PATH Enforcer
+# MOHAMMED V12.0 OMEGA — Auto-Installer & PATH Enforcer
 # ---------------------------------------------------------------------------
 # Root cause fixed: "Missing tools or PATH mismatch cause quiet phase skips."
 #

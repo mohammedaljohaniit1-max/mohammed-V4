@@ -58,8 +58,13 @@ var toolTimeouts = map[string]time.Duration{
 	// bbot passive enum realistically needs 5-10 min per root domain; the old
 	// 3-minute cap killed it before any results (BUG #2). Bumped to 8m.
 	"bbot": 8 * time.Minute,
-	// amass passive can spend minutes contacting sources.
-	"amass": 6 * time.Minute,
+	// amass passive can spend minutes contacting sources. V12.0 OMEGA BUG #1:
+	// the old 6-minute cap hard-killed amass mid-run (the Temu scan proved it
+	// ran exactly 00:02:29→00:08:29 == 6m then died with 0 results). The apex
+	// passive phase now streams amass through its own dedicated 10-minute
+	// deadline (runAmassStreaming), but this map value governs any other amass
+	// call path (e.g. -version), so it is raised to 10m for consistency.
+	"amass": 10 * time.Minute,
 	// nuclei full-template scans on many hosts are long-running.
 	"nuclei": 20 * time.Minute,
 	// sqlmap per-URL deep tests.

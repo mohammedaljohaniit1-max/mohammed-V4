@@ -381,7 +381,7 @@ rm -rf "$TMP_BUILD"
 
 echo ""
 log "════════════════════════════════════════════════════════"
-log "  MOHAMMED V11.0 FINAL SOVEREIGN — Setup complete."
+log "  MOHAMMED V12.0 OMEGA — Setup complete."
 log "  1) Reload PATH:   source $SHELL_RC"
 log "  2) Verify tools:  ./mohammed doctor   (or bash verify.sh)"
 log "  3) AI cascade:    ollama serve &"

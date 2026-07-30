@@ -124,9 +124,26 @@ func (v *FPValidator) FiveGateValidate(ctx context.Context, c Candidate) Verdict
 // most two network requests (baseline probe in Gate 1, reproduce probe in
 // Gate 5) and only when the relevant data is not already present.
 func (v *FPValidator) Validate(ctx context.Context, c Candidate) Verdict {
-	// ── Pre-gate: reject the exact known-FP signatures from Section 4.2 ──────
 	haystack := strings.ToLower(c.Evidence + " " + c.Target.BodySample)
 	lowerType := strings.ToLower(c.Type)
+
+	// ── Pre-gate 0: reject WAF / origin-error responses (V12.0 OMEGA BUG #3) ──
+	// A live Temu scan surfaced findings built on Cloudflare HTTP 520 "Web
+	// server is returning an unknown error" pages. The 52x/530 family is a WAF
+	// or edge/origin error, NOT the application's real response — any finding
+	// derived from one is a false positive by construction. We reject the whole
+	// 520–527 block plus 530, and also catch Cloudflare error-page signatures in
+	// the body/evidence for cases where the captured status was lost/normalised.
+	if isCloudflareErrorStatus(c.Target.StatusCode) {
+		return Verdict{Passed: false, Gate: 0,
+			Reason: "Cloudflare/WAF origin error (HTTP " + itoa(c.Target.StatusCode) + ") — not the application response"}
+	}
+	if cloudflareErrorSignature.MatchString(haystack) {
+		return Verdict{Passed: false, Gate: 0,
+			Reason: "Cloudflare/WAF error-page signature in response — not a genuine finding"}
+	}
+
+	// ── Pre-gate: reject the exact known-FP signatures from Section 4.2 ──────
 	for _, p := range knownFPPatterns {
 		if strings.Contains(lowerType, p.typeSubstr) && p.re.MatchString(haystack) {
 			return Verdict{Passed: false, Gate: 0, Reason: "known false-positive pattern: " + p.label}
@@ -245,3 +262,40 @@ func statusClass(code int) int {
 	}
 	return code / 100
 }
+
+// cloudflareErrorStatuses is the exact set of WAF/edge/origin error codes that
+// must auto-discard any finding derived from them (V12.0 OMEGA BUG #3). It
+// covers Cloudflare's 520–527 block plus 530.
+//   520 Web server returned an unknown error
+//   521 Web server is down
+//   522 Connection timed out
+//   523 Origin is unreachable
+//   524 A timeout occurred
+//   525 SSL handshake failed
+//   526 Invalid SSL certificate
+//   527 Railgun error (legacy)
+//   530 (paired with a 1xxx Cloudflare error)
+var cloudflareErrorStatuses = map[int]bool{
+	520: true, 521: true, 522: true, 523: true, 524: true,
+	525: true, 526: true, 527: true, 530: true,
+}
+
+// isCloudflareErrorStatus reports whether code is one of the WAF/origin error
+// codes that must auto-discard the finding.
+func isCloudflareErrorStatus(code int) bool {
+	return cloudflareErrorStatuses[code]
+}
+
+// cloudflareErrorSignature matches the text of a Cloudflare error page in a body
+// or evidence snippet, so a finding is discarded even when the numeric status
+// was lost/normalised upstream.
+var cloudflareErrorSignature = regexp.MustCompile(`(?i)` + strings.Join([]string{
+	`error\s*10\d{2}`,                      // Cloudflare "Error 1016/1020/..." pages
+	`web server is returning an unknown error`,
+	`web server is down`,
+	`origin is unreachable`,
+	`connection timed out.*cloudflare`,
+	`cloudflare.*ray id`,
+	`cf-error-details`,
+	`attention required.*cloudflare`,
+}, "|"))

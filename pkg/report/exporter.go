@@ -61,6 +61,15 @@ func aiReal(f map[string]interface{}) bool {
 
 // isConfirmed decides whether a finding belongs in CONFIRMED_VULNS.txt.
 func isConfirmed(f map[string]interface{}) bool {
+	// ── V12.0 OMEGA · BUG #2 GUARD ────────────────────────────────────────
+	// Informational findings (notably demoted tlsx hostname mismatches) must
+	// NEVER enter CONFIRMED_VULNS.txt regardless of any other signal.
+	if sev, ok := f["severity"].(string); ok {
+		switch strings.ToLower(strings.TrimSpace(sev)) {
+		case "informational", "info", "none":
+			return false
+		}
+	}
 	if confidenceOf(f) < 70 {
 		return false
 	}
