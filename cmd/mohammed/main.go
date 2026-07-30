@@ -25,11 +25,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                     V12.0 OMEGA | Zero-Touch Autonomous Attack & Discovery Engine
+                     V12.1 ZERO-TOLERANCE | Zero-Touch Autonomous Attack & Discovery Engine
 `
 
 const helpText = `
-MOHAMMED V12.0 OMEGA — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, streaming Amass v5 integration, adaptive 429/WAF stealth shield)
+MOHAMMED V12.1 ZERO-TOLERANCE — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], 45 recon/vuln tools incl. V12.1 modern set [chaos/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, 15-min streaming Amass v5 + chaos backup, adaptive 429/WAF stealth shield)
 
 USAGE:
   ./mohammed <command> [flags]
@@ -38,7 +38,7 @@ COMMANDS:
   scan       Run recon + vulnerability scan with target-size profiles
   report     Serve the interactive HTML dashboard for a completed scan
   doctor     Check tool availability and PATH environment
-  setup      Automated one-click installation of all 38+ scanning tools
+  setup      Automated one-click installation of all 45+ scanning tools
   help       Show this guidance menu
 
 REPORT DASHBOARD:

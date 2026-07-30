@@ -236,7 +236,11 @@ func containsPrivateData(lowerBody string) bool {
 // needsBaseline reports whether a finding type is a "content exists at path"
 // class that must be baseline-compared (sensitive files, exposed endpoints).
 func needsBaseline(lowerType string) bool {
-	for _, k := range []string{"sensitive", "file", "exposure", "exposed", "endpoint", "directory", "backup", "config", ".git", ".env"} {
+	for _, k := range []string{"sensitive", "file", "exposure", "exposed", "endpoint", "directory", "backup", "config", ".git", ".env",
+		// V12.1 FIX #4: API finding classes must be baseline-compared too, or a
+		// WAF/catch-all page answering 200 for the introspection/verb probe is
+		// wrongly "confirmed" (Phase 35 confirmed, Phase 45 rejected).
+		"graphql", "verb-tampering", "mass-assignment", "versioning", "bola", "api"} {
 		if strings.Contains(lowerType, k) {
 			return true
 		}
@@ -247,7 +251,10 @@ func needsBaseline(lowerType string) bool {
 // needsReproduce reports whether a finding type warrants a Gate-5 re-probe.
 // One-shot dynamic exploits (race, business-logic) set SkipReproduce instead.
 func needsReproduce(lowerType string) bool {
-	for _, k := range []string{"sensitive", "file", "exposure", "exposed", "takeover", "endpoint", "directory"} {
+	for _, k := range []string{"sensitive", "file", "exposure", "exposed", "takeover", "endpoint", "directory",
+		// V12.1 FIX #4: API findings must survive a Gate-5 re-probe so a one-off
+		// fluke (transient 200) cannot be reported as a stable finding.
+		"graphql", "verb-tampering", "mass-assignment", "versioning", "bola", "api"} {
 		if strings.Contains(lowerType, k) {
 			return true
 		}

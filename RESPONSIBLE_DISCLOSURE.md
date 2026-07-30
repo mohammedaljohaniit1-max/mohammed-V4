@@ -1,4 +1,4 @@
-# Responsible Disclosure Policy — MOHAMMED V12.0 OMEGA
+# Responsible Disclosure Policy — MOHAMMED V12.1 ZERO-TOLERANCE
 
 > **"Knock, don't break in."**
 > MOHAMMED is an authorized-testing / bug-bounty automation engine. It is
@@ -96,6 +96,19 @@ report noise out. Each weapon also honours a per-scan **budget**
 (`secret_weapons.*_budget` in `config.yaml`) so no weapon can turn into a
 high-volume, rate-abusing phase. Every weapon can be disabled independently via
 its `secret_weapons.*` toggle.
+
+## New-tool PoE boundaries (V12.1 ZERO-TOLERANCE)
+
+The six modern tools added in V12.1 obey the same four rules and stop at proof:
+
+| Tool | PoE boundary (proof, and nothing more) |
+|------|----------------------------------------|
+| **chaos / uncover** | Passive, read-only host discovery from public datasets; every host is scope-filtered (`parseHostLines`) before entering the corpus. No active probing occurs here. |
+| **alterx** | Generates candidate hostnames only; candidates are **DNS-resolved** (dnsx) before use — no live host is ever assumed to exist. |
+| **cariddi** | Extracts endpoints/secrets from responses the crawler already fetched in-scope; secrets are **reported for manual review**, never used to authenticate. |
+| **trufflehog** | Scans only the scan's own output folder (in-scope artifacts). A **verified** secret is reported at Critical with the value redacted — MOHAMMED never re-uses the credential against the provider; trufflehog's own verification is the proof. |
+| **ppmap** | Confirms a prototype-pollution sink and **stops** — it does not chain the pollution into RCE/XSS. |
+| **cdncheck** | Pure passive classification of edge/CDN ownership; used only to *demote* smuggling findings (reduce risk), never to attack. |
 
 ---
 

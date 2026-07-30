@@ -3,8 +3,8 @@ package engine
 import "testing"
 
 func TestReconTools_Inventory(t *testing.T) {
-	if len(reconTools) < 38 {
-		t.Fatalf("readiness must inventory the full 38-tool recon set, got %d", len(reconTools))
+	if len(reconTools) < 45 {
+		t.Fatalf("readiness must inventory the full 45-tool recon set, got %d", len(reconTools))
 	}
 	for _, tool := range reconTools {
 		if tool.Name == "" {
@@ -12,6 +12,26 @@ func TestReconTools_Inventory(t *testing.T) {
 		}
 		if tool.InstallCmd == "" {
 			t.Fatalf("recon tool %q missing an install hint", tool.Name)
+		}
+	}
+}
+
+// TestReconTools_V121ModernToolsPresent is the V12.1 Section 3 proof: every one
+// of the 7 new modern tools MUST be in the inventory with an install command.
+func TestReconTools_V121ModernToolsPresent(t *testing.T) {
+	want := []string{"chaos", "alterx", "cdncheck", "uncover", "cariddi", "trufflehog", "ppmap"}
+	have := map[string]string{}
+	for _, tool := range reconTools {
+		have[tool.Name] = tool.InstallCmd
+	}
+	for _, name := range want {
+		cmd, ok := have[name]
+		if !ok {
+			t.Errorf("V12.1 tool %q missing from reconTools inventory", name)
+			continue
+		}
+		if cmd == "" {
+			t.Errorf("V12.1 tool %q has no install command", name)
 		}
 	}
 }

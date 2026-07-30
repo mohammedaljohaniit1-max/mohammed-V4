@@ -27,6 +27,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mohammed-v3/core/pkg/browser"
 	"github.com/mohammed-v3/core/pkg/engine"
@@ -172,6 +173,16 @@ func (p *DOMXSSPhase) Execute(ctx context.Context, s *engine.State) error {
 	scanner := exploit.NewDOMScanner(s.Browser)
 	kept := 0
 	skippedCDP := 0
+	// V12.1 FIX #6 recovery-governor counters.
+	const (
+		perURLTimeout = 30 * time.Second // mandated 30s per-URL cap
+		memLimitMB    = 500              // mandated >500MB → recycle Chrome
+	)
+	recoveries := 0
+	memRecycles := 0
+	consecutiveDrops := 0
+	const maxConsecutiveDrops = 3 // give up only after 3 failed recoveries in a row
+
 	for _, u := range budget(a.urls, 30) {
 		select {
 		case <-ctx.Done():
@@ -185,16 +196,47 @@ func (p *DOMXSSPhase) Execute(ctx context.Context, s *engine.State) error {
 			skippedCDP++
 			continue
 		}
+
+		// FIX #6: recycle Chrome BEFORE it OOMs. A single long-lived Chromium
+		// grows unbounded across SPA renders (the exact cause of the crash after
+		// ~4 tests); if RSS crossed 500 MB we restart it in place and continue.
+		if s.Browser.GuardMemory(memLimitMB) {
+			memRecycles++
+			s.Printf("│  DOM XSS: Chrome RSS > %dMB — recycled (FIX #6, recycle #%d)\n", memLimitMB, memRecycles)
+		}
+
 		release, ok := s.AcquireBrowserSlot(ctx)
 		if !ok {
 			return nil
 		}
-		findings, skipped := scanner.Scan(ctx, u)
+		// FIX #6: hard 30s per-URL deadline so one hostile SPA cannot wedge the
+		// whole client-side phase.
+		urlCtx, cancel := context.WithTimeout(ctx, perURLTimeout)
+		findings, skipped := scanner.Scan(urlCtx, u)
+		cancel()
 		release()
+
 		if skipped {
-			s.Printf("│  DOM XSS: CDP became unavailable mid-scan — stopping client-side audit\n")
-			return nil
+			// FIX #6: instead of ABORTING the whole phase (old behaviour that
+			// silently zeroed every URL after a crash), attempt to recover Chrome
+			// and continue with the next URL.
+			consecutiveDrops++
+			if consecutiveDrops >= maxConsecutiveDrops {
+				s.Printf("│  DOM XSS: CDP dropped %d× in a row — giving up client-side audit (browser unrecoverable)\n", consecutiveDrops)
+				break
+			}
+			if s.Browser.Recover() {
+				recoveries++
+				scanner = exploit.NewDOMScanner(s.Browser) // rebind to the fresh browser
+				s.Printf("│  DOM XSS: CDP dropped mid-scan — recovered Chrome (FIX #6, recovery #%d), continuing\n", recoveries)
+			} else {
+				s.Printf("│  DOM XSS: CDP dropped and could not be recovered — stopping client-side audit\n")
+				break
+			}
+			continue
 		}
+		consecutiveDrops = 0 // a clean scan resets the drop streak
+
 		for _, f := range findings {
 			c := validation.Candidate{
 				Type:                   "dom-xss",
@@ -218,6 +260,9 @@ func (p *DOMXSSPhase) Execute(ctx context.Context, s *engine.State) error {
 	if skippedCDP > 0 {
 		s.Printf(" | %d URL(s) skipped by Phase-0 classifier (REST/Backend — no DOM)", skippedCDP)
 	}
+	if recoveries > 0 || memRecycles > 0 {
+		s.Printf(" | FIX #6: %d crash-recoveries, %d memory-recycles", recoveries, memRecycles)
+	}
 	s.Printf("\n")
 	return nil
 }
@@ -230,7 +275,7 @@ type ClientSideSecretPhase struct{}
 
 func (p *ClientSideSecretPhase) Name() string { return "Client-Side Secret & CORS" }
 func (p *ClientSideSecretPhase) Description() string {
-	return "Phase 58: headless-Chrome localStorage/sessionStorage secret harvest + in-browser credentialed CORS confirmation"
+	return "Phase 58: headless-Chrome localStorage/sessionStorage secret harvest + in-browser credentialed CORS confirmation + trufflehog verified-secret filesystem scan (V12.1)"
 }
 func (p *ClientSideSecretPhase) Execute(ctx context.Context, s *engine.State) error {
 	if !s.BrowserOnline || s.Browser == nil {
@@ -323,6 +368,29 @@ func (p *ClientSideSecretPhase) Execute(ctx context.Context, s *engine.State) er
 			}
 		}
 	}
+	// ── V12.1 Section 3: trufflehog deep secret scan of scan artifacts ──
+	// Every JS/HTML/response body the crawl phases saved into the output folder
+	// is a candidate for a leaked, VERIFIED credential. trufflehog verifies each
+	// secret against its live provider — a verified hit is a confirmed, not a
+	// probabilistic, finding.
+	if all, verified := runTrufflehog(ctx, s, s.OutputFolder); all > 0 {
+		sev := "Medium"
+		if verified > 0 {
+			sev = "Critical" // trufflehog CONFIRMED the credential is live.
+		}
+		f := map[string]interface{}{
+			"title": "Verified Secret Exposure (trufflehog)", "severity": sev,
+			"tool":             "trufflehog",
+			"evidence":         fmt.Sprintf("trufflehog found %d secret(s), %d cryptographically VERIFIED live", all, verified),
+			"secrets_total":    all,
+			"secrets_verified": verified,
+			"http_confirmed":   true,
+			"specific_pattern": true,
+		}
+		s.AddFinding(f)
+		s.Printf("│  trufflehog: %d secret(s) (%d verified live)\n", all, verified)
+	}
+
 	s.Printf("│  Client-Side Secret/CORS: %d storage secrets, %d credentialed-CORS confirmed\n", secretsKept, corsKept)
 	return nil
 }
@@ -486,11 +554,11 @@ func (p *AIPayloadMutationPhase) Execute(ctx context.Context, s *engine.State) e
 					SkipReproduce:          true,
 				}
 				if a.storeCandidate(ctx, s, c, "AI-Assisted WAF Bypass", "Medium", map[string]interface{}{
-					"class":         class,
-					"original":      payload,
-					"variant":       v,
-					"mutation_src":  source,
-					"proof_engine":  "ai-brain",
+					"class":        class,
+					"original":     payload,
+					"variant":      v,
+					"mutation_src": source,
+					"proof_engine": "ai-brain",
 				}) {
 					kept++
 				}

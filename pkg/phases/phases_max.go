@@ -218,13 +218,24 @@ func (p *AdvancedWebPhase) Execute(ctx context.Context, s *engine.State) error {
 			if !r.Vulnerable {
 				continue
 			}
+			// V12.1 FIX #5: CDN-fronted origins get the smuggling finding demoted
+			// to Informational (edge-queueing artifact, not origin-exploitable).
+			cdn := detectCDNForHost(ctx, s, r.URL)
+			sev, informational := smugglingSeverity("Critical", cdn)
+			extra := map[string]interface{}{"variant": r.Variant}
 			c := validation.Candidate{
 				Type: "http-smuggling", URL: r.URL, Evidence: r.Evidence,
 				RequiresExploitability: true, Exploitable: true, SkipReproduce: true,
 			}
-			if a.storeCandidate(ctx, s, c, "HTTP Request Smuggling", "Critical", map[string]interface{}{
-				"variant": r.Variant,
-			}) {
+			if informational {
+				extra["cdn_vendor"] = cdn
+				extra["cdn_demoted"] = true
+				extra["note"] = "V12.1 FIX #5: demoted to Informational — host fronted by " + cdn
+				c.Exploitable = false
+				c.RequiresExploitability = false
+				s.Printf("│  smuggling: %s → Informational (CDN=%s, FIX #5)\n", r.URL, cdn)
+			}
+			if a.storeCandidate(ctx, s, c, "HTTP Request Smuggling", sev, extra) {
 				kept++
 			}
 		}

@@ -214,3 +214,51 @@ func TestRandomTokenDistinct(t *testing.T) {
 		t.Fatalf("randomToken should not repeat: %q == %q", a, b)
 	}
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V12.1 FIX #4: API finding classes must now engage the baseline (Gate 1) and
+// reproduce (Gate 5) gates. Before the fix these classes matched neither keyword
+// list, so Phase 35 confirmed API findings that Phase 45 later rejected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestFix4_APIClassesNeedBaselineAndReproduce(t *testing.T) {
+	apiClasses := []string{
+		"graphql-introspection",
+		"verb-tampering",
+		"mass-assignment",
+		"versioning-bypass",
+		"bola",
+		"api: graphql-introspection",
+	}
+	for _, cls := range apiClasses {
+		if !needsBaseline(cls) {
+			t.Errorf("FIX #4: API class %q must require baseline (Gate 1)", cls)
+		}
+		if !needsReproduce(cls) {
+			t.Errorf("FIX #4: API class %q must require reproduce (Gate 5)", cls)
+		}
+	}
+	// A non-API informational class must NOT suddenly require these gates.
+	if needsBaseline("cors-credentialed") {
+		t.Errorf("FIX #4 over-reached: non-API class wrongly requires baseline")
+	}
+}
+
+// TestFix4_UnreachableAPIRejected proves an API candidate whose URL cannot be
+// fetched is rejected by the 5-gate (Gate 1 baseline fetch / reproduce) rather
+// than being confirmed on the exploit engine's word alone.
+func TestFix4_UnreachableAPIRejected(t *testing.T) {
+	v := NewFPValidator(alwaysInScope)
+	c := Candidate{
+		Type:                   "graphql-introspection",
+		URL:                    "http://127.0.0.1:1/graphql", // nothing listens here
+		InScope:                true,
+		RequiresExploitability: true,
+		Exploitable:            true,
+		Evidence:               "server returned __schema types",
+	}
+	verdict := v.FiveGateValidate(context.Background(), c)
+	if verdict.Passed {
+		t.Fatalf("FIX #4: an unreachable API endpoint must not pass the 5-gate, got passed")
+	}
+}

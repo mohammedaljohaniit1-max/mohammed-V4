@@ -20,7 +20,9 @@ package browser
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,10 +39,13 @@ import (
 type Engine struct {
 	mu          sync.Mutex
 	browser     *rod.Browser
+	launcher    *launcher.Launcher // kept for PID (memory governor) + teardown
+	pid         int                // chromium PID, for /proc RSS reads (FIX #6)
 	controlURL  string
 	launched    bool
 	launchErr   error
 	pageTimeout time.Duration
+	restarts    int // how many times the memory/crash governor recycled Chrome
 	// binPath is an explicit Chromium/Chrome binary path (from CHROME_BIN /
 	// config); empty lets go-rod resolve or download one.
 	binPath string
@@ -111,6 +116,8 @@ func (e *Engine) launch() error {
 		return e.launchErr
 	}
 	e.controlURL = controlURL
+	e.launcher = l
+	e.pid = l.PID() // FIX #6: remember the Chromium PID for the RSS governor
 
 	b := rod.New().ControlURL(controlURL)
 	if err := b.Connect(); err != nil {
@@ -140,10 +147,179 @@ func (e *Engine) Available() bool {
 func (e *Engine) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.closeLocked()
+}
+
+// closeLocked tears down the browser and (best-effort) the launcher process.
+// Caller must hold e.mu.
+func (e *Engine) closeLocked() {
 	if e.browser != nil {
-		_ = e.browser.Close()
+		func() {
+			defer func() { _ = recover() }()
+			_ = e.browser.Close()
+		}()
 		e.browser = nil
 	}
+	if e.launcher != nil {
+		func() {
+			defer func() { _ = recover() }()
+			e.launcher.Kill()
+		}()
+		e.launcher = nil
+	}
+	e.pid = 0
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// V12.1 FIX #6 — Chrome recovery governor
+//
+// ROOT CAUSE (mandate Section 1, FIX #6): Phase 55/57 DOM-XSS drove a single
+// long-lived Chromium; after ~4 heavy SPA renders Chrome crashed (OOM / renderer
+// tab death) and the phase simply STOPPED — every URL after the crash silently
+// returned 0. The governor below makes the engine self-heal: it can be Restarted
+// after a drop, reports its resident memory so the caller can recycle it before
+// it OOMs (>500 MB), and Recover() rebuilds a dead browser in place.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Restart tears down the current browser and starts a fresh one, preserving the
+// same options. It is the crash-recovery primitive: after a page/renderer death
+// the caller calls Restart and continues auditing the remaining URLs instead of
+// aborting the whole client-side phase. Returns an error only if the fresh
+// launch fails (in which case Available() will be false and the caller degrades
+// to HTTP). FIX #6.
+func (e *Engine) Restart() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.closeLocked()
+	// Reset the sync-once state so launch() actually re-launches.
+	e.launched = false
+	e.launchErr = nil
+	e.controlURL = ""
+	e.restarts++
+	// launch() takes e.mu — but it's reentrant-unsafe, so replicate minimal
+	// launch by temporarily unlocking is risky; instead inline via launchLocked.
+	return e.launchLocked()
+}
+
+// launchLocked is the body of launch() assuming e.mu is already held and the
+// once-flags have been reset. It exists so Restart can relaunch without the
+// double-lock that calling launch() under e.mu would cause. FIX #6.
+func (e *Engine) launchLocked() error {
+	if e.launched {
+		return e.launchErr
+	}
+	e.launched = true
+	defer func() {
+		if r := recover(); r != nil {
+			e.launchErr = &LaunchError{Reason: toString(r)}
+			e.browser = nil
+		}
+	}()
+	l := launcher.New().
+		Headless(true).
+		NoSandbox(true).
+		Set("disable-gpu").
+		Set("disable-dev-shm-usage").
+		Set("disable-setuid-sandbox").
+		Set("no-first-run").
+		Set("disable-extensions")
+	if e.binPath != "" {
+		l = l.Bin(e.binPath)
+	}
+	controlURL, err := l.Launch()
+	if err != nil {
+		e.launchErr = &LaunchError{Reason: err.Error()}
+		return e.launchErr
+	}
+	e.controlURL = controlURL
+	e.launcher = l
+	e.pid = l.PID()
+	b := rod.New().ControlURL(controlURL)
+	if err := b.Connect(); err != nil {
+		e.launchErr = &LaunchError{Reason: err.Error()}
+		return e.launchErr
+	}
+	e.browser = b
+	return nil
+}
+
+// Restarts reports how many times the recovery governor has recycled Chrome.
+func (e *Engine) Restarts() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.restarts
+}
+
+// MemoryMB returns the resident-set size of the Chromium process in megabytes,
+// read from /proc/<pid>/statm (Linux). It returns 0 when the PID is unknown or
+// the proc entry cannot be read (non-Linux / process gone) so a read failure
+// never triggers a spurious restart. FIX #6.
+func (e *Engine) MemoryMB() int {
+	e.mu.Lock()
+	pid := e.pid
+	e.mu.Unlock()
+	return procRSSMegabytes(pid)
+}
+
+// procRSSMegabytes reads resident pages from /proc/<pid>/statm and converts to
+// MB using the 4 KiB page size. Pure enough to unit-test the parser via
+// parseStatmRSSPages. Returns 0 on any failure.
+func procRSSMegabytes(pid int) int {
+	if pid <= 0 {
+		return 0
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/statm", pid))
+	if err != nil {
+		return 0
+	}
+	pages := parseStatmRSSPages(string(data))
+	if pages <= 0 {
+		return 0
+	}
+	const pageBytes = 4096
+	return pages * pageBytes / (1024 * 1024)
+}
+
+// parseStatmRSSPages extracts the 2nd field (resident pages) from a
+// /proc/<pid>/statm line ("size resident shared text lib data dt"). Returns 0
+// when the line is malformed. Split out so FIX #6 has a network-free unit test.
+func parseStatmRSSPages(statm string) int {
+	fields := strings.Fields(statm)
+	if len(fields) < 2 {
+		return 0
+	}
+	n, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// GuardMemory restarts Chrome when its RSS exceeds limitMB, returning true when
+// a restart was performed. A limitMB <= 0 disables the guard. This is the
+// mandated ">500 MB → restart" recycle. FIX #6.
+func (e *Engine) GuardMemory(limitMB int) bool {
+	if limitMB <= 0 {
+		return false
+	}
+	if e.MemoryMB() <= limitMB {
+		return false
+	}
+	_ = e.Restart()
+	return true
+}
+
+// Recover ensures a usable browser exists, relaunching a dead/crashed one in
+// place. It returns true when the engine is usable afterwards. Called by the
+// client-side phases after a page reports the CDP connection dropped. FIX #6.
+func (e *Engine) Recover() bool {
+	if e.Available() {
+		return true
+	}
+	if err := e.Restart(); err != nil {
+		return false
+	}
+	return e.browser != nil
 }
 
 // openPage navigates a fresh isolated page to url with the per-page timeout and
@@ -357,14 +533,14 @@ func isMostlyToken(s string) bool {
 
 // CORSProof is the result of an in-browser cross-origin credentialed fetch.
 type CORSProof struct {
-	Origin        string
-	TargetURL     string
-	Allowed       bool   // the browser actually returned the cross-origin body
-	Status        int    // HTTP status the browser saw (0 on network error)
-	BodySample    string // first bytes of the cross-origin body (proof)
-	WithCreds     bool   // whether credentials were included
-	ErrorMessage  string
-	Unavailable   bool
+	Origin       string
+	TargetURL    string
+	Allowed      bool   // the browser actually returned the cross-origin body
+	Status       int    // HTTP status the browser saw (0 on network error)
+	BodySample   string // first bytes of the cross-origin body (proof)
+	WithCreds    bool   // whether credentials were included
+	ErrorMessage string
+	Unavailable  bool
 }
 
 // jsCorsFetch performs a real credentialed cross-origin fetch from the page's

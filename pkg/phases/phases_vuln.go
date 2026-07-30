@@ -512,7 +512,7 @@ type SQLiPhase struct{}
 
 func (p *SQLiPhase) Name() string { return "SQL Injection Analysis" }
 func (p *SQLiPhase) Description() string {
-	return "sqlmap+ghauri: CF-stripped, in-scope, WAF-checked, ≤5 URLs (zero-FP)"
+	return "sqlmap+ghauri: CF-stripped, in-scope, WAF-checked, param-prioritized ≤20 URLs (zero-FP)"
 }
 func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 	// FIX #5 (Tier 2): only these targeted PoC injections reach Burp.
@@ -526,10 +526,17 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	// FIX #1 + FIX #2 + FIX #6(step2/3): strip Cloudflare challenge/analytics
 	// params, drop URLs with no injectable parameter, keep only in-scope hosts,
-	// order by parameter priority, and cap at 5. This is what eliminates the
-	// __cf_chl_rt_tk "SQL injection" false positives entirely.
+	// order by parameter priority, and cap. This eliminates the __cf_chl_rt_tk
+	// "SQL injection" false positives entirely.
+	//
+	// ── V12.1 ZERO-TOLERANCE · FIX #2 ─────────────────────────────────────────
+	// The Temu scan reduced 742 raw URLs to just ONE candidate ("742 raw → 1
+	// clean in-scope candidates (cap 5)") with no explanation. Two changes:
+	//   (1) raise the cap from 5 to 20 (still bounded, but 4× the coverage);
+	//   (2) log the EXACT elimination funnel so we can see which filter over-prunes.
 	raw := readNonEmptyLines(paramsFile)
-	targets := PrepareSQLiURLs(raw, s.Scope, 5)
+	targets, elim := PrepareSQLiURLsVerbose(raw, s.Scope, 20)
+	s.Printf("│  SQLi filter funnel: %s\n", elim.String())
 	// EXPANSION 3: exclude URLs on Phase-07 WAF_PROTECTED hosts up-front so we
 	// do not even attempt sqlmap against a WAF block page.
 	if dropped := dropWAFProtected(s, &targets); dropped > 0 {
@@ -539,7 +546,7 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 		s.Printf("│  SQLi: SKIP (0 clean in-scope injectable URLs after CF/scope/WAF filter)\n")
 		return nil
 	}
-	s.Printf("│  SQLi: %d raw → %d clean in-scope candidates (cap 5)\n", len(raw), len(targets))
+	s.Printf("│  SQLi: %d raw → %d clean in-scope candidates (cap 20)\n", len(raw), len(targets))
 
 	sqliOut := filepath.Join(s.OutputFolder, "sqli_results.txt")
 	var results []string
@@ -588,11 +595,11 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 		f := map[string]interface{}{
 			"title": "SQL Injection", "severity": "Critical",
 			"url": u, "tool": tool, "evidence": tool + " reports parameter injectable",
-			"requires_ai":       true,
-			"multi_tool":        sqlmapHit && ghauriHit,
-			"specific_pattern":  true,
-			"no_waf_confirmed":  true, // we already skipped WAF-fronted URLs
-			"http_confirmed":    sqlmapHit && ghauriHit,
+			"requires_ai":      true,
+			"multi_tool":       sqlmapHit && ghauriHit,
+			"specific_pattern": true,
+			"no_waf_confirmed": true, // we already skipped WAF-fronted URLs
+			"http_confirmed":   sqlmapHit && ghauriHit,
 		}
 		// FIX #3/#7: triage + confidence gate. An AI-offline unconfirmed
 		// Critical is auto-downgraded to Info; low confidence is discarded.
@@ -898,7 +905,7 @@ func (p *APIDiscoveryPhase) Execute(ctx context.Context, s *engine.State) error 
 // ═══════════════════════════════════════════════════════════════
 type CRLFPhase struct{}
 
-func (p *CRLFPhase) Name() string { return "CRLF Injection Check" }
+func (p *CRLFPhase) Name() string        { return "CRLF Injection Check" }
 func (p *CRLFPhase) Description() string { return "crlfuzz on live endpoints" }
 func (p *CRLFPhase) Execute(ctx context.Context, s *engine.State) error {
 	seeds := extractURLsFromHTTPX(filepath.Join(s.OutputFolder, "http_live.txt"))
@@ -983,10 +990,23 @@ func (p *SmugglingPhase) Execute(ctx context.Context, s *engine.State) error {
 		allOut = append(allOut, "### "+u, combined)
 		lower := strings.ToLower(combined)
 		if strings.Contains(lower, "vulnerable") || strings.Contains(lower, "potentially vulnerable") {
+			// V12.1 FIX #5: demote to Informational on CDN-fronted hosts. A
+			// front-end↔back-end desync measured against a shared Cloudflare/
+			// Fastly/Akamai/CloudFront edge is almost always an edge-queueing
+			// artifact, not an exploitable smuggling primitive against the origin.
+			severity := "Critical"
+			cdn := detectCDNForHost(ctx, s, u)
+			sev, informational := smugglingSeverity(severity, cdn)
 			f := map[string]interface{}{
-				"title": "HTTP Request Smuggling", "severity": "Critical",
+				"title": "HTTP Request Smuggling", "severity": sev,
 				"url": u, "tool": "smuggler", "evidence": strings.TrimSpace(combined),
-				"requires_ai": true, "http_confirmed": true, "specific_pattern": true,
+				"requires_ai": true, "http_confirmed": !informational, "specific_pattern": !informational,
+			}
+			if informational {
+				f["cdn_vendor"] = cdn
+				f["cdn_demoted"] = true
+				f["note"] = "V12.1 FIX #5: demoted to Informational — host is fronted by " + cdn + "; desync is likely an edge artifact, not origin-exploitable"
+				s.Printf("│  smuggler: %s → Informational (CDN=%s, FIX #5)\n", u, cdn)
 			}
 			if s.TriageAndScore(ctx, "HTTP Request Smuggling", u, combined, f,
 				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
@@ -1232,7 +1252,7 @@ type PrototypePollutionPhase struct{}
 
 func (p *PrototypePollutionPhase) Name() string { return "Prototype Pollution Scan" }
 func (p *PrototypePollutionPhase) Description() string {
-	return "nuclei prototype pollution templates"
+	return "nuclei prototype-pollution templates + ppmap dedicated PP prober (V12.1)"
 }
 func (p *PrototypePollutionPhase) Execute(ctx context.Context, s *engine.State) error {
 	urlsFile := filepath.Join(s.OutputFolder, "nuclei_targets.txt")
@@ -1275,6 +1295,35 @@ func (p *PrototypePollutionPhase) Execute(ctx context.Context, s *engine.State) 
 		s.Printf("│  Proto Pollution: %d finding(s) kept\n", count)
 	} else {
 		s.Printf("│  Proto Pollution: SKIP (%v)\n", res.Err)
+	}
+
+	// ── V12.1 Section 3: ppmap dedicated prototype-pollution prober ──────
+	// nuclei's generic PP templates miss client-side gadget chains; ppmap
+	// (kleiton0x00/ppmap) actively confirms the sink. Probe a bounded set of
+	// live URLs and record confirmed hits.
+	if _, err := runner.ResolveToolPath("ppmap"); err == nil {
+		ppKept := 0
+		for _, u := range budget(readNonEmptyLines(urlsFile), 40) {
+			if s.IsWAFProtected(u) {
+				continue
+			}
+			s.Governor.Throttle()
+			if !runPPmap(ctx, u) {
+				continue
+			}
+			f := map[string]interface{}{
+				"title": "Prototype Pollution", "severity": "High",
+				"url": u, "tool": "ppmap", "evidence": "ppmap confirmed pollutable sink",
+				"http_confirmed": true, "specific_pattern": true,
+			}
+			if s.TriageAndScore(ctx, "Prototype Pollution", u, "ppmap-confirmed", f,
+				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
+				ppKept++
+			}
+		}
+		if ppKept > 0 {
+			s.Printf("│  ppmap: %d prototype-pollution sink(s) confirmed\n", ppKept)
+		}
 	}
 	return nil
 }

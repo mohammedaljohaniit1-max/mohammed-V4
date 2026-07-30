@@ -115,7 +115,7 @@ func (p *APIHunterPhase) Execute(ctx context.Context, s *engine.State) error {
 			Exploitable:            f.Exploitable,
 			SkipReproduce:          true, // the engine already proved the effect once (PoE)
 		}, "API: "+f.Type, f.Severity, map[string]interface{}{
-			"api_class":    string(f.Class),
+			"api_class":     string(f.Class),
 			"secret_weapon": "API Hunter (#1)",
 		})
 	}
@@ -288,6 +288,28 @@ func (p *JSDeepAnalysisPhase) Execute(ctx context.Context, s *engine.State) erro
 		}
 	}
 
+	// V12.1 UPGRADE Phase 15: flag /api//graphql endpoints for the API Hunter
+	// and /admin//internal endpoints as high-priority auth targets. API targets
+	// already ride the corpus above; auth targets are promoted onto
+	// PriorityTargets so the auth/IDOR phases hit weaker internal surfaces first.
+	apiTargets, authTargets := exploit.APIHunterTargets(findings)
+	flaggedAPI, flaggedAuth := 0, 0
+	for _, ep := range apiTargets {
+		if full := absolutize(ep, s); full != "" && filter.IsInScope(full, s.Scope) {
+			s.URLs = append(s.URLs, full) // ensure API Hunter's apiCandidates() sees it
+			flaggedAPI++
+		}
+	}
+	for _, ep := range authTargets {
+		if full := absolutize(ep, s); full != "" && filter.IsInScope(full, s.Scope) {
+			s.PriorityTargets = append(s.PriorityTargets, full)
+			flaggedAuth++
+		}
+	}
+	if flaggedAPI > 0 || flaggedAuth > 0 {
+		s.Printf("│  JS Deep: flagged %d API-Hunter endpoint(s), %d high-priority auth endpoint(s) [UPGRADE Phase 15]\n", flaggedAPI, flaggedAuth)
+	}
+
 	secrets, others := 0, 0
 	for _, f := range findings {
 		if f.Kind == "Secret" {
@@ -297,13 +319,13 @@ func (p *JSDeepAnalysisPhase) Execute(ctx context.Context, s *engine.State) erro
 				sev = "High"
 			}
 			a.storeCandidate(ctx, s, validation.Candidate{
-				Type:                "JS Hardcoded Secret",
-				URL:                 f.SourceURL,
-				Evidence:            fmt.Sprintf("%s in %s (entropy=%.2f, %s): %s", f.Provider, f.SourceURL, f.Entropy, f.Confidence, redact(f.Value)),
-				RequiresPrivateData: false,
+				Type:                   "JS Hardcoded Secret",
+				URL:                    f.SourceURL,
+				Evidence:               fmt.Sprintf("%s in %s (entropy=%.2f, %s): %s", f.Provider, f.SourceURL, f.Entropy, f.Confidence, redact(f.Value)),
+				RequiresPrivateData:    false,
 				RequiresExploitability: true,
-				Exploitable:         f.Confidence == "high",
-				SkipReproduce:       true,
+				Exploitable:            f.Confidence == "high",
+				SkipReproduce:          true,
 			}, "JS: Hardcoded Secret", sev, map[string]interface{}{
 				"provider":      f.Provider,
 				"entropy":       f.Entropy,
