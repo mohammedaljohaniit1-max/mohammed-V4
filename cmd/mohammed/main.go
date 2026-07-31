@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
@@ -25,11 +26,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                     V12.1 ZERO-TOLERANCE | Zero-Touch Autonomous Attack & Discovery Engine
+                     V12.2 PROCESS-CRISIS | Zero-Touch Autonomous Attack & Discovery Engine
 `
 
 const helpText = `
-MOHAMMED V12.1 ZERO-TOLERANCE — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], 45 recon/vuln tools incl. V12.1 modern set [chaos/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, 15-min streaming Amass v5 + chaos backup, adaptive 429/WAF stealth shield)
+MOHAMMED V12.2 PROCESS-CRISIS — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], 45 recon/vuln tools incl. modern set [chaos/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, adaptive 429/WAF stealth shield. V12.2 PROCESS-CRISIS: per-phase hard timeouts + host sampling, ProcessRegistry guaranteed child-group kill [zero orphans], dual-signal Ctrl+C [graceful→force], --skip/--only phase selection, built-in --scope gitlab|github [//go:embed], '!' out-of-scope exclude parsing [zero scope pollution], amass -o file ingest + auto-remove, Burp smart proxy gate [high-value-only + rate-limit + burp_scope.json])
 
 USAGE:
   ./mohammed <command> [flags]
@@ -66,16 +67,28 @@ TARGET SIZING RECOMMENDATIONS:
      👉 ./mohammed scan -s scope.txt -c config.yaml --profile passive
 
 SCAN FLAGS:
-  -s, --scope     string   Path to scope file (required)
+  -s, --scope     string   Path to scope file, OR a built-in name: gitlab | github (required)
   -c, --config    string   Path to config.yaml file with API keys (default: config.yaml)
   --profile       string   Scan profile: small | medium | large | passive (default: medium)
   --burp          string   Burp Suite proxy URL (e.g. http://172.30.48.1:8080)
   --resume        string   Resume an interrupted scan: 'auto' (latest in output/) or path to checkpoint.json
   --debug         bool     Print the exact command + input/output line counts for every tool call
-  --skip          int      Skip to phase number (0 = start from beginning)
+  --skip          string   V12.2: comma/range list of phase NUMBERS to skip (e.g. 4,12,20 or 12-20)
+  --only          string   V12.2: run ONLY these phase numbers (e.g. 13,14,15 or 13-15) — overrides --skip
+  --startat       int      Skip to phase number N (0 = start from beginning) [was: --skip in V12.1]
   --threads       int      Global thread count (default: 30)
   --rate          int      Requests per minute (default: 150)
   --output        string   Output directory (default: output/)
+
+V12.2 PROCESS-CRISIS NOTES:
+  • Every phase now has a HARD wall-clock timeout (Port Scanning capped at 15m);
+    on timeout all child process groups are SIGKILLed and the scan proceeds with
+    partial results — no more 4h38m Phase 12.
+  • Ctrl+C is DUAL-SIGNAL: 1st press = graceful checkpoint + kill all children
+    (10s deadline); 2nd press = force-quit immediately.
+  • '!host' (or '-host') lines in a scope file are OUT OF SCOPE and are NEVER
+    enumerated (fixes the scope-pollution collapse).
+  • Built-in scopes ship in the binary: --scope gitlab / --scope github.
 `
 
 var allTools = []string{
@@ -179,7 +192,12 @@ func runScan(args []string) {
 	fs.StringVar(configFile, "config", "config.yaml", "Config file path with API keys")
 	profile := fs.String("profile", "medium", "Scan profile: small | medium | large | passive")
 	burp := fs.String("burp", "", "Burp Suite proxy URL")
-	skip := fs.Int("skip", 0, "Skip to phase number")
+	// V12.2 · FAILURE #5: --skip now takes a phase LIST/RANGE (mandate §2.5),
+	// e.g. "4,12,20" or "12-20". --only runs EXCLUSIVELY the listed phases.
+	// --startat preserves the old numeric "skip to phase N" behavior.
+	skipPhases := fs.String("skip", "", "Comma/range list of phase numbers to skip (e.g. 4,12,20 or 12-20)")
+	onlyPhases := fs.String("only", "", "Run ONLY these phase numbers (e.g. 13,14,15)")
+	startAt := fs.Int("startat", 0, "Skip to phase number (0 = start from beginning)")
 	threads := fs.Int("threads", 30, "Thread count")
 	rate := fs.Int("rate", 150, "Rate limit (req/min)")
 	output := fs.String("output", "output", "Output directory")
@@ -192,14 +210,22 @@ func runScan(args []string) {
 	runner.SetDebug(*debug)
 
 	if *scopeFile == "" {
-		fmt.Println("[!] Error: scope file required. Use -s scope.txt")
+		fmt.Printf("[!] Error: scope required. Use -s scope.txt or a built-in name (--scope %s)\n",
+			strings.Join(config.BuiltinScopeNames(), "|"))
 		os.Exit(1)
 	}
 
-	scope, err := config.LoadScope(*scopeFile)
+	// V12.2 §2.4: `--scope gitlab` resolves to a built-in embedded scope (with
+	// the correct '!' out-of-scope excludes baked in); anything that looks like
+	// a path is loaded from disk as before.
+	scope, builtin, err := config.ResolveScope(*scopeFile)
 	if err != nil {
 		fmt.Printf("[!] Failed to load scope: %v\n", err)
 		os.Exit(1)
+	}
+	if builtin {
+		fmt.Printf("[+] Using built-in scope: %s (%d in-scope, %d excluded)\n",
+			*scopeFile, len(scope.Domains)+len(scope.IPs), len(scope.ExcludeDomains))
 	}
 	if len(scope.Domains) == 0 && len(scope.IPs) == 0 {
 		fmt.Println("[!] Scope file is empty or has no valid targets")
@@ -262,6 +288,15 @@ func runScan(args []string) {
 	config.EnsureDir(*output)
 
 	state := engine.NewState(cfg, scope)
+
+	// V12.2 · FAILURE #5: wire --skip / --only phase selection into State so the
+	// orchestrator's ShouldRunPhase() gate can honor per-phase skip/only lists
+	// and ranges (mandate §2.5). This is what makes a --resume actually SKIP the
+	// already-completed / hung phases instead of re-running Phase 12 from scratch.
+	state.SetPhaseSelection(
+		engine.ParsePhaseList(*skipPhases),
+		engine.ParsePhaseList(*onlyPhases),
+	)
 
 	// ── RESUME: load a checkpoint and restore progress (FLAW #2) ──────────────
 	if *resume != "" {
@@ -430,7 +465,7 @@ func runScan(args []string) {
 	}
 
 	for i, p := range allPhases {
-		if i < *skip {
+		if i < *startAt {
 			continue
 		}
 
@@ -454,13 +489,44 @@ func runScan(args []string) {
 		os.WriteFile(filepath.Join(state.OutputFolder, "config.yaml"), data, 0644)
 	}
 
+	// V12.2 · FAILURE #4: DUAL-SIGNAL Ctrl+C handler. The old handler ignored
+	// 30+ Ctrl+C presses and hung 2+ minutes because it only cancelled the
+	// context and never killed the child process groups (naabu/amass/etc.), so
+	// the phases kept blocking on I/O from processes that were still running.
+	//
+	// New behavior (mandate §FAILURE #4):
+	//   1st SIGINT/SIGTERM → GRACEFUL: cancel context, immediately kill ALL
+	//        registered child process groups (runner.KillAllChildren), and give
+	//        the graceful checkpoint save a HARD 10s deadline. If it doesn't
+	//        finish in 10s we force-exit anyway.
+	//   2nd SIGINT/SIGTERM → FORCE: kill children again and os.Exit(1) NOW.
 	ctx, cancel := context.WithCancel(context.Background())
-	sigCh := make(chan os.Signal, 1)
+	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
+		// First signal — graceful shutdown.
 		<-sigCh
-		fmt.Println("\n\n[!] Scan interrupted by user. Saving progress...")
+		fmt.Println("\n\n[!] Interrupt received. Killing child processes and saving progress...")
+		fmt.Println("    (press Ctrl+C again to force-quit immediately)")
 		cancel()
+		killed := runner.KillAllChildren()
+		if killed > 0 {
+			fmt.Printf("    [+] Terminated %d child process group(s).\n", killed)
+		}
+
+		// Hard 10s deadline: if graceful shutdown hasn't completed, force-exit.
+		deadline := time.NewTimer(10 * time.Second)
+		select {
+		case <-sigCh:
+			// Second signal — force-quit NOW.
+			fmt.Println("\n[!] Force quit. Terminating immediately.")
+			runner.KillAllChildren()
+			os.Exit(1)
+		case <-deadline.C:
+			fmt.Println("\n[!] Graceful shutdown exceeded 10s deadline — force-exiting.")
+			runner.KillAllChildren()
+			os.Exit(1)
+		}
 	}()
 
 	fmt.Printf("[+] Target Sizing Profile Selected: [%s]\n", strings.ToUpper(activeProfile))

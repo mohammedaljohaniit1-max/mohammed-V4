@@ -993,8 +993,8 @@ check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
 # Version bump (V11.0 FINAL SOVEREIGN supersedes V10.0 SOVEREIGN)
 check_grep cmd/mohammed/main.go 'V11.0 FINAL SOVEREIGN' \
     "main.go: V11.0 FINAL SOVEREIGN banner present" "main.go: version NOT bumped to V11.0"
-check_grep pkg/engine/engine.go 'MOHAMMED V12.1 ZERO-TOLERANCE Engine Started' \
-    "engine.go: V12.1 ZERO-TOLERANCE startup banner present" "engine.go: startup banner NOT bumped to V12.1"
+check_grep pkg/engine/engine.go 'MOHAMMED V12.2 PROCESS-CRISIS Engine Started' \
+    "engine.go: V12.2 PROCESS-CRISIS startup banner present" "engine.go: startup banner NOT bumped to V12.2"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # V9.0 ABSOLUTE APEX checks
@@ -1608,13 +1608,137 @@ check_grep pkg/phases/modern_tools_test.go 'func TestModernTools_' \
 check_grep pkg/engine/readiness_test.go 'TestReconTools_V121ModernToolsPresent' \
     "readiness: V12.1 modern-tool inventory test present" "readiness V12.1 test MISSING"
 
-hdr "V12.1 ZERO-TOLERANCE — Version + Docs Bump"
-check_grep cmd/mohammed/main.go 'V12.1' \
-    "main.go: V12.1 banner present" "main.go: version NOT bumped to V12.1"
-check_grep pkg/engine/engine.go 'V12.1' \
-    "engine.go: V12.1 startup banner present" "engine.go: banner NOT bumped to V12.1"
-check_grep README.md 'V12.1' \
-    "README.md: V12.1 title present" "README.md: version NOT bumped to V12.1"
+hdr "V12.2 PROCESS-CRISIS — Version + Docs Bump"
+check_grep cmd/mohammed/main.go 'V12.2 PROCESS-CRISIS' \
+    "main.go: V12.2 banner present" "main.go: version NOT bumped to V12.2"
+check_grep pkg/engine/engine.go 'V12.2 PROCESS-CRISIS' \
+    "engine.go: V12.2 startup banner present" "engine.go: banner NOT bumped to V12.2"
+check_grep README.md 'V12.2 PROCESS-CRISIS' \
+    "README.md: V12.2 title present" "README.md: version NOT bumped to V12.2"
+check_grep config.yaml 'V12.2 PROCESS-CRISIS' \
+    "config.yaml: V12.2 header present" "config.yaml: version NOT bumped to V12.2"
+check_grep setup.sh 'V12.2 PROCESS-CRISIS' \
+    "setup.sh: V12.2 completion message present" "setup.sh: version NOT bumped to V12.2"
+check_grep RESPONSIBLE_DISCLOSURE.md 'V12.2 PROCESS-CRISIS' \
+    "RESPONSIBLE_DISCLOSURE.md: V12.2 title present" "RESPONSIBLE_DISCLOSURE.md: version NOT bumped to V12.2"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# V12.2 PROCESS-CRISIS — the 6 tested process fixes + 6 mandated features
+# ══════════════════════════════════════════════════════════════════════════════
+
+hdr "V12.2 FAILURE #1 — Amass -o file ingest + auto-remove"
+check_grep pkg/phases/phases.go 'func ingestAmassFile' \
+    "amass: ingestAmassFile() reads -o output file" "amass: ingestAmassFile MISSING"
+check_grep pkg/phases/phases.go 'amassGiveUpAfter' \
+    "amass: auto-remove threshold (amassGiveUpAfter) present" "amass: auto-remove threshold MISSING"
+check_grep pkg/phases/phases.go '"-o"' \
+    "amass: -o FILE flag passed (reads file, not stdout)" "amass: -o FILE flag MISSING"
+check_grep pkg/phases/amass_test.go 'TestV122_IngestAmassFile' \
+    "amass: ingest regression test present" "amass: ingest test MISSING"
+
+hdr "V12.2 FAILURE #2 — ProcessRegistry (zero orphans)"
+check_file "pkg/runner/registry.go"
+check_grep pkg/runner/registry.go 'ProcessRegistry\) KillAll' \
+    "registry: KillAll() present" "registry: KillAll MISSING"
+check_grep pkg/runner/registry.go 'func KillAllChildren' \
+    "registry: KillAllChildren() package fn present" "registry: KillAllChildren MISSING"
+check_grep pkg/runner/registry.go 'syscall[.]Kill[(]-' \
+    "registry: kills whole process GROUP (negative pgid)" "registry: group-kill MISSING"
+check_grep pkg/runner/runner.go 'globalRegistry.Register' \
+    "runner: registers child pgid after Start" "runner: pgid registration MISSING"
+check_grep pkg/runner/registry_test.go 'NoOrphanAfterReturn' \
+    "registry: zero-orphan regression test present" "registry: zero-orphan test MISSING"
+
+hdr "V12.2 FAILURE #3 — Per-phase hard timeout + host sampling"
+check_file "pkg/engine/phase_timeout.go"
+check_grep pkg/engine/phase_timeout.go 'func PhaseTimeout' \
+    "timeout: PhaseTimeout() lookup present" "timeout: PhaseTimeout MISSING"
+check_grep pkg/engine/phase_timeout.go '"Port Scanning": *15' \
+    "timeout: Port Scanning capped at 15m" "timeout: Port Scanning cap MISSING"
+check_grep pkg/engine/engine.go 'WithTimeout[(]ctx, phaseTO[)]' \
+    "engine: orchestrator enforces per-phase timeout" "engine: per-phase timeout NOT enforced"
+check_grep pkg/engine/engine.go 'runner.KillAllChildren()' \
+    "engine: kills children on phase timeout" "engine: child-kill on timeout MISSING"
+check_grep pkg/phases/phases.go 'func SampleHosts' \
+    "sampling: SampleHosts() present" "sampling: SampleHosts MISSING"
+check_grep pkg/phases/phases.go 'portScanMaxHosts' \
+    "sampling: portScanMaxHosts cap present" "sampling: host cap MISSING"
+check_grep pkg/phases/phases.go '\-top-ports' \
+    "portscan: naabu -top-ports flag present" "portscan: -top-ports MISSING"
+check_grep pkg/phases/portscan_sampling_test.go 'TestV122_SampleHosts' \
+    "sampling: SampleHosts regression test present" "sampling: SampleHosts test MISSING"
+check_grep pkg/engine/phase_timeout_test.go 'EnforcesPhaseTimeout' \
+    "timeout: orchestrator-enforcement test present" "timeout: enforcement test MISSING"
+
+hdr "V12.2 FAILURE #4 — Dual-signal Ctrl+C"
+check_grep cmd/mohammed/main.go 'again to force-quit' \
+    "signal: dual-signal graceful/force handler present" "signal: dual-signal handler MISSING"
+check_grep cmd/mohammed/main.go 'os[.]Exit[(]1[)]' \
+    "signal: 2nd signal force-exits" "signal: force-exit MISSING"
+check_grep cmd/mohammed/main.go 'runner.KillAllChildren()' \
+    "signal: Ctrl+C kills all child groups" "signal: child-kill on Ctrl+C MISSING"
+check_grep cmd/mohammed/main.go '10 \* time.Second' \
+    "signal: 10s graceful deadline present" "signal: 10s deadline MISSING"
+
+hdr "V12.2 FAILURE #5 — --skip / --only phase selection"
+check_file "pkg/engine/phase_select.go"
+check_grep pkg/engine/phase_select.go 'func ParsePhaseList' \
+    "select: ParsePhaseList() (comma+range) present" "select: ParsePhaseList MISSING"
+check_grep pkg/engine/phase_select.go 'State\) ShouldRunPhase' \
+    "select: ShouldRunPhase() present" "select: ShouldRunPhase MISSING"
+check_grep cmd/mohammed/main.go 'SetPhaseSelection' \
+    "select: --skip/--only wired into State" "select: selection NOT wired"
+check_grep cmd/mohammed/main.go 'fs[.]String[(]"only"' \
+    "select: --only flag present" "select: --only flag MISSING"
+check_grep pkg/engine/engine.go 'ShouldRunPhase[(]phaseNum[)]' \
+    "select: orchestrator honors ShouldRunPhase" "select: orchestrator gate MISSING"
+check_grep pkg/engine/phase_select_test.go 'TestV122_ParsePhaseList' \
+    "select: ParsePhaseList regression test present" "select: ParsePhaseList test MISSING"
+
+hdr "V12.2 FAILURE #6 — '!' out-of-scope exclude parsing"
+check_grep pkg/config/config.go 'HasPrefix[(]line, "!"' \
+    "scope: '!' parsed as EXCLUDE (not target)" "scope: '!' exclude parsing MISSING"
+check_grep pkg/config/config.go 'func FilterExcluded' \
+    "scope: FilterExcluded() present" "scope: FilterExcluded MISSING"
+check_grep pkg/config/config.go 'func ApexDomainsForEnum' \
+    "scope: ApexDomainsForEnum() (never enumerates excludes)" "scope: ApexDomainsForEnum MISSING"
+check_grep pkg/phases/phases.go 'ApexDomainsForEnum' \
+    "scope: enum phases use ApexDomainsForEnum" "scope: enum still uses raw apexes"
+check_grep pkg/config/config_test.go 'TestV122_LoadScope_BangExcludes' \
+    "scope: '!' exclude regression test present" "scope: '!' exclude test MISSING"
+
+hdr "V12.2 §2.4 — Built-in embedded scopes (--scope gitlab|github)"
+check_file "pkg/config/scopes.go"
+check_file "pkg/config/scopes/gitlab.txt"
+check_file "pkg/config/scopes/github.txt"
+check_grep pkg/config/scopes.go 'go:embed scopes' \
+    "scopes: //go:embed scopes/*.txt present" "scopes: embed directive MISSING"
+check_grep pkg/config/scopes.go 'func ResolveScope' \
+    "scopes: ResolveScope() name-vs-path present" "scopes: ResolveScope MISSING"
+check_grep cmd/mohammed/main.go 'config.ResolveScope' \
+    "scopes: --scope wired to ResolveScope" "scopes: ResolveScope NOT wired"
+check_grep pkg/config/scopes/gitlab.txt '!service-now.com' \
+    "scopes: gitlab built-in excludes service-now.com" "scopes: gitlab exclude MISSING"
+check_grep pkg/config/scopes_test.go 'TestV122_LoadBuiltinScope' \
+    "scopes: built-in scope regression test present" "scopes: built-in scope test MISSING"
+
+hdr "V12.2 §2.6 — Burp smart proxy gate"
+check_file "pkg/proxy/smartgate.go"
+check_grep pkg/proxy/smartgate.go 'func EvaluateBurpForward' \
+    "burpgate: EvaluateBurpForward() decision present" "burpgate: decision fn MISSING"
+check_grep pkg/proxy/smartgate.go 'func NewSmartGate' \
+    "burpgate: SmartGate (rate-limit + counters) present" "burpgate: SmartGate MISSING"
+check_grep pkg/proxy/smartgate.go 'proxied, " ' \
+    "burpgate: 'Burp: X proxied, Y filtered' counter line present" "burpgate: counter line MISSING"
+check_grep pkg/proxy/smartgate.go 'burp_scope.json' \
+    "burpgate: burp_scope.json export present" "burpgate: scope export MISSING"
+check_grep pkg/proxy/smartgate_test.go 'TestV122_EvaluateBurpForward' \
+    "burpgate: forward/drop regression test present" "burpgate: gate test MISSING"
+
+hdr "V12.2 — Go build gates (tests compile + run)"
+if go build ./... >/dev/null 2>&1; then pass "go build ./... — 0 errors"; else fail "go build ./... — BUILD ERRORS"; fi
+if go vet ./... >/dev/null 2>&1; then pass "go vet ./... — 0 warnings"; else fail "go vet ./... — VET WARNINGS"; fi
+if go test ./... >/dev/null 2>&1; then pass "go test ./... — all packages pass"; else fail "go test ./... — TEST FAILURES"; fi
 
 # ── Final Summary ─────────────────────────────────────────────────────
 echo ""

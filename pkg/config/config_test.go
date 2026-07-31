@@ -1,8 +1,10 @@
 package config
 
 import (
+	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -126,4 +128,107 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V12.2 PROCESS CRISIS · FAILURE #6 — Scope Pollution regression tests
+// ---------------------------------------------------------------------------
+// The live GitLab scope file marks out-of-scope targets with a leading '!'.
+// V12.1's parser only recognized '-', so `!service-now.com` was stored as a
+// TARGET and enumerated (6,879 out-of-scope subdomains, 3-hour Phase 12). These
+// tests lock in that '!' excludes are parsed and NEVER enter enumeration.
+// ═══════════════════════════════════════════════════════════════════════════
+
+func TestV122_LoadScope_BangExcludes(t *testing.T) {
+	dir := t.TempDir()
+	scopePath := dir + "/scope_gitlab.txt"
+	content := `# GitLab scope
+gitlab.com
+*.gitlab.org
+*.gitlab.net
+!us-federal-gitlab.com
+!gitlabtraining.cloud
+!*.service-now.com
+!*.gitlab.cn
+!*.gitlab-private.org
+-legacy-exclude.com
+`
+	if err := os.WriteFile(scopePath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := LoadScope(scopePath)
+	if err != nil {
+		t.Fatalf("LoadScope: %v", err)
+	}
+
+	// The '!' lines must be EXCLUDES, not target domains.
+	for _, d := range sc.Domains {
+		if strings.HasPrefix(d, "!") || strings.Contains(d, "service-now") ||
+			strings.Contains(d, "gitlab.cn") || strings.Contains(d, "gitlabtraining") {
+			t.Fatalf("excluded/out-of-scope domain leaked into targets: %q (Domains=%v)", d, sc.Domains)
+		}
+	}
+
+	wantExcluded := []string{
+		"us-federal-gitlab.com", "gitlabtraining.cloud", "service-now.com",
+		"gitlab.cn", "gitlab-private.org", "legacy-exclude.com",
+	}
+	for _, w := range wantExcluded {
+		if !IsExcludedHost(w, sc.ExcludeDomains) {
+			t.Fatalf("expected %q to be excluded, ExcludeDomains=%v", w, sc.ExcludeDomains)
+		}
+	}
+	// Wildcard exclude must cover subdomains too.
+	if !IsExcludedHost("foo.service-now.com", sc.ExcludeDomains) {
+		t.Fatalf("subdomain of excluded apex must be excluded")
+	}
+	// In-scope target must NOT be excluded.
+	if IsExcludedHost("gitlab.com", sc.ExcludeDomains) {
+		t.Fatalf("gitlab.com must remain in scope")
+	}
+}
+
+func TestV122_ApexDomainsForEnum_DropsExcluded(t *testing.T) {
+	// Simulates the exact GitLab log: in-scope apexes PLUS out-of-scope apexes
+	// that leaked in via derived/OSINT hosts. Only the in-scope apexes may be
+	// fed to the enumeration tools.
+	domains := []string{
+		"gitlab.com", "registry.gitlab.com", "docs.gitlab.com",
+		"service-now.com", "biterg.io", "gitlab.cn", "gitlab-private.org",
+	}
+	excludes := []string{"service-now.com", "biterg.io", "gitlab.cn", "gitlab-private.org"}
+
+	got := ApexDomainsForEnum(domains, excludes)
+	for _, g := range got {
+		if IsExcludedHost(g, excludes) {
+			t.Fatalf("excluded apex %q was returned for enumeration: %v", g, got)
+		}
+	}
+	// gitlab.com must survive.
+	found := false
+	for _, g := range got {
+		if g == "gitlab.com" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("in-scope apex gitlab.com missing from enum list: %v", got)
+	}
+}
+
+func TestV122_FilterExcluded(t *testing.T) {
+	hosts := []string{
+		"api.gitlab.com", "foo.service-now.com", "gitlab.com",
+		"x.gitlab.cn", "docs.gitlab.com",
+	}
+	excludes := []string{"service-now.com", "gitlab.cn"}
+	got := FilterExcluded(hosts, excludes)
+	for _, g := range got {
+		if strings.Contains(g, "service-now") || strings.Contains(g, "gitlab.cn") {
+			t.Fatalf("excluded host survived FilterExcluded: %q", g)
+		}
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 in-scope hosts, got %d (%v)", len(got), got)
+	}
 }

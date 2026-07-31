@@ -1,6 +1,35 @@
-# MOHAMMED V12.1 ZERO-TOLERANCE
+# MOHAMMED V12.2 PROCESS-CRISIS
 
 **Zero-Touch Autonomous Attack Surface & Exploit Engine — THE FINAL MANDATE**
+
+---
+
+## 🚨 What's New in V12.2 PROCESS-CRISIS
+
+An 8-hour GitLab scan collapsed: Phase 12 (Port Scanning) ran with **no
+timeout** for 4h38m, an orphaned amass process burned 90% CPU for 3 hours
+*after* its phase ended, Ctrl+C was ignored 30+ times, a `--resume` re-ran the
+broken phase from scratch, and `!`-prefixed out-of-scope domains
+(`!service-now.com`, `!gitlab.cn`) were enumerated — 6,879 out-of-scope subs
+inflating the host count to 14,728. V12.2 is the forensic response — **6
+empirically-diagnosed process fixes, each shipped with a Go regression test:**
+
+| # | Failure (proven by logs) | Fix (proven by test) |
+|---|---|---|
+| 1 | Amass v5 returns 0 (7th version); "error" was its ASCII banner | `amass -o FILE` + `ingestAmassFile()`; auto-remove after 2 zero-runs (`amassGiveUpAfter`) |
+| 2 | Orphaned amass burned 90% CPU 3h **after** its phase ended | `ProcessRegistry` + `Setpgid` + `syscall.Kill(-pgid, SIGKILL)`; guaranteed `KillAll()`; **zero-orphan** test |
+| 3 | Phase 12 had NO timeout → 4h38m | Per-phase **hard timeout map** (Port Scanning = 15m) + `SampleHosts()` cap 1000 + naabu `-top-ports 100` |
+| 4 | Ctrl+C ignored 30+ times, hung 2 min | **Dual-signal** handler: 1st = graceful checkpoint + kill children (10s deadline); 2nd = force `os.Exit(1)` |
+| 5 | `--resume` re-ran the broken phase from scratch | `--skip` / `--only` accepting `4,12,20` and `12-20`; `ShouldRunPhase()` |
+| 6 | `!`-excluded domains were enumerated (scope pollution) | Parse `!`/`-` as **EXCLUDE**; `FilterExcluded` after every phase; `ApexDomainsForEnum` never enumerates excludes |
+
+**Plus mandated features:** per-phase timeout map (§2.1), `sampleHosts()` (§2.2),
+`ProcessRegistry.KillAll()` (§2.3), built-in `--scope gitlab|github` via
+`//go:embed` (§2.4), `--skip`/`--only` phase selection (§2.5), and a **Burp smart
+proxy gate** that forwards only high-value traffic (params/API/auth/admin/upload/
+non-404/crawl-sourced), drops noise (static assets/404/CDN-errors/out-of-scope),
+rate-limits to 10 req/s, logs `Burp: X proxied, Y filtered`, and exports
+`burp_scope.json` (§2.6).
 
 > **MOHAMMED V12.0 OMEGA** is an authorized-testing / HackerOne bug-bounty
 > reconnaissance and exploitation framework written in a single, self-contained

@@ -1137,7 +1137,7 @@ func (p *EmailSecurityPhase) Execute(ctx context.Context, s *engine.State) error
 	emailOut := filepath.Join(s.OutputFolder, "email_security.txt")
 	var results []string
 
-	for _, domain := range config.ExtractApexDomains(s.Scope.Domains) {
+	for _, domain := range config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains) {
 		res := runner.RunTool(ctx, "dig", []string{"+short", "TXT", domain}, nil)
 		hasSPF := res.OK() && strings.Contains(res.Stdout, "v=spf1")
 

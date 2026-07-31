@@ -283,6 +283,27 @@ func runToolInternal(ctx context.Context, toolName string, args []string, env ma
 		}
 	}
 
+	// V12.2 · FAILURE #2 FIX: register this child's process group with the
+	// global registry the instant it starts. Because we launched it with
+	// Setpgid=true, the child's pid IS its pgid. Any shutdown path (Ctrl+C,
+	// per-phase timeout, program exit) can now SIGKILL -pgid for EVERY live
+	// group via runner.KillAllChildren(), so an amass/naabu process can never
+	// again outlive the phase that spawned it (the 90%-CPU-for-3-hours bug).
+	pgid := 0
+	if cmd.Process != nil {
+		pgid = cmd.Process.Pid // pid == pgid under Setpgid=true
+		globalRegistry.Register(pgid)
+	}
+	// Guaranteed cleanup: on EVERY return path deregister and, as a belt-and-
+	// braces safety net, kill the group if it somehow survived (a normal exit
+	// makes the SIGKILL a harmless no-op on an already-dead pgid).
+	defer func() {
+		if pgid > 0 {
+			globalRegistry.Deregister(pgid)
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}()
+
 	// Wait for process to finish OR context/timeout to expire
 	done := make(chan error, 1)
 	go func() {
@@ -305,9 +326,9 @@ func runToolInternal(ctx context.Context, toolName string, args []string, env ma
 		// Timeout or cancellation — kill the ENTIRE process group so orphaned
 		// children (amass/bbot spawn many) are reaped, not just the parent.
 		if cmd.Process != nil {
-			pgid, pgErr := syscall.Getpgid(cmd.Process.Pid)
+			pg, pgErr := syscall.Getpgid(cmd.Process.Pid)
 			if pgErr == nil {
-				_ = syscall.Kill(-pgid, syscall.SIGKILL)
+				_ = syscall.Kill(-pg, syscall.SIGKILL)
 			} else {
 				_ = cmd.Process.Kill()
 			}

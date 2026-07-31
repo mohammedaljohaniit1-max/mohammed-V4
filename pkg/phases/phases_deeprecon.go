@@ -44,7 +44,7 @@ func (p *DeepReconPhase) Description() string {
 }
 
 func (p *DeepReconPhase) Execute(ctx context.Context, s *engine.State) error {
-	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
+	apexDomains := config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains)
 
 	var report []string
 
