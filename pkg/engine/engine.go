@@ -18,6 +18,7 @@ import (
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/governor"
 	"github.com/mohammed-v3/core/pkg/proxy"
+	"github.com/mohammed-v3/core/pkg/runner"
 )
 
 // ─────────────────────────────────────────
@@ -86,6 +87,12 @@ type State struct {
 	// completedSet mirrors CompletedPhases for O(1) skip lookups when resuming.
 	// It is populated from a loaded checkpoint; nil means "resume disabled".
 	completedSet map[string]bool
+
+	// V12.2 · FAILURE #5: --skip / --only phase selection (1-based phase
+	// numbers). SkipPhases lists phases to NOT run; OnlyPhases, when non-empty,
+	// restricts the run to EXACTLY those phases. Consulted by ShouldRunPhase.
+	SkipPhases map[int]bool
+	OnlyPhases map[int]bool
 
 	// PrintMu protects all fmt.Printf calls so the live timer line and
 	// phase output lines do not interleave and corrupt each other.
@@ -520,7 +527,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V12.1 ZERO-TOLERANCE Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V12.2 PROCESS-CRISIS Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up
@@ -556,7 +563,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	// connection-refused → 0 results, silently breaking Phases 07 and 11-27.
 	// We now HARD-DISABLE the proxy in shared State the moment Burp is proven
 	// unreachable, so the whole pipeline falls back to direct networking.
-	if o.State.Proxy.Active {
+	if o.State.Proxy != nil && o.State.Proxy.Active {
 		fmt.Printf("[*] Checking Burp Suite connectivity at %s ... ", o.State.Proxy.ProxyURL)
 		if checkBurp(o.State.Proxy.ProxyURL) {
 			fmt.Printf("✅ Connected — traffic will be intercepted\n")
@@ -670,6 +677,18 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		default:
 		}
 
+		// ── V12.2 · FAILURE #5: honor --skip / --only phase selection ──────
+		// phaseNum is 1-based to match the "Phase NN/MM" labels the operator
+		// sees, so `--skip 12` skips the 12th phase in the run order.
+		phaseNum := i + 1
+		if !o.State.ShouldRunPhase(phaseNum) {
+			o.State.PrintMu.Lock()
+			fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [SKIPPED by user]\n", phaseNum, len(o.Phases), phase.Name())
+			fmt.Printf("└─ ⏭ Skipped (--skip/--only)\n")
+			o.State.PrintMu.Unlock()
+			continue
+		}
+
 		// ── RESUME: skip phases already completed in a loaded checkpoint ──
 		if o.State.IsComplete(phase.Name()) {
 			o.State.PrintMu.Lock()
@@ -690,19 +709,60 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		pLabel := fmt.Sprintf("Phase %02d/%02d: %s", i+1, len(o.Phases), phase.Name())
 		currentTool.Store(pLabel)
 
+		// ── V12.2 · FAILURE #3: per-phase hard wall-clock timeout ──────────
+		// Derive a child context bounded by this phase's cap. When it fires,
+		// the phase's ctx is Done → every runner.RunTool call it launched sees
+		// the cancellation and SIGKILLs its process group, and we additionally
+		// force-reap any surviving groups so a wedged naabu/amass can never run
+		// for hours (the 4h38m Port Scanning bug).
+		phaseTO := PhaseTimeout(phase.Name())
+		phaseCtx, phaseCancel := context.WithTimeout(ctx, phaseTO)
+
 		// Print phase header (with newline BEFORE to clear timer line)
 		o.State.PrintMu.Lock()
-		fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [Elapsed: %02d:%02d:%02d]\n", i+1, len(o.Phases), phase.Name(), h, m, s)
+		fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [Elapsed: %02d:%02d:%02d | cap %s]\n", i+1, len(o.Phases), phase.Name(), h, m, s, fmtDur(phaseTO))
 		fmt.Printf("│  %s\n", phase.Description())
 		o.State.PrintMu.Unlock()
 
-		err := phase.Execute(ctx, o.State)
+		// Run the phase in a goroutine so we can observe the timeout deadline
+		// independently and log a clear "TIMEOUT" line + reap children even if
+		// the phase itself is blocked inside a syscall.
+		phaseErrCh := make(chan error, 1)
+		go func() {
+			phaseErrCh <- phase.Execute(phaseCtx, o.State)
+		}()
+
+		var err error
+		select {
+		case err = <-phaseErrCh:
+			// Phase returned on its own (success, error, or it honored ctx).
+		case <-phaseCtx.Done():
+			if ctx.Err() != nil {
+				// Parent scan cancelled (Ctrl+C) — fall through to the outer
+				// ctx.Done() handling on the next loop iteration; wait for the
+				// phase goroutine to unwind so we don't leak it.
+				err = <-phaseErrCh
+			} else {
+				// The PHASE hit its own hard cap. Force-reap children so no
+				// tool outlives the phase, then proceed with partial results.
+				killed := runner.KillAllChildren()
+				o.State.PrintMu.Lock()
+				fmt.Printf("\r\033[K│  ⏱  TIMEOUT after %s — killed %d child process group(s), proceeding with partial results\n", fmtDur(phaseTO), killed)
+				o.State.PrintMu.Unlock()
+				// Give the goroutine a moment to unwind after cancellation.
+				<-phaseErrCh
+				err = nil // partial results are acceptable; do not fail the scan
+			}
+		}
+		phaseCancel()
 
 		// REPAIR #5: after every phase, close any idle Burp keep-alive
 		// connections so a socket left over from this phase's tool handoff
 		// cannot emit "Unsolicited response on idle HTTP channel" spam while
 		// the next phase runs.
-		o.State.Proxy.CloseIdleConnections()
+		if o.State.Proxy != nil {
+			o.State.Proxy.CloseIdleConnections()
+		}
 
 		phaseDur := time.Since(phaseStart)
 		totalElapsed := time.Since(o.State.StartTime)

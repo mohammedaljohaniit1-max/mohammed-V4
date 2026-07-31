@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -441,7 +442,14 @@ func LoadScope(path string) (*Scope, error) {
 		return nil, fmt.Errorf("cannot open scope file: %w", err)
 	}
 	defer file.Close()
+	return ParseScope(file)
+}
 
+// ParseScope parses scope lines from an io.Reader. LoadScope is the file-backed
+// convenience wrapper. V12.2 §2.4 uses this to parse the built-in embedded
+// scopes (scopes/gitlab.txt, scopes/github.txt) resolved via `--scope gitlab`
+// without touching the filesystem.
+func ParseScope(r io.Reader) (*Scope, error) {
 	// Ordered, deduplicated accumulators. We keep insertion order (nicer output)
 	// while using a set to reject duplicates.
 	domainSet := make(map[string]bool)
@@ -451,7 +459,7 @@ func LoadScope(path string) (*Scope, error) {
 
 	var domains, ips, cidrs, excludes []string
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(r)
 	// Some scope lines (large wordlist-style scopes) can exceed the default 64KB.
 	buf := make([]byte, 0, 1024*1024)
 	scanner.Buffer(buf, 1024*1024)
@@ -462,9 +470,22 @@ func LoadScope(path string) (*Scope, error) {
 			continue
 		}
 
-		// ── Out-of-scope rules prefixed with '-' ──────────────
-		if strings.HasPrefix(line, "-") {
-			clean := normalizeHost(strings.TrimPrefix(line, "-"))
+		// ── Out-of-scope rules prefixed with '-' OR '!' ──────────────
+		//
+		// V12.2 · FAILURE #6 FIX (Scope Pollution). The live GitLab scope file
+		// marks out-of-scope targets with a LEADING '!' (HackerOne/Bugcrowd
+		// convention): `!service-now.com`, `!*.gitlab.cn`, `!gitlabtraining.cloud`.
+		// The V12.1 parser only recognized '-' as the exclude prefix, so every
+		// '!' line fell through into the DEFAULT branch and was stored as a
+		// TARGET domain (`!service-now.com`). Phase 04 then extracted its apex
+		// and ran amass/bbot/findomain against service-now.com — discovering
+		// 6,879 out-of-scope subdomains, inflating the host count to 14,728,
+		// and causing Phase 12 to scan for 3 hours. We now treat BOTH '-' and
+		// '!' as exclude markers, and normalizeHost strips any `*.` wildcard so
+		// `!*.service-now.com` correctly excludes the whole `service-now.com`
+		// zone.
+		if strings.HasPrefix(line, "-") || strings.HasPrefix(line, "!") {
+			clean := normalizeHost(strings.TrimPrefix(strings.TrimPrefix(line, "-"), "!"))
 			if clean != "" && !excludeSet[clean] {
 				excludeSet[clean] = true
 				excludes = append(excludes, clean)
@@ -621,6 +642,67 @@ func ApexOf(domain string) string {
 		}
 	}
 	return strings.Join(labels[len(labels)-2:], ".")
+}
+
+// IsExcludedHost reports whether a host is out-of-scope per the exclude list.
+// A host matches an exclude entry when it EQUALS the entry or is a SUBDOMAIN of
+// it (so `!service-now.com` also excludes `foo.service-now.com`). Matching is
+// case-insensitive and wildcard-tolerant because LoadScope already normalized
+// `!*.service-now.com` → `service-now.com`.
+//
+// V12.2 · FAILURE #6: this is the single authority every phase consults before
+// enumerating or reporting a host, so an excluded domain can never re-enter the
+// pipeline via a derived apex or an OSINT-discovered subdomain.
+func IsExcludedHost(host string, excludes []string) bool {
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if h == "" {
+		return false
+	}
+	for _, ex := range excludes {
+		e := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(ex)), ".")
+		if e == "" {
+			continue
+		}
+		if h == e || strings.HasSuffix(h, "."+e) {
+			return true
+		}
+	}
+	return false
+}
+
+// FilterExcluded returns the subset of hosts that are NOT excluded. It is the
+// "global filter that runs AFTER every phase" mandated by FAILURE #6 step 3.
+func FilterExcluded(hosts []string, excludes []string) []string {
+	if len(excludes) == 0 {
+		return hosts
+	}
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		if !IsExcludedHost(h, excludes) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// ApexDomainsForEnum returns the deduplicated apex/root domains that are SAFE to
+// feed to the passive/active enumeration tools (subfinder/amass/bbot/findomain):
+// it extracts apexes from the in-scope domains and then DROPS any apex that is
+// itself excluded. This is the FAILURE #6 fix at the exact point of the bug —
+// the apex list printed as "Apex/root domains for passive enum" and looped over
+// in Phase 03/04. `!service-now.com`, `!*.gitlab.cn`, etc. never appear here.
+func ApexDomainsForEnum(domains []string, excludes []string) []string {
+	apexes := ExtractApexDomains(domains)
+	if len(excludes) == 0 {
+		return apexes
+	}
+	out := make([]string, 0, len(apexes))
+	for _, a := range apexes {
+		if !IsExcludedHost(a, excludes) {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func EnsureDir(dir string) error {

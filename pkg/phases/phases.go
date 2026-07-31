@@ -125,7 +125,15 @@ func (p *ScopeValidationPhase) Execute(ctx context.Context, s *engine.State) err
 
 	// Warn if we have subdomains but their apex is missing from scope — this
 	// changes how passive enum tools are routed (BUG #2 context).
-	apexes := config.ExtractApexDomains(s.Scope.Domains)
+	//
+	// V12.2 · FAILURE #6: the enum apex list is now built with
+	// ApexDomainsForEnum so EXCLUDED apexes (!service-now.com, !*.gitlab.cn …)
+	// are dropped here at the source. We surface which apexes were excluded so
+	// the operator can SEE the scope filter working (the GitLab scan silently
+	// enumerated service-now.com because the '!' lines were mis-parsed as
+	// targets — that can never happen now).
+	allApexes := config.ExtractApexDomains(s.Scope.Domains)
+	apexes := config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains)
 	inScope := make(map[string]bool)
 	for _, d := range s.Scope.Domains {
 		inScope[d] = true
@@ -135,7 +143,15 @@ func (p *ScopeValidationPhase) Execute(ctx context.Context, s *engine.State) err
 			s.Printf("│    ⚠  Apex '%s' not explicitly in scope but derived from subdomains — used for passive enum only\n", apex)
 		}
 	}
+	for _, apex := range allApexes {
+		if config.IsExcludedHost(apex, s.Scope.ExcludeDomains) {
+			s.Printf("│    ⛔ Apex '%s' EXCLUDED (out-of-scope) — will NOT be enumerated\n", apex)
+		}
+	}
 	s.Printf("│  Apex/root domains for passive enum: %s\n", strings.Join(apexes, ", "))
+	if len(s.Scope.ExcludeDomains) > 0 {
+		s.Printf("│  Excluded (out-of-scope) domains: %s\n", strings.Join(s.Scope.ExcludeDomains, ", "))
+	}
 	return nil
 }
 
@@ -153,7 +169,7 @@ func (p *OSINTPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	// OSINT sources operate on registrable/apex domains only — querying a
 	// subdomain like www.whatnot.com wastes calls and returns nothing useful.
-	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
+	apexDomains := config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains)
 
 	// ── FLAW #3 FIX: parallel async harvester ────────────────────────────────
 	// The old code queried 8 sources STRICTLY SEQUENTIALLY inside a domain loop,
@@ -589,7 +605,7 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 	}
 
 	found := make(map[string]bool)
-	apexDomains := config.ExtractApexDomains(s.Scope.Domains)
+	apexDomains := config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains)
 
 	// Every in-scope entry (apex AND subdomain) is a valid known host and is
 	// seeded into `found` so it is never re-discovered as "new". But the
@@ -664,6 +680,17 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		amassCfg = ensureAmassConfig(s)
 	}
 
+	// ── V12.2 · FAILURE #1 Method 2: auto-REMOVE amass after repeated zeros ─
+	// The mandate: "If amass continues to fail after Method 1, REMOVE IT
+	// ENTIRELY. Replace with chaos-client + subfinder + findomain (which all
+	// work perfectly)." The GitLab log showed amass return 0 on ALL 12 apexes,
+	// burning ~97 minutes. Rather than keep paying that toll every apex, we
+	// track consecutive zero-results and, once amass has failed
+	// amassGiveUpAfter apexes in a row, we STOP invoking it for the rest of the
+	// scan — subfinder + chaos + bbot + findomain fully cover the surface.
+	amassZeroStreak := 0
+	amassGivenUp := false
+
 	// ── Tools that require APEX/root domains ONLY (BUG #2) ────────────
 	for _, domain := range apexDomains {
 		s.Printf("│  [Apex passive enum: %s]\n", domain)
@@ -689,28 +716,44 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		//       instant amass prints it, so a timeout keeps every partial result.
 		//   (d) missing config      — v3 only; handled by amassCfg below.
 		// The streaming runner logs the EXACT error on failure (mandate spec).
-		amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
-		amRes := runAmassStreaming(ctx, domain, amassMajor, amassCfg, amOut, found)
 		verNote := ""
 		if amassMajor > 0 {
 			verNote = fmt.Sprintf(" (v%d)", amassMajor)
 		}
-		switch {
-		case amRes.err != nil && amRes.count == 0:
-			s.Printf("│    amass%s: 0 subdomains — FAILED (%v)\n", verNote, amRes.err)
-			// ── V12.1 ZERO-TOLERANCE · chaos-client backup ────────────────────
-			// Amass has been "fixed" in V7-V12 and STILL returned 0 on Temu. The
-			// mandate: "If Amass STILL cannot be fixed, REMOVE IT and replace with
-			// chaos-client which is faster and more reliable." We keep amass but
-			// AUTOMATICALLY fall back to chaos-client whenever amass yields zero,
-			// so the pipeline never again loses this attack surface.
+		if amassGivenUp {
+			// FAILURE #1 Method 2: amass already proved useless this scan —
+			// skip it and go straight to the reliable chaos backup.
+			s.Printf("│    amass%s: SKIPPED (auto-removed after %d consecutive zero-results — using chaos/subfinder/bbot/findomain)\n", verNote, amassGiveUpAfter)
 			if n := runChaosBackup(ctx, s, domain, found); n > 0 {
-				s.Printf("│    chaos-client: %d subdomains [amass fallback]\n", n)
+				s.Printf("│    chaos-client: %d subdomains [amass replacement]\n", n)
 			}
-		case amRes.timedOut:
-			s.Printf("│    amass%s: %d subdomains [partial — deadline reached, streamed results kept]\n", verNote, amRes.count)
-		default:
-			s.Printf("│    amass%s: %d subdomains [via %s]\n", verNote, amRes.count, amRes.subcmd)
+		} else {
+			amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
+			amRes := runAmassStreaming(ctx, domain, amassMajor, amassCfg, amOut, found)
+			switch {
+			case amRes.err != nil && amRes.count == 0:
+				s.Printf("│    amass%s: 0 subdomains — FAILED (%v)\n", verNote, amRes.err)
+				amassZeroStreak++
+				// ── V12.1 ZERO-TOLERANCE · chaos-client backup ────────────────
+				// Amass has been "fixed" in V7-V12 and STILL returned 0. The
+				// mandate: "If Amass STILL cannot be fixed, REMOVE IT and replace
+				// with chaos-client." We fall back to chaos whenever amass yields
+				// zero, and (Method 2) auto-remove amass entirely once it has
+				// failed amassGiveUpAfter apexes in a row.
+				if n := runChaosBackup(ctx, s, domain, found); n > 0 {
+					s.Printf("│    chaos-client: %d subdomains [amass fallback]\n", n)
+				}
+				if amassZeroStreak >= amassGiveUpAfter {
+					amassGivenUp = true
+					s.Printf("│    ⛔ amass auto-REMOVED for the rest of this scan (%d consecutive zero-results) — mandate FAILURE #1 Method 2\n", amassZeroStreak)
+				}
+			case amRes.timedOut:
+				s.Printf("│    amass%s: %d subdomains [partial — deadline reached, streamed results kept]\n", verNote, amRes.count)
+				amassZeroStreak = 0 // produced results → reset the give-up streak
+			default:
+				s.Printf("│    amass%s: %d subdomains [via %s]\n", verNote, amRes.count, amRes.subcmd)
+				amassZeroStreak = 0
+			}
 		}
 
 		// bbot — apex only. BUG #4 FIX (V6): use the exact proven invocation
@@ -828,6 +871,18 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 	// ── Write final merged subdomains.txt ─────────────────────────────
 	for sub := range found {
 		s.Subdomains = append(s.Subdomains, sub)
+	}
+	// V12.2 · FAILURE #6 step 3 — the global out-of-scope filter that runs
+	// AFTER enumeration. Even if an OSINT source (crt.sh, GitHub, bbot's
+	// wildcard follow) surfaced a host under an EXCLUDED apex (e.g. a
+	// *.service-now.com or *.gitlab.cn record), it is stripped here so it never
+	// reaches DNS resolution, HTTP probing, port scanning, or the report.
+	if len(s.Scope.ExcludeDomains) > 0 {
+		beforeN := len(s.Subdomains)
+		s.Subdomains = config.FilterExcluded(s.Subdomains, s.Scope.ExcludeDomains)
+		if dropped := beforeN - len(s.Subdomains); dropped > 0 {
+			s.Printf("│  ⛔ Out-of-scope filter: removed %d excluded subdomain(s) from the pipeline\n", dropped)
+		}
 	}
 	subFile := filepath.Join(s.OutputFolder, "subdomains.txt")
 	writeLines(subFile, s.Subdomains)
@@ -1127,7 +1182,21 @@ func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amass
 		return amassStreamResult{err: fmt.Errorf("amass not found: %w", err)}
 	}
 
-	// Build the ordered list of (label, args) attempts for this version.
+	// ── V12.2 · FAILURE #1 ROOT-CAUSE FIX — read amass's -o OUTPUT FILE ────
+	// The GitLab log proved amass v5 returned 0 for the 7th consecutive version
+	// with the "error" being amass's own ASCII-ART BANNER captured off stderr.
+	// Root cause (mandate): amass v5.1.x writes discovered subdomains to a FILE
+	// (via -o), and the stdout pipe the code scanned was effectively empty, so
+	// streaming stdout alone found nothing and then surfaced the stderr banner.
+	// The fix is to pass `-o <file>` to EVERY attempt and read that file as the
+	// AUTHORITATIVE result source (stdout streaming is kept as a bonus for
+	// builds that DO print to stdout). amFileOut is a dedicated capture file per
+	// invocation so a stale artifact never masquerades as fresh results.
+	amFileOut := filepath.Join(filepath.Dir(amOut), "amass_raw_"+sanitizeName(domain)+".txt")
+	_ = os.Remove(amFileOut) // start clean so we only read THIS run's output
+
+	// Build the ordered list of (label, args) attempts for this version. Every
+	// attempt now writes to amFileOut with -o (Method 1 from the mandate).
 	type attempt struct {
 		label string
 		args  []string
@@ -1136,18 +1205,18 @@ func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amass
 	switch {
 	case amassMajor == 4:
 		attempts = []attempt{
-			{"enum -passive (v4)", []string{"enum", "-passive", "-d", domain}},
+			{"enum -passive -o (v4)", []string{"enum", "-passive", "-d", domain, "-o", amFileOut}},
 		}
 	case amassMajor > 0 && amassMajor < 4: // v3
-		a3 := []string{"enum", "-passive", "-d", domain}
+		a3 := []string{"enum", "-passive", "-d", domain, "-o", amFileOut}
 		if amassCfg != "" {
 			a3 = append(a3, "-config", amassCfg)
 		}
-		attempts = []attempt{{"enum -passive -config (v3)", a3}}
+		attempts = []attempt{{"enum -passive -config -o (v3)", a3}}
 	default: // v5+ / unknown — try the modern long form, then the short form.
 		attempts = []attempt{
-			{"enum -passive", []string{"enum", "-passive", "-d", domain}},
-			{"passive", []string{"passive", "-d", domain}},
+			{"enum -passive -o", []string{"enum", "-passive", "-d", domain, "-o", amFileOut}},
+			{"passive -o", []string{"passive", "-d", domain, "-o", amFileOut}},
 		}
 	}
 
@@ -1180,6 +1249,14 @@ func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amass
 	for _, at := range attempts {
 		count, timedOut, err := streamAmassOnce(ctx, at.args, ingest)
 		lastErr, lastTimeout = err, timedOut
+
+		// ── FAILURE #1 Method 1: read the -o output FILE ──────────────────
+		// This is the authoritative source for amass v5, which writes results
+		// to the file even when its stdout pipe is empty. Every host here is
+		// run through the SAME ingest() so it merges into `found`, appends to
+		// the artifact, and increments the count exactly like a stdout line.
+		count += ingestAmassFile(amFileOut, ingest)
+
 		if count > 0 {
 			return amassStreamResult{count: count, subcmd: at.label, timedOut: timedOut}
 		}
@@ -1187,10 +1264,29 @@ func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amass
 	return amassStreamResult{count: 0, subcmd: "", timedOut: lastTimeout, err: lastErr}
 }
 
+// ingestAmassFile reads amass's -o output file (FAILURE #1 Method 1) and feeds
+// every line through the provided ingest function, returning the number of NEW
+// in-scope hosts added. Missing/empty files return 0. This is what finally
+// captures amass v5 output that never reaches stdout.
+func ingestAmassFile(path string, ingest func(string) int) int {
+	added := 0
+	for _, l := range readNonEmptyLines(path) {
+		added += ingest(l)
+	}
+	return added
+}
+
 // amassDeadline is the dedicated per-invocation deadline for amass. Amass is
 // SLOW (the V12.1 mandate: "not 2, not 5, not 10 — Amass is SLOW"), so V12.1
 // raises the streaming deadline to 15 minutes.
 const amassDeadline = 15 * time.Minute
+
+// amassGiveUpAfter is how many CONSECUTIVE zero-result apexes amass may produce
+// before it is auto-removed for the rest of the scan (V12.2 · FAILURE #1
+// Method 2). The GitLab log showed amass fail on all 12 apexes; with this cap
+// it would have stopped wasting time after the 2nd. chaos/subfinder/bbot/
+// findomain fully cover the passive surface without it.
+const amassGiveUpAfter = 2
 
 // runChaosBackup is the V12.1 chaos-client fallback for amass. ProjectDiscovery
 // Chaos (`chaos -d <domain> -silent`) queries the Chaos passive-DNS dataset and
@@ -2090,6 +2186,86 @@ func (p *TLSAnalysisPhase) Execute(ctx context.Context, s *engine.State) error {
 // (those ports are always served by the edge). Only genuinely non-CDN hosts
 // are handed to naabu, which is tuned for reliability over raw speed.
 // ═══════════════════════════════════════════════════════════════
+// portScanMaxHosts is the hard cap on how many hosts Phase 12 will port-scan
+// regardless of how many were discovered (V12.2 · FAILURE #3, mandate §2.2).
+const portScanMaxHosts = 1000
+
+// stagingHostMarkers flags hosts likely to be weaker-security staging/dev/test
+// environments — Priority 2 in the sampling order (mandate §2.2).
+var stagingHostMarkers = []string{
+	"dev.", "dev-", "staging.", "staging-", "stage.", "test.", "test-",
+	"qa.", "uat.", "sandbox.", "demo.", "internal.", "int.", "preprod.",
+	".dev.", ".staging.", ".test.", ".qa.", ".uat.",
+}
+
+// SampleHosts implements the intelligent host sampling from mandate §2.2. When
+// the live-host count exceeds maxSample it returns a prioritized subset:
+//
+//	Priority 1: hosts of an EXACTLY in-scope apex/domain (e.g. *.gitlab.com)
+//	Priority 2: staging/dev/test hosts (weaker security — high bounty value)
+//	Priority 3: a deterministic sample of the remainder
+//
+// The result never exceeds maxSample. It is pure and order-stable (no RNG) so
+// the FAILURE #3 test is hermetic. When len(hosts) <= maxSample it returns the
+// input unchanged.
+func SampleHosts(hosts []string, inScopeDomains []string, maxSample int) []string {
+	if maxSample <= 0 || len(hosts) <= maxSample {
+		return hosts
+	}
+
+	inScope := make(map[string]bool, len(inScopeDomains))
+	for _, d := range inScopeDomains {
+		inScope[strings.ToLower(strings.TrimSpace(d))] = true
+	}
+	isInScopeHost := func(h string) bool {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if inScope[h] {
+			return true
+		}
+		for d := range inScope {
+			if strings.HasSuffix(h, "."+d) {
+				return true
+			}
+		}
+		return false
+	}
+	isStaging := func(h string) bool {
+		hl := strings.ToLower(h)
+		for _, m := range stagingHostMarkers {
+			if strings.Contains(hl, m) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var p1, p2, p3 []string
+	for _, h := range hosts {
+		switch {
+		case isInScopeHost(h):
+			p1 = append(p1, h)
+		case isStaging(h):
+			p2 = append(p2, h)
+		default:
+			p3 = append(p3, h)
+		}
+	}
+
+	out := make([]string, 0, maxSample)
+	add := func(src []string) {
+		for _, h := range src {
+			if len(out) >= maxSample {
+				return
+			}
+			out = append(out, h)
+		}
+	}
+	add(p1)
+	add(p2)
+	add(p3)
+	return out
+}
+
 type PortScanPhase struct{}
 
 func (p *PortScanPhase) Name() string { return "Port Scanning" }
@@ -2105,6 +2281,23 @@ func (p *PortScanPhase) Execute(ctx context.Context, s *engine.State) error {
 	portsOut := filepath.Join(s.OutputFolder, "ports.txt")
 
 	hosts := readNonEmptyLines(hostsFile)
+
+	// ── V12.2 · FAILURE #3: out-of-scope filter + intelligent host sampling ─
+	// The GitLab scan fed naabu 14,728 hosts (thousands of them out-of-scope
+	// service-now.com hosts) with no cap → 3-hour scan. We (a) strip any
+	// excluded hosts that slipped through and (b) sample down to at most
+	// portScanMaxHosts, prioritizing in-scope apex hosts and staging/dev hosts
+	// over the random remainder. Combined with the engine's 15-minute phase cap
+	// this makes a multi-hour port scan structurally impossible.
+	if len(s.Scope.ExcludeDomains) > 0 {
+		hosts = config.FilterExcluded(hosts, s.Scope.ExcludeDomains)
+	}
+	if len(hosts) > portScanMaxHosts {
+		before := len(hosts)
+		hosts = SampleHosts(hosts, s.Scope.Domains, portScanMaxHosts)
+		s.Printf("│  Host sampling: %d live hosts → %d scanned (in-scope + staging/dev prioritized, cap %d)\n",
+			before, len(hosts), portScanMaxHosts)
+	}
 
 	// ── BUG #7: CDN classification ─────────────────────────────────────────
 	// Split the host list into CDN-fronted hosts (naabu is futile) and direct
@@ -2144,10 +2337,13 @@ func (p *PortScanPhase) Execute(ctx context.Context, s *engine.State) error {
 		// raw speed: modest rate, explicit retries, generous per-probe timeout.
 		// -scan-type c == CONNECT scan (unprivileged). -Pn skips host discovery
 		// which also needs raw sockets.
+		// V12.2 · FAILURE #3: top-100 ports (not 1000), rate 1000, 1 retry,
+		// 3s timeout — the strict flags the mandate specifies so a large host
+		// list can still finish inside the 15-minute phase cap.
 		res := runner.RunTool(ctx, "naabu", []string{
 			"-list", directFile, "-o", naabuOut, "-silent",
-			"-top-ports", "1000", "-scan-type", "c", "-Pn",
-			"-rate", "100", "-retries", "2", "-timeout", "3000", "-c", "25",
+			"-top-ports", "100", "-scan-type", "c", "-Pn",
+			"-rate", "1000", "-retries", "1", "-timeout", "3000", "-c", "25",
 		}, nil)
 		if res.OK() || res.TimedOut {
 			naabuEntries := readNonEmptyLines(naabuOut)
@@ -2386,7 +2582,7 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 	// ── IMPROVEMENT #5: direct multi-source URL enrichment (no external
 	// binaries) — query URLScan and the CommonCrawl CDX index over HTTP so we
 	// still gather URLs even if gau/waybackurls are missing or blocked. ─────
-	for _, apex := range config.ExtractApexDomains(s.Scope.Domains) {
+	for _, apex := range config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains) {
 		before := len(allURLs)
 		for _, u := range harvestURLScanURLs(ctx, apex) {
 			if strings.HasPrefix(u, "http") && !allURLs[u] {
@@ -2945,7 +3141,7 @@ func (p *ParamDiscoveryPhase) Execute(ctx context.Context, s *engine.State) erro
 	s.Printf("│  Params from crawl/archive: %d\n", len(paramURLs))
 
 	// paramspider — run per apex domain.
-	for _, domain := range config.ExtractApexDomains(s.Scope.Domains) {
+	for _, domain := range config.ApexDomainsForEnum(s.Scope.Domains, s.Scope.ExcludeDomains) {
 		paramOut := filepath.Join(s.OutputFolder, fmt.Sprintf("paramspider_%s.txt", sanitizeName(domain)))
 		res := runner.RunTool(ctx, "paramspider",
 			[]string{"--domain", domain, "--output", paramOut}, nil)

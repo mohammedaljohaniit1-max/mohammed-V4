@@ -1,0 +1,37 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# MOHAMMED V12.2 · Built-in scope: GitLab (HackerOne public program)
+# ---------------------------------------------------------------------------
+# Invoke with:  ./mohammed scan --scope gitlab -c config.yaml --profile large
+#
+# Lines prefixed with '!' (or '-') are OUT OF SCOPE and are parsed as EXCLUDES
+# by V12.2's FAILURE #6 fix — they are NEVER enumerated. This is exactly the
+# pollution that caused the 8-hour Phase 12 collapse: !service-now.com and
+# !gitlab.cn were previously treated as targets.
+#
+# Source: HackerOne GitLab program scope (kept conservative & apex-only).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── IN SCOPE ────────────────────────────────────────────────────────────────
+gitlab.com
+gitlab.net
+gitlab.io
+gitlab-static.net
+gitlab.org
+gitlab-review.app
+about.gitlab.com
+docs.gitlab.com
+forum.gitlab.com
+gitlab.company
+gitlabstatus.com
+
+# ── OUT OF SCOPE (excluded — never enumerated) ───────────────────────────────
+!service-now.com
+!*.service-now.com
+!gitlab.cn
+!*.gitlab.cn
+!gitlabtraining.cloud
+!*.gitlabtraining.cloud
+!status.gitlab.com
+!*.myshopify.com
+!zendesk.com
+!*.zendesk.com

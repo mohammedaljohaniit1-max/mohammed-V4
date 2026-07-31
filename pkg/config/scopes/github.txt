@@ -1,0 +1,32 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# MOHAMMED V12.2 · Built-in scope: GitHub (public bug-bounty program)
+# ---------------------------------------------------------------------------
+# Invoke with:  ./mohammed scan --scope github -c config.yaml --profile large
+#
+# Lines prefixed with '!' (or '-') are OUT OF SCOPE and parsed as EXCLUDES by
+# V12.2's FAILURE #6 fix — they are NEVER enumerated.
+#
+# Source: GitHub Bug Bounty program scope (kept conservative & apex-only).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── IN SCOPE ────────────────────────────────────────────────────────────────
+github.com
+github.io
+githubusercontent.com
+githubapp.com
+github.dev
+githubcopilot.com
+ghcr.io
+githubassets.com
+github.blog
+docs.github.com
+api.github.com
+
+# ── OUT OF SCOPE (excluded — never enumerated) ───────────────────────────────
+!support.github.com
+!*.zendesk.com
+!enterprise.github.com
+!github.community
+!*.myshopify.com
+!npmjs.com
+!*.npmjs.com
