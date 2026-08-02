@@ -26,11 +26,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                     V12.2 PROCESS-CRISIS | Zero-Touch Autonomous Attack & Discovery Engine
+                     V12.3 RUTHLESS | Zero-Touch Autonomous Attack & Discovery Engine
 `
 
 const helpText = `
-MOHAMMED V12.2 PROCESS-CRISIS — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], 45 recon/vuln tools incl. modern set [chaos/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, adaptive 429/WAF stealth shield. V12.2 PROCESS-CRISIS: per-phase hard timeouts + host sampling, ProcessRegistry guaranteed child-group kill [zero orphans], dual-signal Ctrl+C [graceful→force], --skip/--only phase selection, built-in --scope gitlab|github [//go:embed], '!' out-of-scope exclude parsing [zero scope pollution], amass -o file ingest + auto-remove, Burp smart proxy gate [high-value-only + rate-limit + burp_scope.json])
+MOHAMMED V12.3 RUTHLESS — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], modern recon/vuln toolset [subfinder/bbot/findomain/chaos/assetfinder/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, adaptive 429/WAF stealth shield. V12.3 RUTHLESS: legacy enumerator PURGED [concurrent per-apex fan-out: subfinder+bbot+findomain+chaos+assetfinder, each own goroutine+timeout], scale-adaptive per-phase timeouts [×2 >1000 hosts, ×3 >5000] + backup hard-kill timers, httpx WAF-403/429-aware LIVE detection + resilient TCP probe fallback, staged nuclei [critical/high→medium→dev-origin-first], Gate-0 public-route + admin-endpoint FP rejection [zero public-page findings], exact HackerOne scope, bootstrap user-page guard, Burp Community/Pro auto-detect [proxy-relay when no Pro REST])
 
 USAGE:
   ./mohammed <command> [flags]
@@ -51,7 +51,7 @@ REPORT DASHBOARD:
 TARGET SIZING RECOMMENDATIONS:
 
   1. 🔴 LARGE / BUG BOUNTY TARGETS (e.g. HackerOne / Bugcrowd Large Scope)
-     Use the 'large' or 'bugbounty' profile for deep recursive discovery (bbot, amass, full crawl, all vulns):
+     Use the 'large' or 'bugbounty' profile for deep recursive discovery (bbot, subfinder, full crawl, all vulns):
      👉 ./mohammed scan -s scope.txt -c config.yaml --profile large --burp http://172.30.48.1:8080
 
   2. 🟡 MEDIUM TARGETS (Standard Company Scope / 10-50 Subdomains)
@@ -80,10 +80,20 @@ SCAN FLAGS:
   --rate          int      Requests per minute (default: 150)
   --output        string   Output directory (default: output/)
 
-V12.2 PROCESS-CRISIS NOTES:
-  • Every phase now has a HARD wall-clock timeout (Port Scanning capped at 15m);
-    on timeout all child process groups are SIGKILLed and the scan proceeds with
-    partial results — no more 4h38m Phase 12.
+V12.3 RUTHLESS NOTES:
+  • Passive enumeration is a CONCURRENT PER-APEX FAN-OUT: subfinder, bbot,
+    findomain, chaos and assetfinder each run in their own goroutine with their
+    own timeout, so one wedged tool can NEVER starve the others (the legacy
+    OWASP enumerator that hung Phase 04 for 8 versions has been PURGED).
+  • Per-phase timeouts are SCALE-ADAPTIVE: ×2 for >1000 hosts, ×3 for >5000, so
+    nuclei/ffuf/gau are never starved on 14,000-host targets. A backup
+    time.AfterFunc hard-kill timer guarantees termination even between loops.
+  • httpx treats WAF 401/403/405/429/5xx as LIVE (not dead); when <2% of hosts
+    respond it falls back to a resilient browser-UA TCP probe.
+  • nuclei runs STAGED: critical/high (cve,rce,sqli,ssrf,lfi,auth-bypass) first,
+    then medium (misconfig,exposure,takeover), dev/staging/API origins first.
+  • Gate-0 FP rejection: public unauthenticated routes (/explore/ /blog/ /docs/
+    …) and static assets/docs are NEVER flagged as IDOR/Race/CORS/Auth/Admin.
   • Ctrl+C is DUAL-SIGNAL: 1st press = graceful checkpoint + kill all children
     (10s deadline); 2nd press = force-quit immediately.
   • '!host' (or '-host') lines in a scope file are OUT OF SCOPE and are NEVER
@@ -92,7 +102,7 @@ V12.2 PROCESS-CRISIS NOTES:
 `
 
 var allTools = []string{
-	"subfinder", "amass", "bbot", "assetfinder", "findomain",
+	"subfinder", "bbot", "assetfinder", "findomain", "chaos",
 	"dnsx", "puredns", "massdns", "shuffledns",
 	"subzy", "httpx", "tlsx", "naabu", "nmap",
 	"gau", "waybackurls", "katana", "gospider", "hakrawler",
@@ -238,7 +248,7 @@ func runScan(args []string) {
 	}
 
 	// EXPANSION 1 — report the 3-tier API-key resolution result and auto-sync
-	// the active keys into the subfinder + amass config files so exported
+	// the active keys into the subfinder provider-config file so exported
 	// environment variables reach every downstream CLI tool automatically.
 	if active := config.ActiveKeyNames(yamlCfg.APIKeys); len(active) > 0 {
 		fmt.Printf("[+] Active API keys (env > config.yaml): %s\n", strings.Join(active, ", "))
@@ -491,7 +501,7 @@ func runScan(args []string) {
 
 	// V12.2 · FAILURE #4: DUAL-SIGNAL Ctrl+C handler. The old handler ignored
 	// 30+ Ctrl+C presses and hung 2+ minutes because it only cancelled the
-	// context and never killed the child process groups (naabu/amass/etc.), so
+	// context and never killed the child process groups (naabu/bbot/etc.), so
 	// the phases kept blocking on I/O from processes that were still running.
 	//
 	// New behavior (mandate §FAILURE #4):

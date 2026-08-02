@@ -1,10 +1,37 @@
-# MOHAMMED V12.2 PROCESS-CRISIS
+# MOHAMMED V12.3 RUTHLESS
 
 **Zero-Touch Autonomous Attack Surface & Exploit Engine — THE FINAL MANDATE**
 
 ---
 
-## 🚨 What's New in V12.2 PROCESS-CRISIS
+## 🚨 What's New in V12.3 RUTHLESS
+
+Empirical analysis of a 582-minute (9h42m) V12.2 GitLab scan proved a **100%
+false-positive rate** (102,913 items, 40,901 auto-discarded, 1,656 flagged, **0
+real vulnerabilities** in 50,000+ requests) plus catastrophic tool-management
+failures. V12.3 lands **10 ruthless, real fixes** — no dummy fallbacks, no
+artificial time traps, no fake reports:
+
+| # | Failure | V12.3 Fix |
+|---|---------|-----------|
+| 1 | Legacy OWASP enumerator (amass) hung / returned 0 | **PURGED entirely**; replaced with concurrent `subfinder`+`bbot`+`findomain`+`assetfinder`+`chaos` fan-out (`passiveEnumApexConcurrently`) |
+| 2 | Phases ran with no ceiling → 4h+ hangs | `CalculateAdaptiveTimeout` (×2 >1000 hosts, ×3 >5000) + between-loop `ctx.Done()` `KillAllChildren()` + `time.AfterFunc` backup hard-kill |
+| 3 | Passive enum serial & slow | Per-tool goroutines, own `context.WithTimeout`, mutex-guarded results, `wg.Wait()`, dedup |
+| 4 | httpx reported 0 LIVE from 5,320 hosts | WAF-aware status set (200/301/401/403/429/5xx…) + `runResilientHTTPProbe` fallback (<2% live) |
+| 5 | nuclei skipped | Staged: Stage 1 critical/high (cve,rce,sqli,ssrf,lfi,auth-bypass), Stage 2 medium (misconfig,exposure,takeover), Stage 3 dev/staging/API first |
+| 6 | IDOR/Race/CORS/Auth 100% FP on public pages | **Gate 0** `IsPublicUnauthenticatedRoute` rejects `/explore/ /topics/ /blog/ /docs/ …` from every access-control engine |
+| 7 | "Unauth admin access" flagged JS/docs | `ValidateAdminEndpointAccess` — static assets & docs hosts are NEVER admin; requires real admin controls + unauth 200 |
+| 8 | GitLab scope over-broad | `scopes/gitlab.txt` rewritten to the **exact** HackerOne in-scope/out-of-scope program |
+| 9 | Bootstrap on user pages | `IsValidBootstrapTarget`/`isPrimaryAppDomain` exclude `*.gitlab.io`/`*.github.io` |
+| 10 | Burp active scan on Community | `DetectBurpCapabilities` probes `/v0.1/version`; Community → sitemap relay only, active scan skipped |
+
+> **Note:** the amass integration described in the historical sections below was
+> **removed** in V12.3 (FAILURE 1). Those sections are retained only as a record
+> of prior behavior; `grep -ri "amass" pkg/ cmd/` now returns **0 matches**.
+
+---
+
+## 🗄️ What's New in V12.2 PROCESS-CRISIS
 
 An 8-hour GitLab scan collapsed: Phase 12 (Port Scanning) ran with **no
 timeout** for 4h38m, an orphaned amass process burned 90% CPU for 3 hours

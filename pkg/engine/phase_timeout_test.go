@@ -24,6 +24,46 @@ func TestV122_PhaseTimeout_PortScanningCapped(t *testing.T) {
 	}
 }
 
+// TestV123_CalculateAdaptiveTimeout is the FAILURE #2 unit guard: the per-phase
+// cap MUST scale with host count so nuclei/ffuf/gau are never starved on large
+// targets, while small/passive scans keep tight caps and every result is still
+// bounded by maxAdaptiveTimeout.
+func TestV123_CalculateAdaptiveTimeout(t *testing.T) {
+	base := 15 * time.Minute
+	cases := []struct {
+		name    string
+		hosts   int
+		profile string
+		want    time.Duration
+	}{
+		{"tiny scope ×1", 50, "medium", 15 * time.Minute},
+		{"boundary 1000 ×1", 1000, "medium", 15 * time.Minute},
+		{"large >1000 ×2", 5000, "medium", 30 * time.Minute},
+		{"boundary 5000 ×2", 5000, "large", 30 * time.Minute},
+		{"enterprise >5000 ×3", 14000, "large", 45 * time.Minute},
+		{"passive caps at ×2", 14000, "passive", 30 * time.Minute},
+		{"small caps at ×2", 9000, "small", 30 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CalculateAdaptiveTimeout(base, tc.hosts, tc.profile)
+			if got != tc.want {
+				t.Fatalf("CalculateAdaptiveTimeout(%v, %d, %q) = %v, want %v",
+					base, tc.hosts, tc.profile, got, tc.want)
+			}
+		})
+	}
+
+	// The result must NEVER exceed the absolute ceiling, even with a huge base.
+	if got := CalculateAdaptiveTimeout(60*time.Minute, 20000, "large"); got != maxAdaptiveTimeout {
+		t.Fatalf("adaptive timeout must be clamped to %v, got %v", maxAdaptiveTimeout, got)
+	}
+	// The result must NEVER be smaller than the base cap.
+	if got := CalculateAdaptiveTimeout(base, 0, "large"); got < base {
+		t.Fatalf("adaptive timeout %v must be >= base %v", got, base)
+	}
+}
+
 // hangPhase blocks until its context is cancelled, then returns. It models a
 // wedged naabu that only stops when the phase deadline fires.
 type hangPhase struct{ done chan struct{} }

@@ -326,28 +326,71 @@ func (p *VulnScanPhase) Execute(ctx context.Context, s *engine.State) error {
 		s.Printf("│  nuclei: SKIP (no live endpoints)\n")
 		return nil
 	}
-	writeLines(urlsFile, seeds)
-
-	nucleiJSONL := filepath.Join(s.OutputFolder, "nuclei_results.jsonl")
-
-	// FIX #5: Tier 1 DIRECT — full template scan is high-volume; bypass Burp.
+	// ── V12.3 · FAILURE #5: STAGED / PRIORITIZED nuclei execution ──────────
+	// The 9h42m GitLab scan showed nuclei SKIPPED entirely (0 templates run):
+	// a single mega-invocation with ALL severities on 14,000+ hosts never
+	// finished inside the phase cap, so the phase timed out having scanned
+	// nothing. We now run nuclei in prioritized STAGES so the high-value
+	// templates ALWAYS execute first and complete within their own budget:
+	//
+	//   Stage 1: critical,high  · cve,rce,sqli,ssrf,lfi,auth-bypass · rl 100 · 15m
+	//   Stage 2: medium         · misconfig,exposure,takeover       · rl 50  · 15m
+	//   Stage 3: when host count >300, staging/API/dev origins are sorted FIRST
+	//            so the weakest-hardened surfaces are scanned before production.
 	px := s.PhaseProxy(proxy.ProxyModeDirect)
-	args := []string{"-l", urlsFile, "-jsonl", "-o", nucleiJSONL,
-		"-silent", "-nc", "-rl", "150", "-c", "25",
-		"-severity", "critical,high,medium,low,info"}
-	if px.Active {
-		args = append(args, "-proxy", px.ProxyURL)
+
+	// Stage 3 (ordering): on large scopes, scan dev/staging/API origins first.
+	if len(seeds) > 300 {
+		seeds = prioritizeDevStagingAPIFirst(seeds)
+		writeLines(urlsFile, seeds)
+		s.Printf("│  nuclei stage-3 ordering: %d targets, staging/API/dev origins first\n", len(seeds))
 	}
 
-	res := runner.RunTool(ctx, "nuclei", args, nil)
-	if !res.OK() && !res.TimedOut {
-		s.Printf("│  nuclei: SKIP (%v)\n", res.Err)
-		return nil
+	stages := []struct {
+		label    string
+		severity string
+		tags     string
+		rate     string
+		timeout  time.Duration
+	}{
+		{"Stage 1 (critical/high)", "critical,high", "cve,rce,sqli,ssrf,lfi,auth-bypass", "100", 15 * time.Minute},
+		{"Stage 2 (medium)", "medium", "misconfig,exposure,takeover", "50", 15 * time.Minute},
 	}
 
-	count := 0
-	demoted := 0
-	for _, line := range readNonEmptyLines(nucleiJSONL) {
+	totalKept, totalDemoted := 0, 0
+	for i, st := range stages {
+		stageJSONL := filepath.Join(s.OutputFolder, fmt.Sprintf("nuclei_results_stage%d.jsonl", i+1))
+		args := []string{"-l", urlsFile, "-jsonl", "-o", stageJSONL,
+			"-silent", "-nc", "-rl", st.rate, "-c", "25",
+			"-severity", st.severity, "-tags", st.tags,
+			"-timeout", "15"}
+		if px.Active {
+			args = append(args, "-proxy", px.ProxyURL)
+		}
+		res := runner.RunToolWithTimeout(ctx, "nuclei", args, nil, st.timeout)
+		if !res.OK() && !res.TimedOut {
+			s.Printf("│  nuclei %s: SKIP (%v)\n", st.label, res.Err)
+			continue
+		}
+		kept, demoted := ingestNucleiResults(ctx, s, stageJSONL)
+		totalKept += kept
+		totalDemoted += demoted
+		note := ""
+		if res.TimedOut {
+			note = " [partial — 15m cap]"
+		}
+		s.Printf("│  nuclei %s: %d kept, %d demoted%s\n", st.label, kept, demoted, note)
+	}
+	s.Printf("│  nuclei (staged): %d findings kept total (%d demoted/discarded by policy)\n", totalKept, totalDemoted)
+	return nil
+}
+
+// ingestNucleiResults parses a nuclei JSONL output file, runs AI triage +
+// confidence policy on each record, and adds surviving findings to state.
+// Returns (kept, demoted). Shared by every staged nuclei invocation.
+func ingestNucleiResults(ctx context.Context, s *engine.State, jsonlPath string) (int, int) {
+	count, demoted := 0, 0
+	for _, line := range readNonEmptyLines(jsonlPath) {
 		var rec map[string]interface{}
 		if json.Unmarshal([]byte(line), &rec) != nil {
 			continue
@@ -376,8 +419,6 @@ func (p *VulnScanPhase) Execute(ctx context.Context, s *engine.State) error {
 			"url": target, "tool": "nuclei", "evidence": evidence,
 			"http_confirmed": true, "specific_pattern": true,
 		}
-		// Only spend AI cycles on higher-severity findings; info/low are added directly
-		// after the confidence gate.
 		if severity == "Critical" || severity == "High" || severity == "Medium" {
 			before := f["severity"]
 			kept := s.TriageAndScore(ctx, "Nuclei: "+templateID, target, evidence, f,
@@ -395,8 +436,35 @@ func (p *VulnScanPhase) Execute(ctx context.Context, s *engine.State) error {
 			}
 		}
 	}
-	s.Printf("│  nuclei: %d findings kept (%d demoted/discarded by policy)\n", count, demoted)
-	return nil
+	return count, demoted
+}
+
+// prioritizeDevStagingAPIFirst reorders a URL list so dev/staging/test/api
+// origins come FIRST (V12.3 · FAILURE #5 Stage 3). Weaker-hardened non-prod
+// surfaces are the highest-yield nuclei targets, so on large scopes they are
+// scanned before hardened production. Order within each bucket is preserved.
+func prioritizeDevStagingAPIFirst(urls []string) []string {
+	weakMarkers := []string{"staging", "stage.", "dev.", "-dev", "test.", "-test",
+		"qa.", "uat.", "sandbox", "preprod", "pre-prod", "api.", "/api/", "internal"}
+	isWeak := func(u string) bool {
+		lu := strings.ToLower(u)
+		for _, m := range weakMarkers {
+			if strings.Contains(lu, m) {
+				return true
+			}
+		}
+		return false
+	}
+	front := make([]string, 0, len(urls))
+	back := make([]string, 0, len(urls))
+	for _, u := range urls {
+		if isWeak(u) {
+			front = append(front, u)
+		} else {
+			back = append(back, u)
+		}
+	}
+	return append(front, back...)
 }
 
 // normalizeSeverity maps nuclei severity strings to our title-case scale.

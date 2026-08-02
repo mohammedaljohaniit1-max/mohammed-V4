@@ -311,9 +311,9 @@ func ActiveKeyNames(k APIKeys) []string {
 }
 
 // SyncProviderConfigs writes the active API keys into the on-disk config files
-// that the external CLI tools read on their own (subfinder + amass), so a key
-// exported once via the environment automatically reaches every downstream
-// tool without the user editing multiple files (EXPANSION 1 auto-sync).
+// that the external CLI tools read on their own (subfinder), so a key exported
+// once via the environment automatically reaches every downstream tool without
+// the user editing multiple files (EXPANSION 1 auto-sync).
 //
 // It returns the list of files it created/updated. Failures are collected in
 // err but never abort the scan (best-effort convenience).
@@ -326,13 +326,6 @@ func SyncProviderConfigs(k APIKeys) (written []string, err error) {
 
 	// ── subfinder provider-config.yaml ────────────────────────────────
 	if p, e := syncSubfinderProviders(home, k); e != nil {
-		errs = append(errs, e.Error())
-	} else if p != "" {
-		written = append(written, p)
-	}
-
-	// ── amass config.ini data-source keys ─────────────────────────────
-	if p, e := syncAmassKeys(home, k); e != nil {
 		errs = append(errs, e.Error())
 	} else if p != "" {
 		written = append(written, p)
@@ -372,52 +365,6 @@ func syncSubfinderProviders(home string, k APIKeys) (string, error) {
 	writeList("chaos", k.Chaos)
 	writeList("github", k.GitHub)
 	writeList("censys", k.Censys)
-
-	if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-// syncAmassKeys merges the active keys into ~/.config/amass/config.ini. It
-// preserves the free-source scaffold and appends [data_sources.<X>] apikey
-// stanzas for every key that is set.
-func syncAmassKeys(home string, k APIKeys) (string, error) {
-	if k.Shodan == "" && k.VirusTotal == "" && k.SecurityTrails == "" &&
-		k.Chaos == "" && k.Censys == "" {
-		return "", nil
-	}
-	dir := filepath.Join(home, ".config", "amass")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(dir, "config.ini")
-
-	base := ""
-	if existing, e := os.ReadFile(path); e == nil {
-		base = string(existing)
-	}
-	if !strings.Contains(base, "[data_sources]") {
-		base += "\n[data_sources]\nminimum_ttl = 1440\n"
-	}
-
-	var b strings.Builder
-	b.WriteString(base)
-	b.WriteString("\n# ── Auto-synced API keys (MOHAMMED EXPANSION 1) ──\n")
-	stanza := func(source, val string) {
-		if strings.TrimSpace(val) == "" {
-			return
-		}
-		if strings.Contains(base, "[data_sources."+source+"]\n[api_key]") {
-			return // already present
-		}
-		b.WriteString(fmt.Sprintf("[data_sources.%s]\n[data_sources.%s.Credentials]\napikey = %s\n\n", source, source, val))
-	}
-	stanza("Shodan", k.Shodan)
-	stanza("VirusTotal", k.VirusTotal)
-	stanza("SecurityTrails", k.SecurityTrails)
-	stanza("Chaos", k.Chaos)
-	stanza("Censys", k.Censys)
 
 	if err := os.WriteFile(path, []byte(b.String()), 0600); err != nil {
 		return "", err
@@ -478,7 +425,7 @@ func ParseScope(r io.Reader) (*Scope, error) {
 		// The V12.1 parser only recognized '-' as the exclude prefix, so every
 		// '!' line fell through into the DEFAULT branch and was stored as a
 		// TARGET domain (`!service-now.com`). Phase 04 then extracted its apex
-		// and ran amass/bbot/findomain against service-now.com — discovering
+		// and ran bbot/findomain against service-now.com — discovering
 		// 6,879 out-of-scope subdomains, inflating the host count to 14,728,
 		// and causing Phase 12 to scan for 3 hours. We now treat BOTH '-' and
 		// '!' as exclude markers, and normalizeHost strips any `*.` wildcard so
@@ -573,7 +520,7 @@ func isIP(val string) bool {
 // known 2-part TLD. For the common bug-bounty case (example.com / example.io)
 // the simple dot-count rule is correct and avoids a heavyweight PSL dependency.
 //
-// Fixes BUG #2: amass/bbot must ONLY run on apex domains, never subdomains,
+// Fixes BUG #2: bbot/findomain must ONLY run on apex domains, never subdomains,
 // otherwise they return exit-status 2 or 0 results.
 func IsApexDomain(domain string) bool {
 	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
@@ -604,7 +551,7 @@ func IsApexDomain(domain string) bool {
 
 // ExtractApexDomains returns the deduplicated set of apex/root domains derived
 // from the given list. Subdomains are collapsed to their apex so that passive
-// enum tools (amass/bbot) receive only registrable roots.
+// enum tools (bbot/findomain) receive only registrable roots.
 //
 // "www.whatnot.com", "api.whatnot.com", "whatnot.com" → ["whatnot.com"].
 func ExtractApexDomains(domains []string) []string {
@@ -686,7 +633,7 @@ func FilterExcluded(hosts []string, excludes []string) []string {
 }
 
 // ApexDomainsForEnum returns the deduplicated apex/root domains that are SAFE to
-// feed to the passive/active enumeration tools (subfinder/amass/bbot/findomain):
+// feed to the passive/active enumeration tools (subfinder/bbot/findomain):
 // it extracts apexes from the in-scope domains and then DROPS any apex that is
 // itself excluded. This is the FAILURE #6 fix at the exact point of the bug —
 // the apex list printed as "Apex/root domains for passive enum" and looped over

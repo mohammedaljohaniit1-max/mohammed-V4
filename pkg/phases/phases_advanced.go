@@ -800,6 +800,16 @@ func (p *BurpIntegrationPhase) Execute(ctx context.Context, s *engine.State) err
 	direct := exploit.NewClient(exploit.Options{FollowRedirects: false})
 	eng := exploit.NewBurpEngine(a.client, direct)
 
+	// V12.3 FAILURE 10 — detect Community vs Pro up front so the operator sees
+	// exactly which mode is active. Community has no REST API → sitemap relay
+	// only, active scan skipped.
+	caps := eng.DetectBurpCapabilities(ctx, "")
+	if caps.HasProAPI {
+		s.Printf("│  Burp: Pro REST API detected (v%s) — sitemap relay + active scan\n", caps.Version)
+	} else {
+		s.Printf("│  Burp: Community/no REST API — proxy sitemap relay only, active scan skipped\n")
+	}
+
 	// 1. Sitemap population — relay every discovered URL through Burp.
 	if len(a.urls) > 0 {
 		sent := eng.PopulateSitemap(ctx, budget(a.urls, 500))

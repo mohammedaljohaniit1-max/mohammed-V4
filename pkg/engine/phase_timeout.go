@@ -23,7 +23,10 @@ package engine
 // the exact fragility the codebase already avoids for profile membership.
 // ═══════════════════════════════════════════════════════════════════════════
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // DefaultPhaseTimeout is the wall-clock cap applied to any phase that does not
 // have a specific override in phaseTimeouts. Generous enough that a normal
@@ -38,7 +41,7 @@ var phaseTimeouts = map[string]time.Duration{
 	// ── The FAILURE #3 fix: Port Scanning can never run for hours again. ──
 	"Port Scanning": 15 * time.Minute,
 
-	// ── Recon phases (amass/bbot are slow but bounded) ──
+	// ── Recon phases (bbot/subfinder are slow but bounded) ──
 	"Passive Subdomain Enumeration": 20 * time.Minute,
 	"Active Subdomain Bruteforce":   15 * time.Minute,
 	"DNS Resolution & Enrichment":   8 * time.Minute,
@@ -64,4 +67,62 @@ func PhaseTimeout(name string) time.Duration {
 		return d
 	}
 	return DefaultPhaseTimeout
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V12.3 RUTHLESS · FAILURE #2 — SCALE-ADAPTIVE TIMEOUTS
+// ---------------------------------------------------------------------------
+// EMPIRICAL EVIDENCE (9h42m GitLab scan): the FIXED 15m/20m caps STARVED
+// nuclei, ffuf and gau on a 14,000+ host target — those tools were killed with
+// 0 results because a fixed cap that is fine for 50 hosts is catastrophically
+// too short for 14,000. A single flat cap cannot serve both a 10-host app and a
+// 14,000-host enterprise scope.
+//
+// CalculateAdaptiveTimeout scales the base cap by the live host count:
+//   >5000 hosts → ×3   (enterprise scope — nuclei needs real time)
+//   >1000 hosts → ×2   (large scope)
+//   otherwise   → ×1   (the base cap is already generous)
+//
+// The multiplier is further nudged by the profile: the 'passive'/'small'
+// profiles never need the ×3 blow-up, while 'large'/'bugbounty' always get at
+// least the host-count multiplier. The result is ALWAYS bounded (there is still
+// a hard cap — it just scales), so a phase can never again run unbounded.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// maxAdaptiveTimeout is the absolute ceiling no adaptive scaling can exceed.
+// Even a ×3 blow-up on the 20-minute default lands at 60m; this ceiling guards
+// against any future base cap producing an unreasonable value.
+const maxAdaptiveTimeout = 90 * time.Minute
+
+// CalculateAdaptiveTimeout scales baseCap by the number of live hosts (and the
+// scan profile) so heavy phases get proportionally more time on large targets
+// while small targets keep tight caps. The return value is always bounded by
+// maxAdaptiveTimeout.
+func CalculateAdaptiveTimeout(baseCap time.Duration, hostCount int, profile string) time.Duration {
+	multiplier := 1
+	switch {
+	case hostCount > 5000:
+		multiplier = 3
+	case hostCount > 1000:
+		multiplier = 2
+	}
+
+	// Profile modulation. Passive/small scans never fan out to the intrusive
+	// tools that need the ×3 budget, so cap their multiplier at ×2. Large /
+	// bugbounty scans keep the full host-count multiplier (already applied).
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "passive", "small":
+		if multiplier > 2 {
+			multiplier = 2
+		}
+	}
+
+	out := time.Duration(int64(baseCap) * int64(multiplier))
+	if out > maxAdaptiveTimeout {
+		return maxAdaptiveTimeout
+	}
+	if out < baseCap {
+		return baseCap
+	}
+	return out
 }

@@ -1,13 +1,18 @@
 # ══════════════════════════════════════════════════════════════════════════════
-# MOHAMMED V12.2 PROCESS-CRISIS — Configuration File
+# MOHAMMED V12.3 RUTHLESS — Configuration File
 # Zero-Touch Autonomous Attack & Discovery Engine (FINAL MANDATE)
-# 65+ phases · 50+ OSINT sources · 5-gate false-positive validation
+# 65+ phases · 50+ OSINT sources · 5-gate false-positive validation + Gate 0
 # 3-tier AI cascade · 8-WAF bypass matrix · PoE ethical boundary · 8 state machines
 # 5 Secret Weapons: API Hunter · Response Differential · Smart Fuzz · JS Deep · Subdomain Intel
 # V12.1: +7 modern tools (chaos · alterx · cdncheck · uncover · cariddi · trufflehog · ppmap)
 # V12.2: per-phase hard timeouts · host sampling · guaranteed child-process kill (zero orphans)
 #        dual-signal Ctrl+C · --skip/--only · built-in --scope gitlab|github · '!' exclude parsing
-#        amass -o file ingest + auto-remove · Burp smart proxy gate (+ burp_scope.json)
+#        Burp smart proxy gate (+ burp_scope.json)
+# V12.3: legacy OWASP enumerator PURGED → concurrent subfinder/bbot/findomain/assetfinder/chaos
+#        fan-out · scale-adaptive timeouts + hard-kill · WAF-aware httpx LIVE + resilient probe
+#        staged nuclei · Gate 0 public-route rejection (IDOR/Race/CORS/Auth) · admin-access
+#        validation · exact HackerOne gitlab scope · bootstrap primary-domain-only ·
+#        Burp Community/Pro capability gate
 # Copy this file and fill in your API keys before running.
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -58,15 +58,9 @@ var toolTimeouts = map[string]time.Duration{
 	// bbot passive enum realistically needs 5-10 min per root domain; the old
 	// 3-minute cap killed it before any results (BUG #2). Bumped to 8m.
 	"bbot": 8 * time.Minute,
-	// amass passive can spend minutes contacting sources. V12.0 OMEGA BUG #1:
-	// the old 6-minute cap hard-killed amass mid-run (the Temu scan proved it
-	// ran exactly 00:02:29→00:08:29 == 6m then died with 0 results). The apex
-	// passive phase now streams amass through its own dedicated deadline
-	// (runAmassV5 → streamAmassOnce), but this map value governs any other amass
-	// call path (e.g. -version). V12.1 ZERO-TOLERANCE: raised to 15m — amass is
-	// SLOW ("not 2, not 5, not 10").
-	"amass": 15 * time.Minute,
-	// chaos-client (ProjectDiscovery Chaos) — V12.1 amass replacement/backup.
+	// chaos-client (ProjectDiscovery Chaos) — primary passive source. The
+	// concurrent fan-out (V12.3) gives it its own 4m per-tool deadline; this
+	// map value governs any other chaos call path.
 	"chaos": 5 * time.Minute,
 	// V12.1 modern recon tooling.
 	"alterx":   3 * time.Minute,
@@ -176,7 +170,7 @@ func toolSearchDirs() []string {
 		"/usr/bin",         // Kali apt packages (paramspider, sqlmap)
 		"/usr/sbin",
 		"/bin",
-		"/snap/bin",         // snap-installed tools (amass)
+		"/snap/bin",         // snap-installed tools (bbot/nuclei)
 		"/opt/homebrew/bin", // macOS brew
 		"/home/linuxbrew/.linuxbrew/bin",
 	} {
@@ -262,7 +256,7 @@ func runToolInternal(ctx context.Context, toolName string, args []string, env ma
 	cmd := exec.Command(binaryPath, args...)
 
 	// CRITICAL: Setpgid=true ensures all child processes share the same process group.
-	// When we kill the parent, we can kill the entire group (fixes amass/bbot hanging).
+	// When we kill the parent, we can kill the entire group (fixes bbot/naabu hanging).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Build environment: inherit system env + append overrides
@@ -287,7 +281,7 @@ func runToolInternal(ctx context.Context, toolName string, args []string, env ma
 	// global registry the instant it starts. Because we launched it with
 	// Setpgid=true, the child's pid IS its pgid. Any shutdown path (Ctrl+C,
 	// per-phase timeout, program exit) can now SIGKILL -pgid for EVERY live
-	// group via runner.KillAllChildren(), so an amass/naabu process can never
+	// group via runner.KillAllChildren(), so a bbot/naabu process can never
 	// again outlive the phase that spawned it (the 90%-CPU-for-3-hours bug).
 	pgid := 0
 	if cmd.Process != nil {
@@ -324,7 +318,7 @@ func runToolInternal(ctx context.Context, toolName string, args []string, env ma
 		}
 	case <-toolCtx.Done():
 		// Timeout or cancellation — kill the ENTIRE process group so orphaned
-		// children (amass/bbot spawn many) are reaped, not just the parent.
+		// children (bbot/nuclei spawn many) are reaped, not just the parent.
 		if cmd.Process != nil {
 			pg, pgErr := syscall.Getpgid(cmd.Process.Pid)
 			if pgErr == nil {
