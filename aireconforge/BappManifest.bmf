@@ -1,0 +1,13 @@
+Uuid: 7b3c1e42-aircon-forge-zero-fp-0001
+ExtensionType: 1
+Name: AIReconForge
+RepoName: aireconforge
+ScreenVersion: 17
+SerialVersion: 17
+MinPlatformVersion: 0
+ProOnly: false
+Author: AIReconForge
+ShortDescription: Zero-false-positive recon + a strict 5-gate detection engine (baseline diffing, active vuln verification, confidence scoring) plus a Traffic SmartCapture tab that exports the attack surface to 10 categorized files.
+EntryPoint: AIReconForge.jar
+BuildCommand:
+SupportedProducts: Pro, Community
