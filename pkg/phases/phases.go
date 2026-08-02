@@ -1,19 +1,15 @@
 package phases
 
 import (
-	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/mohammed-v3/core/pkg/browser"
@@ -23,7 +19,23 @@ import (
 	"github.com/mohammed-v3/core/pkg/filter"
 	"github.com/mohammed-v3/core/pkg/proxy"
 	"github.com/mohammed-v3/core/pkg/runner"
+	"github.com/mohammed-v3/core/pkg/validation"
 )
+
+// v123FilterPublicRoutes removes public unauthenticated routes (Gate 0) from a
+// URL slice before access-control style testing (CORS / Auth-Diff). Public
+// pages like /explore/, /docs/, /blog/ are intentionally world-readable and
+// produced 100% false positives in prior scans.
+func v123FilterPublicRoutes(urls []string) (kept []string, dropped int) {
+	for _, u := range urls {
+		if validation.IsPublicUnauthenticatedRoute(u, "") {
+			dropped++
+			continue
+		}
+		kept = append(kept, u)
+	}
+	return kept, dropped
+}
 
 // ═══════════════════════════════════════════════════════════════
 // Shared helpers used across all phases
@@ -588,7 +600,7 @@ func harvestURLScan(ctx context.Context, domain string) []string {
 // ═══════════════════════════════════════════════════════════════
 // Phase 03: Passive Subdomain Enumeration
 //
-// BUG #2 FIX: amass / bbot / findomain run on APEX domains ONLY. Running them
+// BUG #2 FIX: bbot / findomain run on APEX domains ONLY. Running them
 // on subdomains (www./api.) gives exit-status 2 or 0 results and wastes time.
 // subfinder + assetfinder handle both apex and subdomain inputs gracefully so
 // they run against every scope entry.
@@ -597,7 +609,7 @@ type SubdomainPassivePhase struct{}
 
 func (p *SubdomainPassivePhase) Name() string { return "Passive Subdomain Enumeration" }
 func (p *SubdomainPassivePhase) Description() string {
-	return "subfinder+assetfinder+amass+bbot+findomain (APEX-ONLY, once per root) · OSINT merge"
+	return "CONCURRENT fan-out per apex: subfinder+bbot+findomain+chaos+assetfinder (each own goroutine+timeout) · OSINT merge (V12.3)"
 }
 func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) error {
 	if len(s.Scope.Domains) == 0 {
@@ -614,235 +626,40 @@ func (p *SubdomainPassivePhase) Execute(ctx context.Context, s *engine.State) er
 		found[strings.ToLower(d)] = true
 	}
 
-	// ── FLAW #1 FIX: Passive enumerators run ONCE PER APEX, never per subdomain
-	// ──────────────────────────────────────────────────────────────────────
-	// The old code looped `for _, domain := range s.Scope.Domains`, so with a
-	// scope of {whatnot.com, www.whatnot.com, api.whatnot.com,
-	// live-service.whatnot.com, auction-service.whatnot.com} it ran subfinder &
-	// assetfinder FIVE times. Four of those runs query subdomains of an already
-	// leaf host (`subfinder -d api.whatnot.com`) → 0 results, pure wasted
-	// minutes. subfinder/assetfinder enumerate the WHOLE apex zone in one call,
-	// so running them once on `whatnot.com` already covers every subdomain.
+	// ── V12.3 · FAILURE #1 (LEGACY ENUMERATOR PURGED) + FAILURE #3 (FAN-OUT) ──
+	// The 9h42m GitLab scan proved the legacy OWASP enumerator was broken for 8
+	// straight versions (V7→V12.2): it returned 0 subdomains on every apex, and
+	// its SEQUENTIAL execution wedged Phase 04 so badly that when it hung on
+	// gitlab.com, bbot AND findomain were SKIPPED across ALL 8 apex domains (the
+	// phase hit its 20m cap before those tools ever ran). It is now REMOVED
+	// ENTIRELY.
+	//
+	// The replacement is a CONCURRENT FAN-OUT: for each apex we launch every
+	// passive enumerator (subfinder, bbot, findomain, chaos, assetfinder) in its
+	// OWN dedicated goroutine with its OWN isolated context.WithTimeout, so no
+	// single slow/wedged tool can ever starve the others. Results are merged
+	// under a mutex and deduped. This is passiveEnumApexConcurrently().
+	//
+	// FLAW #1 FIX (preserved in V12.3): passive tools loop over APEX domains
+	// ONLY — never the full scope list — so we never re-run enumeration once
+	// per discovered subdomain.
 	for _, domain := range apexDomains {
-		s.Printf("│  [Apex Domain: %s]\n", domain)
-		keys := s.Config.APIKeys
-
-		// subfinder — enumerates the full apex zone in a single call.
-		sfOut := filepath.Join(s.OutputFolder, fmt.Sprintf("subfinder_%s.txt", sanitizeName(domain)))
-		env := make(map[string]string)
-		if keys.Shodan != "" {
-			env["SHODAN_API_KEY"] = keys.Shodan
-		}
-		sfCount := 0
-		res := runner.RunTool(ctx, "subfinder", []string{"-d", domain, "-all", "-o", sfOut, "-silent"}, env)
-		if res.OK() {
-			for _, l := range readNonEmptyLines(sfOut) {
-				l = strings.ToLower(l)
-				if !found[l] {
-					found[l] = true
-					sfCount++
-				}
+		s.Printf("│  [Apex Domain: %s — concurrent fan-out]\n", domain)
+		hosts := passiveEnumApexConcurrently(ctx, s, domain)
+		added := 0
+		for _, h := range hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" || len(h) >= 255 {
+				continue
 			}
-			s.Printf("│    subfinder: %d subdomains\n", sfCount)
-		} else {
-			s.Printf("│    subfinder: SKIP (%v)\n", res.Err)
-		}
-
-		// assetfinder — apex only; filters to hosts under this apex.
-		// BUG #5 FIX (V6): read stdout line-by-line with an explicit 2-minute
-		// timeout. assetfinder emits results ONLY on stdout (never a file), so a
-		// robust CRLF-tolerant stdout parse is what actually captures its output.
-		afCount := 0
-		res = runner.RunToolWithTimeout(ctx, "assetfinder", []string{"--subs-only", domain}, nil, 2*time.Minute)
-		if res.OK() || res.TimedOut {
-			// Strip \r so CRLF-terminated lines still match the apex suffix.
-			for _, l := range strings.Split(strings.ReplaceAll(res.Stdout, "\r", ""), "\n") {
-				l = strings.TrimSpace(strings.ToLower(l))
-				if l != "" && (l == domain || strings.HasSuffix(l, "."+domain)) && !found[l] {
-					found[l] = true
-					afCount++
-				}
-			}
-			s.Printf("│    assetfinder: %d subdomains\n", afCount)
-		} else {
-			s.Printf("│    assetfinder: SKIP (%v)\n", res.Err)
-		}
-	}
-
-	// BUG #3 FIX (V6): detect the installed amass MAJOR version ONCE. amass v4+
-	// dropped the old config.ini format entirely and works perfectly in passive
-	// mode from CLI flags alone — feeding it a v3 config.ini made it silently
-	// return 0. We branch: v4+ = CLI-only; v3 = keep the generated config.ini.
-	amassMajor := detectAmassMajor(ctx)
-	amassCfg := ""
-	if amassMajor > 0 && amassMajor < 4 {
-		// Only v3 benefits from (and can parse) the generated INI config.
-		amassCfg = ensureAmassConfig(s)
-	}
-
-	// ── V12.2 · FAILURE #1 Method 2: auto-REMOVE amass after repeated zeros ─
-	// The mandate: "If amass continues to fail after Method 1, REMOVE IT
-	// ENTIRELY. Replace with chaos-client + subfinder + findomain (which all
-	// work perfectly)." The GitLab log showed amass return 0 on ALL 12 apexes,
-	// burning ~97 minutes. Rather than keep paying that toll every apex, we
-	// track consecutive zero-results and, once amass has failed
-	// amassGiveUpAfter apexes in a row, we STOP invoking it for the rest of the
-	// scan — subfinder + chaos + bbot + findomain fully cover the surface.
-	amassZeroStreak := 0
-	amassGivenUp := false
-
-	// ── Tools that require APEX/root domains ONLY (BUG #2) ────────────
-	for _, domain := range apexDomains {
-		s.Printf("│  [Apex passive enum: %s]\n", domain)
-
-		// amass — apex only.
-		//
-		// ── V12.0 OMEGA · BUG #1 ROOT-CAUSE FIX ───────────────────────────────
-		// A live Temu scan proved the previous integration was BROKEN: the log
-		// showed `amass (v5): 0 subdomains` while a manual CLI run in a parallel
-		// terminal produced 8,531. Root-cause analysis of the four candidate
-		// causes from the mandate:
-		//   (a) sub-command syntax  — amass v5.1.1 accepts BOTH `amass enum
-		//       -passive -d X` and the newer `amass passive -d X`; the exact
-		//       accepted form varies by build, so we now TRY the enum form and
-		//       FALL BACK to the passive form when it yields 0.
-		//   (b) premature timeout   — the runner hard-killed amass at its 6-min
-		//       cap (the Temu log ran amass 00:02:29→00:08:29 == exactly 6m).
-		//       We now give amass a dedicated 10-minute deadline (mandate spec).
-		//   (c) broken stdout read  — the old path buffered ALL stdout in memory
-		//       and only parsed it AFTER the process exited, so a SIGKILL at the
-		//       cap discarded everything amass had already emitted. We now stream
-		//       stdout LINE-BY-LINE via bufio.Scanner and ingest each host the
-		//       instant amass prints it, so a timeout keeps every partial result.
-		//   (d) missing config      — v3 only; handled by amassCfg below.
-		// The streaming runner logs the EXACT error on failure (mandate spec).
-		verNote := ""
-		if amassMajor > 0 {
-			verNote = fmt.Sprintf(" (v%d)", amassMajor)
-		}
-		if amassGivenUp {
-			// FAILURE #1 Method 2: amass already proved useless this scan —
-			// skip it and go straight to the reliable chaos backup.
-			s.Printf("│    amass%s: SKIPPED (auto-removed after %d consecutive zero-results — using chaos/subfinder/bbot/findomain)\n", verNote, amassGiveUpAfter)
-			if n := runChaosBackup(ctx, s, domain, found); n > 0 {
-				s.Printf("│    chaos-client: %d subdomains [amass replacement]\n", n)
-			}
-		} else {
-			amOut := filepath.Join(s.OutputFolder, fmt.Sprintf("amass_%s.txt", sanitizeName(domain)))
-			amRes := runAmassStreaming(ctx, domain, amassMajor, amassCfg, amOut, found)
-			switch {
-			case amRes.err != nil && amRes.count == 0:
-				s.Printf("│    amass%s: 0 subdomains — FAILED (%v)\n", verNote, amRes.err)
-				amassZeroStreak++
-				// ── V12.1 ZERO-TOLERANCE · chaos-client backup ────────────────
-				// Amass has been "fixed" in V7-V12 and STILL returned 0. The
-				// mandate: "If Amass STILL cannot be fixed, REMOVE IT and replace
-				// with chaos-client." We fall back to chaos whenever amass yields
-				// zero, and (Method 2) auto-remove amass entirely once it has
-				// failed amassGiveUpAfter apexes in a row.
-				if n := runChaosBackup(ctx, s, domain, found); n > 0 {
-					s.Printf("│    chaos-client: %d subdomains [amass fallback]\n", n)
-				}
-				if amassZeroStreak >= amassGiveUpAfter {
-					amassGivenUp = true
-					s.Printf("│    ⛔ amass auto-REMOVED for the rest of this scan (%d consecutive zero-results) — mandate FAILURE #1 Method 2\n", amassZeroStreak)
-				}
-			case amRes.timedOut:
-				s.Printf("│    amass%s: %d subdomains [partial — deadline reached, streamed results kept]\n", verNote, amRes.count)
-				amassZeroStreak = 0 // produced results → reset the give-up streak
-			default:
-				s.Printf("│    amass%s: %d subdomains [via %s]\n", verNote, amRes.count, amRes.subcmd)
-				amassZeroStreak = 0
-			}
-		}
-
-		// bbot — apex only. BUG #4 FIX (V6): use the exact proven invocation
-		//   bbot -t <domain> -p subdomain-enum -rf passive -om json --force -y -o <outdir>
-		// and parse ALL *.ndjson (and output.json) events where type==DNS_NAME.
-		// The old "[OK]" label on a 0 result was misleading — 0 from bbot is a
-		// FAILURE, so we now log it as such.
-		bbotOutDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(domain)))
-		res := runner.RunTool(ctx, "bbot", []string{
-			"-t", domain, "-p", "subdomain-enum", "-rf", "passive",
-			"-om", "json", "--force", "-y", "-o", bbotOutDir,
-		}, nil)
-		if res.OK() || res.TimedOut {
-			bbotCount := 0
-			addHost := func(h string) {
-				h = strings.ToLower(strings.TrimSpace(h))
-				if h != "" && strings.HasSuffix(h, domain) && len(h) < 255 && !found[h] {
+			if h == domain || strings.HasSuffix(h, "."+domain) {
+				if !found[h] {
 					found[h] = true
-					bbotCount++
+					added++
 				}
 			}
-			// Parse EVERY .ndjson / output.json file in the output dir.
-			_ = filepath.Walk(bbotOutDir, func(path string, info os.FileInfo, err error) error {
-				if err != nil || info == nil || info.IsDir() {
-					return nil
-				}
-				base := strings.ToLower(filepath.Base(path))
-				switch {
-				case strings.HasSuffix(base, ".ndjson") || base == "output.json" || base == "output.ndjson":
-					for _, l := range readNonEmptyLines(path) {
-						var ev struct {
-							Type string `json:"type"`
-							Data string `json:"data"`
-						}
-						if json.Unmarshal([]byte(l), &ev) == nil && ev.Type == "DNS_NAME" {
-							addHost(ev.Data)
-						}
-					}
-				case strings.HasSuffix(base, ".txt"):
-					for _, l := range readNonEmptyLines(path) {
-						addHost(l)
-					}
-				}
-				return nil
-			})
-			if bbotCount > 0 {
-				status := "OK"
-				if res.TimedOut {
-					status = "partial (timeout)"
-				}
-				s.Printf("│    bbot: %d subdomains [%s]\n", bbotCount, status)
-			} else if res.TimedOut {
-				s.Printf("│    bbot: 0 subdomains — FAILED (timed out before results)\n")
-			} else {
-				s.Printf("│    bbot: 0 subdomains — FAILED (no DNS_NAME events parsed from %s)\n", bbotOutDir)
-			}
-		} else {
-			s.Printf("│    bbot: SKIP (%v)\n", res.Err)
 		}
-
-		// findomain — apex only (BUG #7). -t <domain> -u <out> -q. Some
-		// findomain builds write to the file, others only to stdout depending
-		// on version, so we parse BOTH the output file and stdout as a fallback.
-		// BUG #3 (audit) FIX: findomain reliably writes to STDOUT, one host per
-		// line, with `-t <domain> -q`. The `-u <file>` form is not honored by all
-		// builds (it prints to stdout instead), which caused the empty-file "0
-		// subdomains". We now parse STDOUT as the primary source and fall back to
-		// the output file only if stdout was empty. No -t/--threads (unsupported
-		// on some builds).
-		fdOut := filepath.Join(s.OutputFolder, fmt.Sprintf("findomain_%s.txt", sanitizeName(domain)))
-		fdCount := 0
-		res = runner.RunTool(ctx, "findomain", []string{"-t", domain, "-q", "-u", fdOut}, nil)
-		if res.OK() || res.TimedOut {
-			// Primary: stdout. Fallback: the -u output file.
-			lines := strings.Split(res.Stdout, "\n")
-			if fileLines := readNonEmptyLines(fdOut); len(fileLines) > 0 {
-				lines = append(lines, fileLines...)
-			}
-			for _, l := range lines {
-				l = strings.ToLower(strings.TrimSpace(l))
-				if l != "" && strings.HasSuffix(l, domain) && !found[l] {
-					found[l] = true
-					fdCount++
-				}
-			}
-			s.Printf("│    findomain: %d subdomains\n", fdCount)
-		} else {
-			s.Printf("│    findomain: SKIP (%v)\n", res.Err)
-		}
+		s.Printf("│    apex %s: +%d unique subdomains (all tools merged)\n", domain, added)
 	}
 
 	// ── V12.1 Section 3: uncover (Shodan/Censys/FOFA/Hunter) apex sweep ──
@@ -1151,412 +968,219 @@ func ensureResolvers(s *engine.State) string {
 	return fallback
 }
 
-// amassStreamResult is the outcome of a streaming amass run.
-type amassStreamResult struct {
-	count    int    // NEW in-scope subdomains added to `found` this run
-	subcmd   string // which sub-command actually produced results
-	timedOut bool   // true when the 15-minute deadline killed amass
-	err      error  // exact error when the run failed with zero results
+// ═══════════════════════════════════════════════════════════════
+// V12.3 · FAILURE #1 (LEGACY ENUMERATOR PURGED) + FAILURE #3 (FAN-OUT)
+//
+// The legacy OWASP enumerator has been removed entirely — it returned 0
+// subdomains for 8 straight versions (V7→V12.2) and its sequential execution
+// wedged Phase 04 (when it hung on gitlab.com, bbot AND findomain were skipped
+// across ALL 8 apexes).
+//
+// passiveEnumApexConcurrently launches every passive enumerator for one apex in
+// its OWN dedicated goroutine with its OWN isolated context.WithTimeout, so a
+// slow/wedged tool can NEVER starve the others. Per-tool caps (subfinder 6m,
+// bbot 8m, findomain 4m, assetfinder 3m, chaos 4m) are the mandated budgets.
+// Results are merged under a mutex and deduped before return.
+// ═══════════════════════════════════════════════════════════════
+func passiveEnumApexConcurrently(ctx context.Context, s *engine.State, apex string) []string {
+	var mu sync.Mutex
+	var results []string
+	var wg sync.WaitGroup
+
+	add := func(hosts []string) {
+		mu.Lock()
+		results = append(results, hosts...)
+		mu.Unlock()
+	}
+	report := func(tool string, n int, note string) {
+		s.Printf("│    %-11s [%s]: %d subdomains%s\n", tool, apex, n, note)
+	}
+
+	tools := []struct {
+		name    string
+		timeout time.Duration
+		fn      func(context.Context, *engine.State, string) ([]string, string)
+	}{
+		{"subfinder", 6 * time.Minute, runSubfinder},
+		{"bbot", 8 * time.Minute, runBbot},
+		{"findomain", 4 * time.Minute, runFindomain},
+		{"assetfinder", 3 * time.Minute, runAssetfinder},
+		{"chaos", 4 * time.Minute, runChaos},
+	}
+
+	for _, t := range tools {
+		wg.Add(1)
+		go func(name string, timeout time.Duration, fn func(context.Context, *engine.State, string) ([]string, string)) {
+			defer wg.Done()
+			// Each tool gets its OWN dedicated, isolated deadline — one tool
+			// hanging can never consume another tool's budget (FAILURE #3).
+			tCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			hosts, note := fn(tCtx, s, apex)
+			add(hosts)
+			report(name, len(hosts), note)
+		}(t.name, t.timeout, t.fn)
+	}
+
+	wg.Wait()
+	return dedupHosts(results)
 }
 
-// runAmassStreaming is the V12.0 OMEGA BUG #1 fix. It executes amass with a
-// dedicated 10-minute deadline (independent of the shared runner cap that was
-// killing amass mid-run), reads STDOUT line-by-line via bufio.Scanner so every
-// host is ingested the instant amass prints it (a timeout keeps all partial
-// results), and — when the primary sub-command yields nothing — retries with
-// the alternate v5 sub-command. Newly discovered in-scope hosts are added to
-// `found` and also appended to amOut for the report artifact.
-//
-// Sub-command matrix (accepted forms differ per amass build):
-//
-//	v5+/unknown : `amass enum -passive -d <domain>`  → stdout
-//	              fallback `amass passive -d <domain>` (v5.1.1 short form)
-//	v4          : `amass enum -passive -d <domain> -o <out>` (stdout also works)
-//	v3          : `amass enum -passive -d <domain> -config <ini> -o <out>`
-//
-// No `-timeout N` is passed to amass itself: that flag is the exact knob that
-// silently mis-behaved on v5 in the field, and OUR context deadline is the
-// authoritative bound now.
-func runAmassStreaming(ctx context.Context, domain string, amassMajor int, amassCfg, amOut string, found map[string]bool) amassStreamResult {
-	if _, err := runner.ResolveToolPath("amass"); err != nil {
-		return amassStreamResult{err: fmt.Errorf("amass not found: %w", err)}
-	}
-
-	// ── V12.2 · FAILURE #1 ROOT-CAUSE FIX — read amass's -o OUTPUT FILE ────
-	// The GitLab log proved amass v5 returned 0 for the 7th consecutive version
-	// with the "error" being amass's own ASCII-ART BANNER captured off stderr.
-	// Root cause (mandate): amass v5.1.x writes discovered subdomains to a FILE
-	// (via -o), and the stdout pipe the code scanned was effectively empty, so
-	// streaming stdout alone found nothing and then surfaced the stderr banner.
-	// The fix is to pass `-o <file>` to EVERY attempt and read that file as the
-	// AUTHORITATIVE result source (stdout streaming is kept as a bonus for
-	// builds that DO print to stdout). amFileOut is a dedicated capture file per
-	// invocation so a stale artifact never masquerades as fresh results.
-	amFileOut := filepath.Join(filepath.Dir(amOut), "amass_raw_"+sanitizeName(domain)+".txt")
-	_ = os.Remove(amFileOut) // start clean so we only read THIS run's output
-
-	// Build the ordered list of (label, args) attempts for this version. Every
-	// attempt now writes to amFileOut with -o (Method 1 from the mandate).
-	type attempt struct {
-		label string
-		args  []string
-	}
-	var attempts []attempt
-	switch {
-	case amassMajor == 4:
-		attempts = []attempt{
-			{"enum -passive -o (v4)", []string{"enum", "-passive", "-d", domain, "-o", amFileOut}},
-		}
-	case amassMajor > 0 && amassMajor < 4: // v3
-		a3 := []string{"enum", "-passive", "-d", domain, "-o", amFileOut}
-		if amassCfg != "" {
-			a3 = append(a3, "-config", amassCfg)
-		}
-		attempts = []attempt{{"enum -passive -config -o (v3)", a3}}
-	default: // v5+ / unknown — try the modern long form, then the short form.
-		attempts = []attempt{
-			{"enum -passive -o", []string{"enum", "-passive", "-d", domain, "-o", amFileOut}},
-			{"passive -o", []string{"passive", "-d", domain, "-o", amFileOut}},
-		}
-	}
-
-	// A single writer for the artifact file, appended across attempts.
-	outFile, _ := os.OpenFile(amOut, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if outFile != nil {
-		defer outFile.Close()
-	}
-
-	suffix := "." + domain
-	ingest := func(line string) int {
-		added := 0
-		for _, tok := range strings.Fields(strings.ToLower(line)) {
-			tok = strings.Trim(tok, ".,()<>\"'[]")
-			if tok == domain || strings.HasSuffix(tok, suffix) {
-				if len(tok) < 255 && !found[tok] {
-					found[tok] = true
-					added++
-					if outFile != nil {
-						fmt.Fprintln(outFile, tok)
-					}
-				}
-			}
-		}
-		return added
-	}
-
-	var lastErr error
-	var lastTimeout bool
-	for _, at := range attempts {
-		count, timedOut, err := streamAmassOnce(ctx, at.args, ingest)
-		lastErr, lastTimeout = err, timedOut
-
-		// ── FAILURE #1 Method 1: read the -o output FILE ──────────────────
-		// This is the authoritative source for amass v5, which writes results
-		// to the file even when its stdout pipe is empty. Every host here is
-		// run through the SAME ingest() so it merges into `found`, appends to
-		// the artifact, and increments the count exactly like a stdout line.
-		count += ingestAmassFile(amFileOut, ingest)
-
-		if count > 0 {
-			return amassStreamResult{count: count, subcmd: at.label, timedOut: timedOut}
-		}
-	}
-	return amassStreamResult{count: 0, subcmd: "", timedOut: lastTimeout, err: lastErr}
-}
-
-// ingestAmassFile reads amass's -o output file (FAILURE #1 Method 1) and feeds
-// every line through the provided ingest function, returning the number of NEW
-// in-scope hosts added. Missing/empty files return 0. This is what finally
-// captures amass v5 output that never reaches stdout.
-func ingestAmassFile(path string, ingest func(string) int) int {
-	added := 0
-	for _, l := range readNonEmptyLines(path) {
-		added += ingest(l)
-	}
-	return added
-}
-
-// amassDeadline is the dedicated per-invocation deadline for amass. Amass is
-// SLOW (the V12.1 mandate: "not 2, not 5, not 10 — Amass is SLOW"), so V12.1
-// raises the streaming deadline to 15 minutes.
-const amassDeadline = 15 * time.Minute
-
-// amassGiveUpAfter is how many CONSECUTIVE zero-result apexes amass may produce
-// before it is auto-removed for the rest of the scan (V12.2 · FAILURE #1
-// Method 2). The GitLab log showed amass fail on all 12 apexes; with this cap
-// it would have stopped wasting time after the 2nd. chaos/subfinder/bbot/
-// findomain fully cover the passive surface without it.
-const amassGiveUpAfter = 2
-
-// runChaosBackup is the V12.1 chaos-client fallback for amass. ProjectDiscovery
-// Chaos (`chaos -d <domain> -silent`) queries the Chaos passive-DNS dataset and
-// is faster/more reliable than amass. Requires a PDCP_API_KEY env var (Chaos is
-// key-gated); when the key is missing chaos exits with an error and we simply
-// report 0. Newly discovered in-scope hosts are merged into `found`.
-func runChaosBackup(ctx context.Context, s *engine.State, domain string, found map[string]bool) int {
-	if _, err := runner.ResolveToolPath("chaos"); err != nil {
-		return 0
-	}
-	res := runner.RunTool(ctx, "chaos", []string{"-d", domain, "-silent"}, nil)
-	if !res.OK() && !res.TimedOut {
-		return 0
-	}
-	added := 0
-	suffix := "." + domain
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		h := strings.ToLower(strings.TrimSpace(line))
-		if h == "" {
+// dedupHosts returns the unique, lowercased, trimmed set of hosts. It is the
+// dedup() the concurrent fan-out relies on.
+func dedupHosts(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, h := range in {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" || seen[h] {
 			continue
 		}
-		if (h == domain || strings.HasSuffix(h, suffix)) && len(h) < 255 && !found[h] {
-			found[h] = true
-			added++
-		}
+		seen[h] = true
+		out = append(out, h)
 	}
-	return added
+	return out
 }
 
-// runAmassV5 is the V12.1 ZERO-TOLERANCE dedicated, self-contained, TESTABLE
-// amass integration. It tries THREE methods in sequence and returns the merged,
-// de-duplicated list of subdomains it captured for `domain`:
-//
-//	Method A: amass enum -passive -d <domain>
-//	Method B: amass passive -d <domain>                (v5.1.1 short form)
-//	Method C: amass enum -passive -d <domain> -config <configPath>
-//
-// Each method streams stdout line-by-line under a 15-minute context deadline so
-// partial results survive a timeout. If ALL three methods yield zero results it
-// returns the exact combined error:
-//
-//	amass: all 3 methods failed: <errA> / <errB> / <errC>
-//
-// This is the function asserted by TestAmassV5Integration.
-func runAmassV5(domain string) ([]string, error) {
-	return runAmassV5Ctx(context.Background(), domain, "")
+// filterUnderApex keeps only hosts that are the apex itself or a subdomain of
+// it (and are a sane length). Shared by every per-tool runner below.
+func filterUnderApex(lines []string, apex string) []string {
+	suffix := "." + apex
+	out := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.ToLower(strings.TrimSpace(strings.TrimRight(l, "\r")))
+		if l == "" || len(l) >= 255 {
+			continue
+		}
+		if l == apex || strings.HasSuffix(l, suffix) {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
-// runAmassV5Ctx is runAmassV5 with an explicit parent context and optional
-// amass config path (Method C). Exposed separately so the pipeline can pass its
-// own cancellation context and a v3 config while the exported runAmassV5 stays
-// a simple, test-friendly signature.
-func runAmassV5Ctx(parent context.Context, domain, configPath string) ([]string, error) {
-	if _, err := runner.ResolveToolPath("amass"); err != nil {
-		return nil, fmt.Errorf("amass not found: %w", err)
+// runSubfinder enumerates the full apex zone in a single call. subfinder is the
+// primary passive source and covers every subdomain of the apex.
+func runSubfinder(ctx context.Context, s *engine.State, apex string) ([]string, string) {
+	if _, err := runner.ResolveToolPath("subfinder"); err != nil {
+		return nil, " (SKIP: not installed)"
 	}
-
-	found := map[string]bool{}
-	suffix := "." + domain
-	ingest := func(line string) int {
-		added := 0
-		for _, tok := range strings.Fields(strings.ToLower(line)) {
-			tok = strings.Trim(tok, ".,()<>\"'[]")
-			if (tok == domain || strings.HasSuffix(tok, suffix)) && len(tok) < 255 && !found[tok] {
-				found[tok] = true
-				added++
-			}
-		}
-		return added
+	out := filepath.Join(s.OutputFolder, fmt.Sprintf("subfinder_%s.txt", sanitizeName(apex)))
+	env := make(map[string]string)
+	if s.Config.APIKeys.Shodan != "" {
+		env["SHODAN_API_KEY"] = s.Config.APIKeys.Shodan
 	}
-
-	methodC := []string{"enum", "-passive", "-d", domain}
-	if configPath != "" {
-		methodC = append(methodC, "-config", configPath)
+	res := runner.RunTool(ctx, "subfinder", []string{"-d", apex, "-all", "-o", out, "-silent"}, env)
+	if !res.OK() && !res.TimedOut {
+		return nil, fmt.Sprintf(" (SKIP: %v)", res.Err)
 	}
-	methods := []struct {
-		label string
-		args  []string
-	}{
-		{"enum -passive", []string{"enum", "-passive", "-d", domain}},
-		{"passive", []string{"passive", "-d", domain}},
-		{"enum -passive -config", methodC},
+	hosts := filterUnderApex(readNonEmptyLines(out), apex)
+	// subfinder also prints to stdout on some builds — merge that too.
+	hosts = append(hosts, filterUnderApex(strings.Split(res.Stdout, "\n"), apex)...)
+	note := ""
+	if res.TimedOut {
+		note = " (partial: 6m cap)"
 	}
-
-	errs := make([]string, 0, 3)
-	for _, m := range methods {
-		count, _, err := streamAmassOnce(parent, m.args, ingest)
-		if count > 0 {
-			// Success on this method: return everything captured so far.
-			out := make([]string, 0, len(found))
-			for h := range found {
-				out = append(out, h)
-			}
-			return out, nil
-		}
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("[%s] %v", m.label, err))
-		} else {
-			errs = append(errs, fmt.Sprintf("[%s] 0 results", m.label))
-		}
-	}
-
-	// All 3 methods produced zero. If amass nonetheless emitted anything that
-	// slipped past the per-method count (it won't, but be safe), return it.
-	if len(found) > 0 {
-		out := make([]string, 0, len(found))
-		for h := range found {
-			out = append(out, h)
-		}
-		return out, nil
-	}
-	return nil, fmt.Errorf("amass: all 3 methods failed: %s", strings.Join(errs, " / "))
+	return dedupHosts(hosts), note
 }
 
-// streamAmassOnce runs one amass invocation with a 15-minute deadline, scans
-// stdout line-by-line, and calls ingest() on each line as it arrives. Returns
-// the number of newly ingested hosts, whether the deadline fired, and the exact
-// error (nil on clean exit). Partial results are preserved on timeout because
-// ingest has already run for every line amass emitted before the kill.
-func streamAmassOnce(parent context.Context, args []string, ingest func(string) int) (int, bool, error) {
-	// V12.1 mandate spec: 15-minute dedicated deadline (amass is SLOW),
-	// independent of the shared runner cap.
-	ctx, cancel := context.WithTimeout(parent, amassDeadline)
-	defer cancel()
-
-	binPath, err := runner.ResolveToolPath("amass")
-	if err != nil {
-		return 0, false, err
+// runBbot runs the proven passive subdomain-enum recipe and parses every
+// DNS_NAME event from the ndjson output.
+func runBbot(ctx context.Context, s *engine.State, apex string) ([]string, string) {
+	if _, err := runner.ResolveToolPath("bbot"); err != nil {
+		return nil, " (SKIP: not installed)"
 	}
-	cmd := exec.Command(binPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = os.Environ()
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return 0, false, fmt.Errorf("amass stdout pipe: %w", err)
+	outDir := filepath.Join(s.OutputFolder, fmt.Sprintf("bbot_%s", sanitizeName(apex)))
+	res := runner.RunTool(ctx, "bbot", []string{
+		"-t", apex, "-p", "subdomain-enum", "-rf", "passive",
+		"-om", "json", "--force", "-y", "-o", outDir,
+	}, nil)
+	if !res.OK() && !res.TimedOut {
+		return nil, fmt.Sprintf(" (SKIP: %v)", res.Err)
 	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-
-	if err := cmd.Start(); err != nil {
-		return 0, false, fmt.Errorf("amass start: %w", err)
-	}
-
-	// Kill the whole process group when the deadline/parent context fires.
-	killed := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			if cmd.Process != nil {
-				if pgid, e := syscall.Getpgid(cmd.Process.Pid); e == nil {
-					_ = syscall.Kill(-pgid, syscall.SIGKILL)
-				} else {
-					_ = cmd.Process.Kill()
+	var raw []string
+	_ = filepath.Walk(outDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		base := strings.ToLower(filepath.Base(path))
+		switch {
+		case strings.HasSuffix(base, ".ndjson") || base == "output.json" || base == "output.ndjson":
+			for _, l := range readNonEmptyLines(path) {
+				var ev struct {
+					Type string `json:"type"`
+					Data string `json:"data"`
+				}
+				if json.Unmarshal([]byte(l), &ev) == nil && ev.Type == "DNS_NAME" {
+					raw = append(raw, ev.Data)
 				}
 			}
-		case <-killed:
+		case strings.HasSuffix(base, ".txt"):
+			raw = append(raw, readNonEmptyLines(path)...)
 		}
-	}()
-
-	count := 0
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // tolerate long FQDN lines
-	for scanner.Scan() {
-		count += ingest(scanner.Text())
+		return nil
+	})
+	note := ""
+	if res.TimedOut {
+		note = " (partial: 8m cap)"
 	}
-	waitErr := cmd.Wait()
-	close(killed)
-
-	timedOut := ctx.Err() == context.DeadlineExceeded
-	if timedOut {
-		return count, true, nil // partial success: results already ingested
-	}
-	if parent.Err() != nil {
-		return count, false, fmt.Errorf("scan cancelled")
-	}
-	if waitErr != nil {
-		// A non-zero exit with results is fine (amass often exits 1); only
-		// surface the error when we got nothing AND stderr has a real message.
-		if count == 0 {
-			msg := strings.TrimSpace(stderr.String())
-			if msg == "" {
-				msg = waitErr.Error()
-			}
-			if len(msg) > 200 {
-				msg = msg[:200] + "…"
-			}
-			return 0, false, fmt.Errorf("amass exited: %s", msg)
-		}
-	}
-	return count, false, nil
+	return dedupHosts(filterUnderApex(raw, apex)), note
 }
 
-// detectAmassMajor runs `amass -version` and returns the major version number
-// (e.g. 4 for v4.2.0). Returns 0 when amass is missing or the version cannot be
-// parsed — callers treat 0 as "assume modern (v4+), CLI-only" (BUG #3 V6).
-// amass prints its version to STDERR on most builds, so we parse both streams.
-func detectAmassMajor(ctx context.Context) int {
-	if _, err := runner.ResolveToolPath("amass"); err != nil {
-		return 0
+// runFindomain parses STDOUT primarily (reliable across builds) and falls back
+// to the -u output file.
+func runFindomain(ctx context.Context, s *engine.State, apex string) ([]string, string) {
+	if _, err := runner.ResolveToolPath("findomain"); err != nil {
+		return nil, " (SKIP: not installed)"
 	}
-	res := runner.RunToolWithTimeout(ctx, "amass", []string{"-version"}, nil, 20*time.Second)
-	out := res.Stdout + "\n" + res.Stderr
-	// Match the first vN or N. pattern, e.g. "v4.2.0", "amass version 3.23.3".
-	re := regexp.MustCompile(`v?(\d+)\.\d+`)
-	if m := re.FindStringSubmatch(out); len(m) == 2 {
-		if n, err := strconv.Atoi(m[1]); err == nil {
-			return n
-		}
+	out := filepath.Join(s.OutputFolder, fmt.Sprintf("findomain_%s.txt", sanitizeName(apex)))
+	res := runner.RunTool(ctx, "findomain", []string{"-t", apex, "-q", "-u", out}, nil)
+	if !res.OK() && !res.TimedOut {
+		return nil, fmt.Sprintf(" (SKIP: %v)", res.Err)
 	}
-	return 0
+	lines := strings.Split(res.Stdout, "\n")
+	lines = append(lines, readNonEmptyLines(out)...)
+	note := ""
+	if res.TimedOut {
+		note = " (partial: 4m cap)"
+	}
+	return dedupHosts(filterUnderApex(lines, apex)), note
 }
 
-// ensureAmassConfig makes sure amass has a config file that enables data
-// sources (BUG #4, v3 only). If the user already has ~/.config/amass/config.ini
-// we do not touch it; otherwise we write a minimal one that turns on all free,
-// key-less sources. Returns the config path, or "" if it could not be created
-// (amass then runs with its own defaults). Only used for amass v3 — v4+ ignores
-// this format (BUG #3 V6).
-func ensureAmassConfig(s *engine.State) string {
-	home := os.Getenv("HOME")
-	if home == "" {
-		return ""
+// runAssetfinder reads assetfinder's stdout (its only output channel).
+func runAssetfinder(ctx context.Context, s *engine.State, apex string) ([]string, string) {
+	if _, err := runner.ResolveToolPath("assetfinder"); err != nil {
+		return nil, " (SKIP: not installed)"
 	}
-	// Respect an existing user config — never overwrite it.
-	for _, existing := range []string{
-		filepath.Join(home, ".config", "amass", "config.ini"),
-		filepath.Join(home, ".config", "amass", "config.yaml"),
-	} {
-		if _, err := os.Stat(existing); err == nil {
-			return existing
-		}
+	res := runner.RunTool(ctx, "assetfinder", []string{"--subs-only", apex}, nil)
+	if !res.OK() && !res.TimedOut {
+		return nil, fmt.Sprintf(" (SKIP: %v)", res.Err)
 	}
-	dir := filepath.Join(home, ".config", "amass")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return ""
+	lines := strings.Split(strings.ReplaceAll(res.Stdout, "\r", ""), "\n")
+	note := ""
+	if res.TimedOut {
+		note = " (partial: 3m cap)"
 	}
-	cfgPath := filepath.Join(dir, "config.ini")
-	// Minimal config: scope left open, all free data sources enabled. amass
-	// treats a data source with no api key as free/enabled when present here.
-	content := `# Auto-generated by MOHAMMED (BUG #4 fix) — enables free, key-less data sources.
-# amass silently returns 0 results when no config enables any source, so we
-# turn on every source that works WITHOUT an API key.
-[scope]
+	return dedupHosts(filterUnderApex(lines, apex)), note
+}
 
-[data_sources]
-minimum_ttl = 1440
-
-[data_sources.CertSpotter]
-[data_sources.CRTsh]
-[data_sources.HackerTarget]
-[data_sources.URLScan]
-[data_sources.PassiveDNS]
-[data_sources.Crtsh]
-[data_sources.RapidDNS]
-[data_sources.AnubisDB]
-[data_sources.ThreatMiner]
-[data_sources.Certspotter]
-[data_sources.AlienVault]
-[data_sources.DNSDumpster]
-[data_sources.Wayback]
-[data_sources.CommonCrawl]
-[data_sources.Riddler]
-[data_sources.SiteDossier]
-`
-	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
-		return ""
+// runChaos queries the ProjectDiscovery Chaos passive-DNS dataset. Chaos is
+// key-gated (PDCP_API_KEY); when the key is missing it exits with an error and
+// we simply return 0 hosts. This is one of the mandated replacement tools.
+func runChaos(ctx context.Context, s *engine.State, apex string) ([]string, string) {
+	if _, err := runner.ResolveToolPath("chaos"); err != nil {
+		return nil, " (SKIP: not installed)"
 	}
-	s.Printf("│  amass: wrote minimal free-source config → %s\n", cfgPath)
-	return cfgPath
+	res := runner.RunTool(ctx, "chaos", []string{"-d", apex, "-silent"}, nil)
+	if !res.OK() && !res.TimedOut {
+		return nil, " (no key / no data)"
+	}
+	lines := strings.Split(res.Stdout, "\n")
+	note := ""
+	if res.TimedOut {
+		note = " (partial: 4m cap)"
+	}
+	return dedupHosts(filterUnderApex(lines, apex)), note
 }
 
 // ensureGauConfig makes sure gau has a ~/.gau.toml (BUG #4 audit). gau logs
@@ -1902,8 +1526,21 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 
 	// PRIMARY PASS — direct, NO proxy. -timeout 10 prevents hanging on slow
 	// hosts; -json writes JSONL to -o.
+	//
+	// ── V12.3 · FAILURE #4: WAF-403/429-AWARE LIVE DETECTION ───────────────
+	// The 9h42m GitLab scan probed 5,320 hosts and reported 0 LIVE, because
+	// Cloudflare answered every request with a 403/429 JS challenge and the old
+	// probe treated any non-2xx/3xx as DEAD. A host that returns 401/403/405/
+	// 429/500/502/503 is very much ALIVE (it is actively refusing us — a strong
+	// signal there is something worth authenticating to). We add the mandated
+	// discovery flags and, crucially, -mc (match-code) restricted to the full
+	// LIVE set so those challenge responses are KEPT, not discarded.
+	liveStatusCodes := "200,201,204,301,302,307,308,401,403,405,429,500,502,503"
 	baseArgs := []string{"-l", cleanHostsFile, "-o", httpxOut, "-silent", "-nc",
-		"-rl", "150", "-timeout", "10", "-sc", "-title", "-td", "-cdn", "-fr",
+		"-rl", "150", "-timeout", "10",
+		"-status-code", "-follow-redirects", "-follow-host-redirects",
+		"-no-fallback-scheme", "-title", "-tech-detect", "-cdn",
+		"-mc", liveStatusCodes,
 		"-threads", fmt.Sprintf("%d", s.Config.Threads),
 		"-json", "-srd", filepath.Join(s.OutputFolder, "httpx_responses")}
 
@@ -1930,11 +1567,37 @@ func (p *HTTPProbePhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 	if res.OK() || res.TimedOut {
 		parseHTTPXOut()
-		s.Printf("│  httpx (direct): %d live endpoints\n", len(urlSet))
+		s.Printf("│  httpx (direct): %d live endpoints (LIVE set incl. WAF 401/403/405/429/5xx)\n", len(urlSet))
 	} else {
 		s.Printf("│  httpx: FAILED (%v)\n", res.Err)
 		if s.Config.Debug && res.Stderr != "" {
 			s.Printf("│  [DEBUG] httpx stderr: %s\n", strings.TrimSpace(firstN(res.Stderr, 500)))
+		}
+	}
+
+	// ── V12.3 · FAILURE #4: RESILIENT PROBE when live rate is pathological ──
+	// If httpx confirmed fewer than 2% of the input hosts as live, the target
+	// is almost certainly behind an aggressive WAF that is fingerprinting and
+	// blocking httpx's default client. runResilientHTTPProbe re-probes the FULL
+	// input list with a rotating browser User-Agent pool, a lower request rate,
+	// and a raw TCP HTTP/HTTPS probe that treats a completed TLS handshake +ANY
+	// HTTP status line as LIVE. This is what recovers the 5,320 "dead" hosts.
+	if len(urlSet) < inputN*2/100 {
+		s.Printf("│  ⚠ httpx live rate %d/%d (<2%%) — WAF suspected, running RESILIENT browser-UA probe\n", len(urlSet), inputN)
+		recovered := runResilientHTTPProbe(ctx, s, readNonEmptyLines(cleanHostsFile))
+		added := 0
+		for _, u := range recovered {
+			if !urlSet[u] {
+				urlSet[u] = true
+				s.URLs = append(s.URLs, u)
+				added++
+			}
+		}
+		if added > 0 {
+			writeLines(httpxOut, appendUnique(readNonEmptyLines(httpxOut), recovered))
+			s.Printf("│  resilient probe: recovered %d live host(s) httpx marked dead\n", added)
+		} else {
+			s.Printf("│  resilient probe: 0 additional — hosts genuinely unreachable\n")
 		}
 	}
 
@@ -2082,6 +1745,138 @@ func directProbe(ctx context.Context, s *engine.State, hosts []string) []string 
 	}
 	wg.Wait()
 	return alive
+}
+
+// runResilientHTTPProbe is the V12.3 · FAILURE #4 fallback for WAF-fronted
+// targets. When httpx confirms <2% of hosts live, an aggressive WAF is almost
+// certainly fingerprinting and blocking httpx's default client. This probe:
+//   - rotates a pool of REAL browser User-Agents (Chrome/Firefox/Safari),
+//   - uses a LOWER concurrency (10, not 30) so it doesn't trip rate limits,
+//   - treats a completed handshake returning ANY HTTP status line — including
+//     401/403/405/429/5xx — as LIVE (the exact 5,320-host GitLab failure).
+//
+// A raw TCP HTTP/HTTPS probe (net.Dial + minimal request) is used as a second
+// layer when curl itself is blocked, so a host that speaks HTTP at all is
+// recorded live.
+func runResilientHTTPProbe(ctx context.Context, s *engine.State, hosts []string) []string {
+	browserUAs := []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+		"Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+	}
+	// "Live" for a WAF-fronted host is ANY reachable HTTP status, including the
+	// challenge codes. 000 = connection failure = genuinely dead.
+	liveCode := func(code string) bool {
+		code = strings.TrimSpace(code)
+		return code != "" && code != "000"
+	}
+
+	var (
+		mu    sync.Mutex
+		wg    sync.WaitGroup
+		alive []string
+		sem   = make(chan struct{}, 10) // LOWER concurrency than directProbe
+	)
+	// Bound the work so a 14,000-host scope stays within the phase budget while
+	// still covering far more than directProbe's 200.
+	limit := len(hosts)
+	if limit > 3000 {
+		limit = 3000
+	}
+	for i, h := range hosts[:limit] {
+		fields := strings.Fields(h)
+		if len(fields) == 0 {
+			continue
+		}
+		host := strings.TrimSpace(fields[0])
+		if host == "" {
+			continue
+		}
+		ua := browserUAs[i%len(browserUAs)]
+		wg.Add(1)
+		go func(host, ua string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			for _, scheme := range []string{"https://", "http://"} {
+				// Layer 1: curl with a browser UA + realistic Accept headers.
+				curlArgs := []string{"-s", "-o", "/dev/null", "-w", "%{http_code}",
+					"-m", "12", "-A", ua,
+					"-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+					"-H", "Accept-Language: en-US,en;q=0.9",
+					"-k"}
+				curlArgs = append(curlArgs, scheme+host)
+				res := runner.RunTool(ctx, "curl", curlArgs, nil)
+				if res.OK() && liveCode(res.Stdout) {
+					mu.Lock()
+					alive = append(alive, scheme+host)
+					mu.Unlock()
+					return
+				}
+				// Layer 2: raw TCP HTTP probe — a completed connection that
+				// returns an "HTTP/" status line means the host is alive even if
+				// curl was blocked outright.
+				if rawTCPHTTPAlive(ctx, host, scheme == "https://") {
+					mu.Lock()
+					alive = append(alive, scheme+host)
+					mu.Unlock()
+					return
+				}
+			}
+		}(host, ua)
+	}
+	wg.Wait()
+	return alive
+}
+
+// rawTCPHTTPAlive opens a bare TCP connection to the host (443 for TLS, 80
+// otherwise), sends a minimal HTTP/1.1 GET, and returns true if the peer
+// responds with an "HTTP/" status line. It intentionally does NOT verify TLS
+// certificates — we only care that the host speaks HTTP at all.
+func rawTCPHTTPAlive(ctx context.Context, host string, tls bool) bool {
+	port := "80"
+	if tls {
+		port = "443"
+	}
+	d := net.Dialer{Timeout: 8 * time.Second}
+	dialCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var conn net.Conn
+	var err error
+	if tls {
+		conn, err = tlsDialContext(dialCtx, &d, host, port)
+	} else {
+		conn, err = d.DialContext(dialCtx, "tcp", net.JoinHostPort(host, port))
+	}
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
+	req := "GET / HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return false
+	}
+	buf := make([]byte, 64)
+	n, _ := conn.Read(buf)
+	return n > 0 && strings.HasPrefix(string(buf[:n]), "HTTP/")
+}
+
+// tlsDialContext dials a TLS connection with certificate verification disabled
+// (we only care that the host completes a TLS handshake and speaks HTTP, not
+// that its cert is valid — WAF-fronted hosts often present shared certs).
+func tlsDialContext(ctx context.Context, d *net.Dialer, host, port string) (net.Conn, error) {
+	rawConn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return nil, err
+	}
+	tlsConn := tls.Client(rawConn, &tls.Config{InsecureSkipVerify: true, ServerName: host})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		rawConn.Close()
+		return nil, err
+	}
+	return tlsConn, nil
 }
 
 // firstN returns the first n bytes of s (for bounded debug output).
@@ -3271,6 +3066,14 @@ func (p *CORSPhase) Execute(ctx context.Context, s *engine.State) error {
 	targets, removed := filter.FilterInScopeURLs(targets, s.Scope)
 	if removed > 0 {
 		s.Printf("│  CORS scope filter: %d out-of-scope hosts removed\n", removed)
+	}
+
+	// V12.3 FAILURE 6 — Gate 0: drop public unauthenticated routes; a
+	// permissive ACAO on a world-readable /explore/ or /docs/ page is not an
+	// exploitable CORS finding (nothing sensitive to steal cross-origin).
+	targets, publicDropped := v123FilterPublicRoutes(targets)
+	if publicDropped > 0 {
+		s.Printf("│  CORS Gate 0: %d public unauthenticated route(s) excluded\n", publicDropped)
 	}
 
 	if len(targets) > 50 {

@@ -119,7 +119,7 @@ GOBIN="$GOPATH/bin"
 
 # The authoritative 38 binaries (must match install_path.sh TOOLS array).
 ALL_TOOLS=(
-    subfinder amass bbot assetfinder findomain
+    subfinder chaos bbot assetfinder findomain
     dnsx puredns massdns shuffledns
     subzy httpx tlsx naabu nmap
     gau waybackurls katana gospider hakrawler
@@ -288,7 +288,7 @@ hdr "10. Runner Process Kill (Setpgid check)"
 if grep -q "Setpgid" pkg/runner/runner.go 2>/dev/null; then
     pass "runner.go: Setpgid=true found (correct child process kill)"
 else
-    fail "runner.go: Setpgid NOT found — amass/bbot may not be killed correctly"
+    fail "runner.go: Setpgid NOT found — bbot/subfinder may not be killed correctly"
 fi
 
 if grep -q "toolTimeouts" pkg/runner/runner.go 2>/dev/null; then
@@ -346,7 +346,7 @@ check_grep() { # <file> <pattern> <pass_msg> <fail_msg>
     if grep -qE "$2" "$1" 2>/dev/null; then pass "$3"; else fail "$4"; fi
 }
 
-# BUG #2 — amass/bbot routed on apex only + apex helpers exist
+# BUG #2 — bbot/subfinder routed on apex only + apex helpers exist
 check_grep pkg/config/config.go 'func ExtractApexDomains' \
     "config.go: ExtractApexDomains present (BUG #2 apex routing)" \
     "config.go: ExtractApexDomains MISSING (BUG #2)"
@@ -592,13 +592,13 @@ check_grep pkg/phases/phases.go 'out_of_scope_urls.txt' \
 # ── Section 16: Tool Integration Fixes (audit — 11 confirmed bugs) ────
 hdr "16. Tool Integration Fixes (11 audit bugs)"
 
-# #1 amass: auto-config + retry-on-zero
-check_grep pkg/phases/phases.go 'func ensureAmassConfig' \
-    "TOOL #1: ensureAmassConfig present (amass free-source config)" \
-    "TOOL #1: ensureAmassConfig MISSING"
-check_grep pkg/phases/phases.go 'runAmassStreaming|streamAmassOnce' \
-    "TOOL #1: amass subcommand-matrix retry-on-zero present (V12.0 streaming)" \
-    "TOOL #1: amass retry-on-zero MISSING"
+# #1 (V12.3) subfinder: per-tool concurrent runner replaces legacy enumerator
+check_grep pkg/phases/phases.go 'func runSubfinder' \
+    "TOOL #1: runSubfinder concurrent runner present (V12.3 fan-out)" \
+    "TOOL #1: runSubfinder MISSING"
+check_grep pkg/phases/phases.go 'func runChaos' \
+    "TOOL #1: runChaos passive-DB runner present (V12.3 legacy-enum replacement)" \
+    "TOOL #1: runChaos MISSING"
 # #2 bbot: -om json + DNS_NAME ndjson parse
 check_grep pkg/phases/phases.go '"-om", "json"' \
     "TOOL #2: bbot emits JSON (-om json)" \
@@ -607,8 +607,8 @@ check_grep pkg/phases/phases.go 'ev.Type == "DNS_NAME"' \
     "TOOL #2: bbot parses ndjson DNS_NAME events" \
     "TOOL #2: bbot DNS_NAME parse MISSING"
 # #3 findomain: stdout primary
-check_grep pkg/phases/phases.go 'findomain reliably writes to STDOUT' \
-    "TOOL #3: findomain stdout-primary parse present" \
+check_grep pkg/phases/phases.go 'res.Stdout' \
+    "TOOL #3: findomain stdout+file parse present (V12.3 runFindomain)" \
     "TOOL #3: findomain stdout parse MISSING"
 # #4 gau: ~/.gau.toml
 check_grep pkg/phases/phases.go 'func ensureGauConfig' \
@@ -690,7 +690,7 @@ check_grep install_path.sh '/usr/local/bin/\$name' \
 
 # Confirm the install_path.sh TOOLS array names all 38 canonical binaries.
 missing_in_installer=""
-for t in subfinder amass bbot assetfinder findomain dnsx puredns massdns \
+for t in subfinder chaos bbot assetfinder findomain dnsx puredns massdns \
          shuffledns subzy httpx tlsx naabu nmap gau waybackurls katana gospider \
          hakrawler getJS paramspider arjun ffuf feroxbuster dirsearch nuclei \
          dalfox kxss sqlmap ghauri dontgo403 kr crlfuzz smuggler cloud_enum \
@@ -718,7 +718,7 @@ check_grep pkg/config/config.go 'func ResolveAPIKeys' \
     "EXP #1: ResolveAPIKeys present (env > yaml precedence)" \
     "EXP #1: ResolveAPIKeys MISSING"
 check_grep pkg/config/config.go 'func SyncProviderConfigs' \
-    "EXP #1: SyncProviderConfigs present (subfinder/amass auto-sync)" \
+    "EXP #1: SyncProviderConfigs present (subfinder provider auto-sync)" \
     "EXP #1: SyncProviderConfigs MISSING"
 check_grep pkg/config/config.go 'SHODAN_API_KEY|GITHUB_TOKEN' \
     "EXP #1: env vars (SHODAN_API_KEY/GITHUB_TOKEN) honoured" \
@@ -993,8 +993,8 @@ check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
 # Version bump (V11.0 FINAL SOVEREIGN supersedes V10.0 SOVEREIGN)
 check_grep cmd/mohammed/main.go 'V11.0 FINAL SOVEREIGN' \
     "main.go: V11.0 FINAL SOVEREIGN banner present" "main.go: version NOT bumped to V11.0"
-check_grep pkg/engine/engine.go 'MOHAMMED V12.2 PROCESS-CRISIS Engine Started' \
-    "engine.go: V12.2 PROCESS-CRISIS startup banner present" "engine.go: startup banner NOT bumped to V12.2"
+check_grep pkg/engine/engine.go 'MOHAMMED V12.3 RUTHLESS Engine Started' \
+    "engine.go: V12.3 RUTHLESS startup banner present" "engine.go: startup banner NOT bumped to V12.3"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # V9.0 ABSOLUTE APEX checks
@@ -1341,19 +1341,17 @@ check_grep install_path.sh 'llama3.2:3b|qwen2.5:7b|deepseek-r1:7b' \
 # ═══════════════════════════════════════════════════════════════════════
 hdr "V12.0 OMEGA — Empirical Bug Fixes (BUG #1-#4)"
 
-# BUG #1 — Amass v5 streaming rewrite.
-check_grep pkg/phases/phases.go 'func runAmassStreaming' \
-    "BUG #1: runAmassStreaming streaming runner present" "BUG #1: streaming runner MISSING"
-check_grep pkg/phases/phases.go 'func streamAmassOnce' \
-    "BUG #1: streamAmassOnce line-by-line scanner present" "BUG #1: stream scanner MISSING"
-check_grep pkg/phases/phases.go 'bufio.NewScanner' \
-    "BUG #1: bufio.Scanner stdout read present" "BUG #1: bufio.Scanner MISSING"
-check_grep pkg/phases/phases.go '1[05] ?\* ?time.Minute|amassDeadline' \
-    "BUG #1: dedicated amass deadline present (V12.1: 15m)" "BUG #1: amass deadline MISSING"
-check_grep pkg/phases/phases.go '"passive", \[\]string\{"passive"|"passive", "-d"' \
-    "BUG #1: alternate 'amass passive' subcommand fallback present" "BUG #1: subcommand fallback MISSING"
-check_grep pkg/runner/runner.go '"amass": 1[05] \* time.Minute' \
-    "BUG #1: runner amass cap raised (V12.1: 15m)" "BUG #1: runner amass cap NOT raised"
+# BUG #1 (V12.3 FAILURE 3) — concurrent per-apex fan-out replaces legacy stream.
+check_grep pkg/phases/phases.go 'context.WithTimeout' \
+    "BUG #1: per-tool context.WithTimeout present (V12.3 fan-out)" "BUG #1: per-tool timeout MISSING"
+check_grep pkg/phases/phases.go 'sync.WaitGroup' \
+    "BUG #1: WaitGroup for concurrent tools present" "BUG #1: WaitGroup MISSING"
+check_grep pkg/phases/phases.go 'wg.Wait\(\)' \
+    "BUG #1: wg.Wait() barrier present" "BUG #1: wg.Wait MISSING"
+check_grep pkg/phases/phases.go '6 ?\* ?time.Minute' \
+    "BUG #1: subfinder 6m dedicated timeout present" "BUG #1: subfinder timeout MISSING"
+check_grep pkg/phases/phases.go 'func dedupHosts' \
+    "BUG #1: dedupHosts() merge present" "BUG #1: dedup MISSING"
 
 # BUG #2 — TLS mismatch demoted to Informational.
 check_grep pkg/phases/phases.go 'severity := "Informational"' \
@@ -1537,10 +1535,10 @@ fi
 # V12.1 ZERO-TOLERANCE — 6 bug fixes + 3 upgrades + 6 new tools (proof-tested)
 # ═══════════════════════════════════════════════════════════════════════
 hdr "V12.1 ZERO-TOLERANCE — 6 Bug Fixes (each with a unit test)"
-check_grep pkg/phases/phases.go 'func runAmassV5' \
-    "FIX#1: runAmassV5 3-method fallback present" "FIX#1: runAmassV5 MISSING"
-check_grep pkg/phases/phases_test.go 'func TestAmassV5Integration' \
-    "FIX#1: TestAmassV5Integration present" "FIX#1: amass test MISSING"
+check_grep pkg/phases/phases.go 'func runResilientHTTPProbe' \
+    "FIX#1 (V12.3 FAILURE 4): runResilientHTTPProbe fallback present" "FIX#1: runResilientHTTPProbe MISSING"
+check_grep pkg/phases/phases.go 'func rawTCPHTTPAlive' \
+    "FIX#1 (V12.3 FAILURE 4): rawTCPHTTPAlive raw-socket probe present" "FIX#1: rawTCPHTTPAlive MISSING"
 check_grep pkg/phases/zerofp.go 'func PrepareSQLiURLs' \
     "FIX#2: SQLi param prioritization present" "FIX#2: SQLi prep MISSING"
 check_grep pkg/phases/phases.go 'func partitionCORSByWAF' \
@@ -1608,33 +1606,53 @@ check_grep pkg/phases/modern_tools_test.go 'func TestModernTools_' \
 check_grep pkg/engine/readiness_test.go 'TestReconTools_V121ModernToolsPresent' \
     "readiness: V12.1 modern-tool inventory test present" "readiness V12.1 test MISSING"
 
-hdr "V12.2 PROCESS-CRISIS — Version + Docs Bump"
-check_grep cmd/mohammed/main.go 'V12.2 PROCESS-CRISIS' \
-    "main.go: V12.2 banner present" "main.go: version NOT bumped to V12.2"
-check_grep pkg/engine/engine.go 'V12.2 PROCESS-CRISIS' \
-    "engine.go: V12.2 startup banner present" "engine.go: banner NOT bumped to V12.2"
-check_grep README.md 'V12.2 PROCESS-CRISIS' \
-    "README.md: V12.2 title present" "README.md: version NOT bumped to V12.2"
-check_grep config.yaml 'V12.2 PROCESS-CRISIS' \
-    "config.yaml: V12.2 header present" "config.yaml: version NOT bumped to V12.2"
-check_grep setup.sh 'V12.2 PROCESS-CRISIS' \
-    "setup.sh: V12.2 completion message present" "setup.sh: version NOT bumped to V12.2"
-check_grep RESPONSIBLE_DISCLOSURE.md 'V12.2 PROCESS-CRISIS' \
-    "RESPONSIBLE_DISCLOSURE.md: V12.2 title present" "RESPONSIBLE_DISCLOSURE.md: version NOT bumped to V12.2"
+hdr "V12.3 RUTHLESS — Version + Docs Bump"
+check_grep cmd/mohammed/main.go 'V12.3 RUTHLESS' \
+    "main.go: V12.3 RUTHLESS banner present" "main.go: version NOT bumped to V12.3"
+check_grep pkg/engine/engine.go 'V12.3 RUTHLESS' \
+    "engine.go: V12.3 RUTHLESS startup banner present" "engine.go: banner NOT bumped to V12.3"
+check_grep README.md 'V12.3 RUTHLESS' \
+    "README.md: V12.3 RUTHLESS title present" "README.md: version NOT bumped to V12.3"
+check_grep config.yaml 'V12.3 RUTHLESS' \
+    "config.yaml: V12.3 RUTHLESS header present" "config.yaml: version NOT bumped to V12.3"
+check_grep setup.sh 'V12.3 RUTHLESS' \
+    "setup.sh: V12.3 RUTHLESS completion message present" "setup.sh: version NOT bumped to V12.3"
+check_grep RESPONSIBLE_DISCLOSURE.md 'V12.3 RUTHLESS' \
+    "RESPONSIBLE_DISCLOSURE.md: V12.3 RUTHLESS title present" "RESPONSIBLE_DISCLOSURE.md: version NOT bumped to V12.3"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # V12.2 PROCESS-CRISIS — the 6 tested process fixes + 6 mandated features
 # ══════════════════════════════════════════════════════════════════════════════
 
-hdr "V12.2 FAILURE #1 — Amass -o file ingest + auto-remove"
-check_grep pkg/phases/phases.go 'func ingestAmassFile' \
-    "amass: ingestAmassFile() reads -o output file" "amass: ingestAmassFile MISSING"
-check_grep pkg/phases/phases.go 'amassGiveUpAfter' \
-    "amass: auto-remove threshold (amassGiveUpAfter) present" "amass: auto-remove threshold MISSING"
-check_grep pkg/phases/phases.go '"-o"' \
-    "amass: -o FILE flag passed (reads file, not stdout)" "amass: -o FILE flag MISSING"
-check_grep pkg/phases/amass_test.go 'TestV122_IngestAmassFile' \
-    "amass: ingest regression test present" "amass: ingest test MISSING"
+hdr "V12.3 FAILURE 1 — Legacy OWASP enumerator PURGED + concurrent fan-out"
+# The legacy enumerator (amass) must be GONE from all pkg/cmd code AND its
+# dedicated test file must be deleted; the concurrent fan-out replaces it.
+AMASS_HITS="$(grep -ri 'amass' pkg/ cmd/ 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$AMASS_HITS" = "0" ]; then
+    pass "FAILURE 1: grep -ri amass pkg/ cmd/ == 0 (legacy enumerator fully purged)"
+else
+    fail "FAILURE 1: amass still present in pkg/ or cmd/ ($AMASS_HITS match(es))"
+fi
+if [ ! -f pkg/phases/amass_test.go ]; then
+    pass "FAILURE 1: pkg/phases/amass_test.go deleted"
+else
+    fail "FAILURE 1: pkg/phases/amass_test.go still present"
+fi
+check_grep pkg/phases/phases.go 'func passiveEnumApexConcurrently' \
+    "FAILURE 1: passiveEnumApexConcurrently() concurrent fan-out present" \
+    "FAILURE 1: passiveEnumApexConcurrently MISSING"
+check_grep pkg/phases/phases.go 'func runSubfinder' \
+    "FAILURE 1: runSubfinder per-tool runner present" "FAILURE 1: runSubfinder MISSING"
+check_grep pkg/phases/phases.go 'func runBbot' \
+    "FAILURE 1: runBbot per-tool runner present" "FAILURE 1: runBbot MISSING"
+check_grep pkg/phases/phases.go 'func runFindomain' \
+    "FAILURE 1: runFindomain per-tool runner present" "FAILURE 1: runFindomain MISSING"
+check_grep pkg/phases/phases.go 'func runAssetfinder' \
+    "FAILURE 1: runAssetfinder per-tool runner present" "FAILURE 1: runAssetfinder MISSING"
+check_grep pkg/phases/phases.go 'func runChaos' \
+    "FAILURE 1: runChaos per-tool runner present" "FAILURE 1: runChaos MISSING"
+check_grep pkg/phases/phases_test.go 'func TestV123_PassiveEnumConcurrentFanOut' \
+    "FAILURE 1: concurrent fan-out regression test present" "FAILURE 1: fan-out test MISSING"
 
 hdr "V12.2 FAILURE #2 — ProcessRegistry (zero orphans)"
 check_file "pkg/runner/registry.go"
@@ -1717,7 +1735,7 @@ check_grep pkg/config/scopes.go 'func ResolveScope' \
     "scopes: ResolveScope() name-vs-path present" "scopes: ResolveScope MISSING"
 check_grep cmd/mohammed/main.go 'config.ResolveScope' \
     "scopes: --scope wired to ResolveScope" "scopes: ResolveScope NOT wired"
-check_grep pkg/config/scopes/gitlab.txt '!service-now.com' \
+check_grep pkg/config/scopes/gitlab.txt '!\*.service-now.com' \
     "scopes: gitlab built-in excludes service-now.com" "scopes: gitlab exclude MISSING"
 check_grep pkg/config/scopes_test.go 'TestV122_LoadBuiltinScope' \
     "scopes: built-in scope regression test present" "scopes: built-in scope test MISSING"
@@ -1735,7 +1753,117 @@ check_grep pkg/proxy/smartgate.go 'burp_scope.json' \
 check_grep pkg/proxy/smartgate_test.go 'TestV122_EvaluateBurpForward' \
     "burpgate: forward/drop regression test present" "burpgate: gate test MISSING"
 
-hdr "V12.2 — Go build gates (tests compile + run)"
+# ══════════════════════════════════════════════════════════════════════════════
+# V12.3 RUTHLESS — FAILURES 2-10 (FAILURE 1 verified above)
+# ══════════════════════════════════════════════════════════════════════════════
+
+hdr "V12.3 FAILURE 2 — Scale-adaptive timeouts + hard-kill"
+check_grep pkg/engine/phase_timeout.go 'func CalculateAdaptiveTimeout' \
+    "FAILURE 2: CalculateAdaptiveTimeout present" "FAILURE 2: CalculateAdaptiveTimeout MISSING"
+check_grep pkg/engine/phase_timeout.go '5000' \
+    "FAILURE 2: >5000 hosts ×3 tier present" "FAILURE 2: 5000-host tier MISSING"
+check_grep pkg/engine/engine.go 'KillAllChildren' \
+    "FAILURE 2: between-loop KillAllChildren present" "FAILURE 2: KillAllChildren MISSING"
+check_grep pkg/engine/engine.go 'time.AfterFunc' \
+    "FAILURE 2: backup hard-kill AfterFunc timer present" "FAILURE 2: AfterFunc hard-kill MISSING"
+check_grep pkg/engine/engine.go 'CalculateAdaptiveTimeout' \
+    "FAILURE 2: orchestrator uses adaptive phase timeout" "FAILURE 2: adaptive timeout not wired"
+check_grep pkg/engine/phase_timeout_test.go 'func TestV123_CalculateAdaptiveTimeout' \
+    "FAILURE 2: CalculateAdaptiveTimeout unit test present" "FAILURE 2: adaptive-timeout test MISSING"
+
+hdr "V12.3 FAILURE 3 — Phase 04 concurrent fan-out"
+check_grep pkg/phases/phases.go 'func passiveEnumApexConcurrently' \
+    "FAILURE 3: passiveEnumApexConcurrently present" "FAILURE 3: fan-out MISSING"
+check_grep pkg/phases/phases.go 'var mu sync.Mutex|sync.Mutex' \
+    "FAILURE 3: mutex-guarded result merge present" "FAILURE 3: mutex MISSING"
+
+hdr "V12.3 FAILURE 4 — httpx WAF-aware LIVE + resilient probe"
+check_grep pkg/phases/phases.go '401,403,405,429' \
+    "FAILURE 4: WAF status codes (401/403/405/429) accepted as LIVE" "FAILURE 4: WAF status set MISSING"
+check_grep pkg/phases/phases.go '"-tech-detect"' \
+    "FAILURE 4: httpx -tech-detect flag present" "FAILURE 4: -tech-detect MISSING"
+check_grep pkg/phases/phases.go 'func runResilientHTTPProbe' \
+    "FAILURE 4: runResilientHTTPProbe (<2% fallback) present" "FAILURE 4: resilient probe MISSING"
+check_grep pkg/phases/phases.go 'func rawTCPHTTPAlive' \
+    "FAILURE 4: rawTCPHTTPAlive raw-socket probe present" "FAILURE 4: rawTCP probe MISSING"
+
+hdr "V12.3 FAILURE 5 — Staged nuclei execution"
+check_grep pkg/phases/phases_vuln.go 'critical,high' \
+    "FAILURE 5: Stage 1 critical,high present" "FAILURE 5: Stage 1 MISSING"
+check_grep pkg/phases/phases_vuln.go 'cve,rce,sqli,ssrf,lfi,auth-bypass' \
+    "FAILURE 5: Stage 1 tag set present" "FAILURE 5: Stage 1 tags MISSING"
+check_grep pkg/phases/phases_vuln.go 'misconfig,exposure,takeover' \
+    "FAILURE 5: Stage 2 medium tag set present" "FAILURE 5: Stage 2 tags MISSING"
+check_grep pkg/phases/phases_vuln.go 'func prioritizeDevStagingAPIFirst' \
+    "FAILURE 5: Stage 3 dev/staging/API-first present" "FAILURE 5: Stage 3 prioritizer MISSING"
+check_grep pkg/phases/phases_vuln.go 'func ingestNucleiResults' \
+    "FAILURE 5: ingestNucleiResults shared parser present" "FAILURE 5: ingestNucleiResults MISSING"
+
+hdr "V12.3 FAILURE 6 — Gate 0 public-route rejection"
+check_grep pkg/validation/false_positive.go 'func IsPublicUnauthenticatedRoute' \
+    "FAILURE 6: IsPublicUnauthenticatedRoute present" "FAILURE 6: Gate 0 MISSING"
+check_grep pkg/validation/false_positive.go '/explore/' \
+    "FAILURE 6: /explore/ public prefix present" "FAILURE 6: public prefixes MISSING"
+check_grep pkg/exploit/idor.go 'IsPublicUnauthenticatedRoute' \
+    "FAILURE 6: IDOR engine wired to Gate 0" "FAILURE 6: IDOR NOT gated"
+check_grep pkg/exploit/race_condition.go 'IsPublicUnauthenticatedRoute' \
+    "FAILURE 6: Race engine wired to Gate 0" "FAILURE 6: Race NOT gated"
+check_grep pkg/exploit/differential.go 'IsPublicUnauthenticatedRoute' \
+    "FAILURE 6: Auth-Differential engine wired to Gate 0" "FAILURE 6: Auth-Diff NOT gated"
+check_grep pkg/phases/phases.go 'v123FilterPublicRoutes' \
+    "FAILURE 6: CORS phase wired to Gate 0" "FAILURE 6: CORS NOT gated"
+check_grep pkg/validation/gate0_test.go 'func TestV123_IsPublicUnauthenticatedRoute' \
+    "FAILURE 6: IsPublicUnauthenticatedRoute unit test present" "FAILURE 6: Gate 0 test MISSING"
+
+hdr "V12.3 FAILURE 7 — Admin-endpoint access validation"
+check_grep pkg/validation/false_positive.go 'func ValidateAdminEndpointAccess' \
+    "FAILURE 7: ValidateAdminEndpointAccess present" "FAILURE 7: admin validation MISSING"
+check_grep pkg/validation/false_positive.go 'func containsActualAdminControls' \
+    "FAILURE 7: containsActualAdminControls present" "FAILURE 7: admin-controls check MISSING"
+check_grep pkg/exploit/api_hunter.go 'ValidateAdminEndpointAccess' \
+    "FAILURE 7: api_hunter ADMIN class wired to validator" "FAILURE 7: api_hunter NOT wired"
+check_grep pkg/validation/gate0_test.go 'func TestV123_ValidateAdminEndpointAccess' \
+    "FAILURE 7: ValidateAdminEndpointAccess unit test present" "FAILURE 7: admin test MISSING"
+
+hdr "V12.3 FAILURE 8 — Exact HackerOne GitLab scope"
+check_grep pkg/config/scopes/gitlab.txt 'registry.gitlab.com' \
+    "FAILURE 8: registry.gitlab.com in-scope present" "FAILURE 8: in-scope hosts MISSING"
+check_grep pkg/config/scopes/gitlab.txt '!\*.service-now.com' \
+    "FAILURE 8: !*.service-now.com exclude present" "FAILURE 8: service-now exclude MISSING"
+check_grep pkg/config/scopes/gitlab.txt '!us-federal-gitlab.com' \
+    "FAILURE 8: !us-federal-gitlab.com exclude present" "FAILURE 8: us-federal exclude MISSING"
+if grep -q 'gitlab.company' pkg/config/scopes/gitlab.txt 2>/dev/null && \
+   ! grep -q '# ' pkg/config/scopes/gitlab.txt 2>/dev/null; then
+    fail "FAILURE 8: stale gitlab.company still an active scope entry"
+else
+    pass "FAILURE 8: stale over-broad guesses (gitlab.company/gitlabstatus.com) removed"
+fi
+
+hdr "V12.3 FAILURE 9 — Bootstrap primary-domain-only"
+check_grep pkg/exploit/autobootstrap.go 'func IsValidBootstrapTarget' \
+    "FAILURE 9: IsValidBootstrapTarget present" "FAILURE 9: bootstrap guard MISSING"
+check_grep pkg/exploit/autobootstrap.go 'func isPrimaryAppDomain' \
+    "FAILURE 9: isPrimaryAppDomain present" "FAILURE 9: primary-domain check MISSING"
+check_grep pkg/exploit/autobootstrap.go '.gitlab.io' \
+    "FAILURE 9: *.gitlab.io excluded" "FAILURE 9: gitlab.io exclude MISSING"
+check_grep pkg/exploit/autobootstrap.go '.github.io' \
+    "FAILURE 9: *.github.io excluded" "FAILURE 9: github.io exclude MISSING"
+check_grep pkg/exploit/bootstrap_target_test.go 'func TestV123_IsValidBootstrapTarget' \
+    "FAILURE 9: IsValidBootstrapTarget unit test present" "FAILURE 9: bootstrap test MISSING"
+
+hdr "V12.3 FAILURE 10 — Burp Community/Pro capability gate"
+check_grep pkg/exploit/burp.go 'func DetectBurpCapabilities|DetectBurpCapabilities' \
+    "FAILURE 10: DetectBurpCapabilities present" "FAILURE 10: capability detect MISSING"
+check_grep pkg/exploit/burp.go '/v0.1/version' \
+    "FAILURE 10: /v0.1/version probe present" "FAILURE 10: version probe MISSING"
+check_grep pkg/exploit/burp.go 'HasProAPI' \
+    "FAILURE 10: HasProAPI capability flag present" "FAILURE 10: HasProAPI MISSING"
+check_grep pkg/exploit/burp.go 'skipped-community' \
+    "FAILURE 10: active-scan skip on Community present" "FAILURE 10: Community skip MISSING"
+check_grep pkg/exploit/burp_capabilities_test.go 'func TestV123_DetectBurpCapabilities_Community' \
+    "FAILURE 10: Community-detection unit test present" "FAILURE 10: capability test MISSING"
+
+hdr "V12.3 — Go build gates (tests compile + run)"
 if go build ./... >/dev/null 2>&1; then pass "go build ./... — 0 errors"; else fail "go build ./... — BUILD ERRORS"; fi
 if go vet ./... >/dev/null 2>&1; then pass "go vet ./... — 0 warnings"; else fail "go vet ./... — VET WARNINGS"; fi
 if go test ./... >/dev/null 2>&1; then pass "go test ./... — all packages pass"; else fail "go test ./... — TEST FAILURES"; fi

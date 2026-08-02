@@ -1,51 +1,42 @@
 package phases
 
 import (
-	"context"
 	"testing"
 
 	"github.com/mohammed-v3/core/pkg/config"
 	"github.com/mohammed-v3/core/pkg/engine"
-	"github.com/mohammed-v3/core/pkg/runner"
 )
 
-// TestAmassV5Integration is the V12.1 ZERO-TOLERANCE mandated integration test
-// for FIX #1. When amass is installed it MUST return > 0 subdomains for a real
-// domain (proving the 3-method integration actually works — the exact failure
-// that plagued V7-V12 on Temu). When amass is NOT installed (e.g. CI/sandbox),
-// the test skips with a clear message rather than failing spuriously, because
-// the integration itself cannot be exercised without the binary.
-func TestAmassV5Integration(t *testing.T) {
-	if _, err := runner.ResolveToolPath("amass"); err != nil {
-		t.Skip("amass not installed — cannot run integration test (install via install_path.sh)")
+// TestV123_PassiveEnumConcurrentFanOut is the V12.3 FAILURE #1/#3 proof: the
+// legacy sequential per-apex loop (with the broken OWASP enumerator) has been
+// replaced by a concurrent fan-out. dedupHosts and filterUnderApex are the pure
+// building blocks of that fan-out and are asserted here without needing any
+// external binary installed.
+func TestV123_PassiveEnumConcurrentFanOut(t *testing.T) {
+	// filterUnderApex keeps only the apex and its subdomains, drops noise.
+	raw := []string{
+		"gitlab.com",
+		"WWW.GitLab.com\r",         // case + CRLF normalized
+		"registry.gitlab.com",
+		"evil.com",                 // out of apex → dropped
+		"docs.gitlab.com.evil.net", // suffix trick → dropped (not "."+apex)
+		"",                         // empty → dropped
 	}
-	results, err := runAmassV5("example.com")
-	if err != nil {
-		t.Fatalf("amass failed: %v", err)
+	got := filterUnderApex(raw, "gitlab.com")
+	want := map[string]bool{"gitlab.com": true, "www.gitlab.com": true, "registry.gitlab.com": true}
+	if len(got) != len(want) {
+		t.Fatalf("filterUnderApex: got %d hosts %v, want %d %v", len(got), got, len(want), want)
 	}
-	if len(results) == 0 {
-		t.Fatal("amass returned 0 subdomains — integration is broken")
+	for _, h := range got {
+		if !want[h] {
+			t.Errorf("filterUnderApex wrongly kept %q", h)
+		}
 	}
-	t.Logf("amass returned %d subdomains for example.com", len(results))
-}
-
-// TestRunAmassV5_ThreeMethodContract verifies the pure control-flow contract of
-// the 3-method fallback WITHOUT needing amass installed: with no binary present
-// it must return a non-nil error whose message names all three methods, proving
-// the mandated "amass: all 3 methods failed" diagnostic path exists.
-func TestRunAmassV5_ThreeMethodContract(t *testing.T) {
-	if _, err := runner.ResolveToolPath("amass"); err == nil {
-		t.Skip("amass IS installed — this test asserts the missing-binary error path")
+	// dedupHosts collapses duplicates + case.
+	dd := dedupHosts([]string{"a.gitlab.com", "A.GitLab.com", "b.gitlab.com", "a.gitlab.com"})
+	if len(dd) != 2 {
+		t.Fatalf("dedupHosts: got %d unique %v want 2", len(dd), dd)
 	}
-	_, err := runAmassV5Ctx(context.Background(), "example.com", "")
-	if err == nil {
-		t.Fatal("expected an error when amass is absent, got nil")
-	}
-	// The missing-binary path returns "amass not found"; that is an acceptable
-	// exact diagnostic (the 3-method message is only reached once the binary
-	// exists but every method yields 0). Either message proves a real error is
-	// surfaced rather than a silent 0.
-	t.Logf("amass-absent error surfaced correctly: %v", err)
 }
 
 // TestPrepareSQLiURLs_CapAndFunnel is the V12.1 FIX #2 proof. It asserts (a) the

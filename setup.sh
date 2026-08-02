@@ -143,6 +143,7 @@ install_py_wrapper() {
 echo ""; log "═══ STEP 1: ProjectDiscovery + Go recon tools ═══"
 # ════════════════════════════════════════════════════════════════════════════
 install_go_tool "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"       "subfinder"
+install_go_tool "github.com/projectdiscovery/chaos-client/cmd/chaos@latest"           "chaos"
 install_go_tool "github.com/projectdiscovery/httpx/cmd/httpx@latest"                  "httpx"
 install_go_tool "github.com/projectdiscovery/dnsx/cmd/dnsx@latest"                    "dnsx"
 install_go_tool "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"               "naabu"
@@ -206,12 +207,17 @@ install_pip_tool "bbot"  "bbot"
 install_pip_tool "s3scanner" "s3scanner"
 install_pip_tool "ghauri" "ghauri"
 
-# amass — snap or go
-if ! command -v amass &>/dev/null; then
-    info "Installing amass..."
-    $SUDO snap install amass 2>/dev/null \
-        || install_go_tool "github.com/owasp-amass/amass/v4/...@master" "amass" \
-        || warn "amass install failed"
+# V12.3 FAILURE 1 — legacy OWASP enumerator PURGED. Passive subdomain
+# enumeration is now a concurrent fan-out of subfinder + bbot + findomain +
+# assetfinder + chaos (see pkg/phases/phases.go passiveEnumApexConcurrently).
+# findomain — passive enumerator (fast, no legacy dependency)
+if ! command -v findomain &>/dev/null; then
+    info "Installing findomain..."
+    ( curl -fsSL https://github.com/findomain/findomain/releases/latest/download/findomain-linux.zip -o /tmp/findomain.zip \
+        && unzip -o -q /tmp/findomain.zip -d /tmp \
+        && chmod +x /tmp/findomain \
+        && $SUDO mv /tmp/findomain /usr/local/bin/findomain ) 2>/dev/null \
+        || warn "findomain install failed"
 fi
 
 # paramspider (clone install is the reliable path — pip pkg is stale)
@@ -308,7 +314,7 @@ fi
 # ════════════════════════════════════════════════════════════════════════════
 echo ""; log "═══ STEP 5: PATH hardening (link every tool system-wide) ═══"
 # ════════════════════════════════════════════════════════════════════════════
-for tool in subfinder amass bbot assetfinder findomain \
+for tool in subfinder chaos bbot assetfinder findomain \
             dnsx puredns massdns shuffledns \
             subzy httpx tlsx naabu \
             gau waybackurls katana gospider hakrawler \
@@ -381,7 +387,7 @@ rm -rf "$TMP_BUILD"
 
 echo ""
 log "════════════════════════════════════════════════════════"
-log "  MOHAMMED V12.2 PROCESS-CRISIS — Setup complete."
+log "  MOHAMMED V12.3 RUTHLESS — Setup complete."
 log "  1) Reload PATH:   source $SHELL_RC"
 log "  2) Verify tools:  ./mohammed doctor   (or bash verify.sh)"
 log "  3) AI cascade:    ollama serve &"

@@ -1,4 +1,4 @@
-# Responsible Disclosure Policy — MOHAMMED V12.2 PROCESS-CRISIS
+# Responsible Disclosure Policy — MOHAMMED V12.3 RUTHLESS
 
 > **"Knock, don't break in."**
 > MOHAMMED is an authorized-testing / bug-bounty automation engine. It is

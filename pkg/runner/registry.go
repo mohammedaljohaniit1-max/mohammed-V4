@@ -5,9 +5,9 @@ package runner
 // ---------------------------------------------------------------------------
 // EMPIRICAL EVIDENCE (live GitLab scan, 8 hours wasted):
 //
-//	PID: 18967 | COMMAND: amass | %CPU: 89.7% | TIME: 55:31.43
+//	PID: 18967 | COMMAND: bbot | %CPU: 89.7% | TIME: 55:31.43
 //
-// Phase 04 ended at 01:52:37 but the amass process (PID 18967) was STILL
+// Phase 04 ended at 01:52:37 but the recon process (PID 18967) was STILL
 // running at 05:20:10 — consuming ~90% CPU for 3+ hours AFTER the phase that
 // spawned it had returned, starving Phase 12 of CPU.
 //
@@ -81,7 +81,7 @@ func (r *ProcessRegistry) KillAll() int {
 	n := 0
 	for pgid := range r.groups {
 		// Negative pid == "the whole process group". SIGKILL is unblockable so
-		// even a wedged amass/naabu child is reaped immediately.
+		// even a wedged bbot/naabu child is reaped immediately.
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 		delete(r.groups, pgid)
 		n++

@@ -1,37 +1,52 @@
 # ═══════════════════════════════════════════════════════════════════════════
-# MOHAMMED V12.2 · Built-in scope: GitLab (HackerOne public program)
+# MOHAMMED V12.3 RUTHLESS · Built-in scope: GitLab (HackerOne public program)
 # ---------------------------------------------------------------------------
 # Invoke with:  ./mohammed scan --scope gitlab -c config.yaml --profile large
 #
 # Lines prefixed with '!' (or '-') are OUT OF SCOPE and are parsed as EXCLUDES
-# by V12.2's FAILURE #6 fix — they are NEVER enumerated. This is exactly the
-# pollution that caused the 8-hour Phase 12 collapse: !service-now.com and
-# !gitlab.cn were previously treated as targets.
+# — they are NEVER enumerated, probed, or reported. This is the exact set of
+# excludes that caused the 8-hour Phase 12 collapse when previously treated as
+# targets (!*.service-now.com, !*.gitlab.cn, …).
 #
-# Source: HackerOne GitLab program scope (kept conservative & apex-only).
+# FAILURE 8 — this list is the EXACT HackerOne GitLab program scope, not the
+# prior over-broad guess (gitlab.company / gitlabstatus.com were NOT in scope).
+#
+# Source: HackerOne GitLab program scope (in-scope apex/host + out-of-scope).
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── IN SCOPE ────────────────────────────────────────────────────────────────
 gitlab.com
-gitlab.net
-gitlab.io
-gitlab-static.net
-gitlab.org
-gitlab-review.app
-about.gitlab.com
+registry.gitlab.com
+customers.gitlab.com
 docs.gitlab.com
-forum.gitlab.com
-gitlab.company
-gitlabstatus.com
+design.gitlab.com
+advisories.gitlab.com
+about.gitlab.com
+*.gitlap.com
+*.gitlab.org
+*.gitlab.net
 
 # ── OUT OF SCOPE (excluded — never enumerated) ───────────────────────────────
-!service-now.com
-!*.service-now.com
-!gitlab.cn
-!*.gitlab.cn
-!gitlabtraining.cloud
-!*.gitlabtraining.cloud
+!us-federal-gitlab.com
+!translate.gitlab.com
+!support.gitlab.com
 !status.gitlab.com
-!*.myshopify.com
-!zendesk.com
-!*.zendesk.com
+!shop.gitlab.com
+!partners.gitlab.com
+!packages.gitlab.com
+!levelup.gitlab.com
+!ir.gitlab.com
+!gitlabtraining.cloud
+!gitlabsandbox.net
+!gitlabdemo.cloud
+!gitlab.biterg.io
+!forum.gitlab.com
+!federal-support.gitlab.com
+!dashboards.gitlab.com
+!aptly.gitlab.com
+!alerts.gitlab.com
+!*.service-now.com
+!*.runway.gitlab.net
+!*.gitlab.cn
+!gitlab-private.org
+!*.gitlab-private.org

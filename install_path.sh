@@ -12,7 +12,7 @@
 #      permanently (written to the shell rc file).
 #
 # The 38 canonical binaries (must all be resolvable for zero phase skips):
-#   subfinder amass bbot assetfinder findomain dnsx puredns massdns shuffledns
+#   subfinder chaos bbot assetfinder findomain dnsx puredns massdns shuffledns
 #   subzy httpx tlsx naabu nmap gau waybackurls katana gospider hakrawler getJS
 #   paramspider arjun ffuf feroxbuster dirsearch nuclei dalfox kxss sqlmap
 #   ghauri dontgo403 kr crlfuzz smuggler cloud_enum s3scanner interactsh-client gf
@@ -58,7 +58,7 @@ PATH_DIRS=(
     "$GOBIN"                # go install targets
     "$LOCAL_BIN"            # pip --user / pipx
     "/usr/local/bin"        # system-wide symlinks + wrappers
-    "/snap/bin"             # snap-installed tools (amass)
+    "/snap/bin"             # snap-installed tools
 )
 # Make sure the tool dirs are on PATH for THIS run so `command -v` sees fresh installs.
 for d in "${PATH_DIRS[@]}"; do
@@ -69,7 +69,7 @@ done
 # The 38 canonical binaries. `link_tool` uses this to fan out symlinks.
 # ═══════════════════════════════════════════════════════════════════════════
 TOOLS=(
-    subfinder amass bbot assetfinder findomain
+    subfinder chaos bbot assetfinder findomain
     dnsx puredns massdns shuffledns
     subzy httpx tlsx naabu nmap
     gau waybackurls katana gospider hakrawler
@@ -265,19 +265,16 @@ if [ "${SKIP_INSTALL:-0}" != "1" ]; then
     install_pip_tool "s3scanner" "s3scanner"
     install_pip_tool "ghauri" "ghauri"
 
-    # ── amass (V7 Section 1.1: prefer apt = amass v5 on Kali 2026.2) ──────────
-    # amass v5 removed the -o flag and changed the config format (handled in
-    # phases.go via stdout capture + version detection). On Kali the apt package
-    # tracks v5, so we install/reinstall via apt FIRST and only fall back to
-    # snap/go on non-apt systems. --reinstall guarantees a stale v3/v4 binary is
-    # replaced by the current package.
-    if ! command -v amass &>/dev/null; then
-        _info "Installing amass (apt = v5 on Kali)..."
-        $SUDO apt-get install --reinstall -y -qq amass 2>/dev/null \
-            || $SUDO snap install amass 2>/dev/null \
-            || install_go_tool "github.com/owasp-amass/amass/v4/...@master" "amass" \
-            || _warn "amass install failed"
-        relink_existing "amass"
+    # ── V12.3 FAILURE 1: legacy OWASP enumerator PURGED ──────────────────────
+    # Passive subdomain enumeration is now a concurrent fan-out of
+    # subfinder + bbot + findomain + assetfinder + chaos (see phases.go
+    # passiveEnumApexConcurrently). Install chaos-client as the DB-backed
+    # passive source that replaces the legacy enumerator.
+    if ! command -v chaos &>/dev/null; then
+        _info "Installing chaos-client..."
+        install_go_tool "github.com/projectdiscovery/chaos-client/cmd/chaos@latest" "chaos" \
+            || _warn "chaos install failed"
+        relink_existing "chaos"
     fi
 
     # ── paramspider (V6: Kali apt package — installs to /usr/bin) ─────────────

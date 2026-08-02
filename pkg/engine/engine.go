@@ -527,7 +527,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V12.2 PROCESS-CRISIS Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V12.3 RUTHLESS Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up
@@ -663,9 +663,20 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 
 	// ── Execute phases ───────────────────────────────────
 	for i, phase := range o.Phases {
+		// ── V12.3 · FAILURE #2: between-loop context check + child reap ──────
+		// Root cause of the 116m Phase 51: context.WithTimeout was never checked
+		// BETWEEN the orchestrator's phase iterations, so a phase whose inner
+		// loops ignored the deadline kept the scan alive. We now re-check the
+		// PARENT context at the top of every iteration and — on cancellation —
+		// force-reap every surviving child process group before returning, so no
+		// orphaned tool can outlive a cancelled scan.
 		select {
 		case <-ctx.Done():
 			cancelTicker()
+			killed := runner.KillAllChildren()
+			if killed > 0 {
+				fmt.Printf("\n[+] Reaped %d surviving child process group(s) on cancellation\n", killed)
+			}
 			// Persist progress so --resume can continue from here (FLAW #2):
 			// this is what makes the SIGINT "Saving progress..." message true.
 			if cpErr := o.State.SaveCheckpoint(); cpErr == nil {
@@ -709,18 +720,48 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		pLabel := fmt.Sprintf("Phase %02d/%02d: %s", i+1, len(o.Phases), phase.Name())
 		currentTool.Store(pLabel)
 
-		// ── V12.2 · FAILURE #3: per-phase hard wall-clock timeout ──────────
-		// Derive a child context bounded by this phase's cap. When it fires,
-		// the phase's ctx is Done → every runner.RunTool call it launched sees
-		// the cancellation and SIGKILLs its process group, and we additionally
-		// force-reap any surviving groups so a wedged naabu/amass can never run
-		// for hours (the 4h38m Port Scanning bug).
-		phaseTO := PhaseTimeout(phase.Name())
+		// ── V12.2 · FAILURE #3 + V12.3 · FAILURE #2: SCALE-ADAPTIVE per-phase
+		// hard wall-clock timeout. Derive a child context bounded by this
+		// phase's cap. When it fires, the phase's ctx is Done → every
+		// runner.RunTool call it launched sees the cancellation and SIGKILLs its
+		// process group, and we additionally force-reap any surviving groups so
+		// a wedged naabu/bbot can never run for hours (the 4h38m Port Scanning
+		// bug).
+		//
+		// V12.3 · FAILURE #2: the cap is now SCALE-ADAPTIVE. A fixed 15m/20m cap
+		// STARVED nuclei/ffuf/gau on the 14,000-host GitLab target (they were
+		// killed with 0 results). CalculateAdaptiveTimeout multiplies the base
+		// cap by ×2 (>1000 hosts) or ×3 (>5000 hosts) — sized by the LIVE host
+		// count and the scan profile — so heavy phases get proportional time on
+		// large scopes while small scopes keep tight caps.
+		hostCount := len(o.State.LiveHosts)
+		if len(o.State.Subdomains) > hostCount {
+			hostCount = len(o.State.Subdomains)
+		}
+		profile := ""
+		if o.State.Config != nil {
+			profile = o.State.Config.Profile
+		}
+		phaseTO := CalculateAdaptiveTimeout(PhaseTimeout(phase.Name()), hostCount, profile)
 		phaseCtx, phaseCancel := context.WithTimeout(ctx, phaseTO)
+
+		// ── V12.3 · FAILURE #2: BACKUP HARD-KILL TIMER ──────────────────────
+		// The root cause of the 116m Phase 51 was that context cancellation
+		// alone did NOT stop a phase whose inner loops never checked ctx. This
+		// backup timer fires 15s AFTER the adaptive cap and unconditionally
+		// SIGKILLs every child process group, guaranteeing termination even if
+		// the phase goroutine is wedged inside a syscall and ignores its context
+		// entirely. defer hardKill.Stop() cancels it on the normal fast path.
+		hardKill := time.AfterFunc(phaseTO+15*time.Second, func() {
+			killed := runner.KillAllChildren()
+			o.State.PrintMu.Lock()
+			fmt.Printf("\r\033[K│  🛑 BACKUP HARD-KILL fired (%s + 15s) — SIGKILLed %d child process group(s)\n", fmtDur(phaseTO), killed)
+			o.State.PrintMu.Unlock()
+		})
 
 		// Print phase header (with newline BEFORE to clear timer line)
 		o.State.PrintMu.Lock()
-		fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [Elapsed: %02d:%02d:%02d | cap %s]\n", i+1, len(o.Phases), phase.Name(), h, m, s, fmtDur(phaseTO))
+		fmt.Printf("\r\033[K\n┌─ Phase %02d/%02d  %-35s  [Elapsed: %02d:%02d:%02d | cap %s | %d hosts]\n", i+1, len(o.Phases), phase.Name(), h, m, s, fmtDur(phaseTO), hostCount)
 		fmt.Printf("│  %s\n", phase.Description())
 		o.State.PrintMu.Unlock()
 
@@ -755,6 +796,9 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 			}
 		}
 		phaseCancel()
+		// V12.3 · FAILURE #2: cancel the backup hard-kill timer on the normal
+		// (fast) path so it only ever fires when a phase genuinely overruns.
+		hardKill.Stop()
 
 		// REPAIR #5: after every phase, close any idle Burp keep-alive
 		// connections so a socket left over from this phase's tool handoff

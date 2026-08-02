@@ -72,7 +72,7 @@ func TestV122_RunTool_NoOrphanAfterReturn(t *testing.T) {
 }
 
 // TestV122_RunTool_KillsProcessGroup proves a grandchild spawned inside a shell
-// (a mini-amass: a wrapper that forks a long sleep) is ALSO reaped, not just
+// (a mini-recon-tool: a wrapper that forks a long sleep) is ALSO reaped, not just
 // the direct child — the exact orphan scenario from the GitLab scan.
 func TestV122_RunTool_KillsProcessGroup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {

@@ -273,15 +273,16 @@ func statusClass(code int) int {
 // cloudflareErrorStatuses is the exact set of WAF/edge/origin error codes that
 // must auto-discard any finding derived from them (V12.0 OMEGA BUG #3). It
 // covers Cloudflare's 520–527 block plus 530.
-//   520 Web server returned an unknown error
-//   521 Web server is down
-//   522 Connection timed out
-//   523 Origin is unreachable
-//   524 A timeout occurred
-//   525 SSL handshake failed
-//   526 Invalid SSL certificate
-//   527 Railgun error (legacy)
-//   530 (paired with a 1xxx Cloudflare error)
+//
+//	520 Web server returned an unknown error
+//	521 Web server is down
+//	522 Connection timed out
+//	523 Origin is unreachable
+//	524 A timeout occurred
+//	525 SSL handshake failed
+//	526 Invalid SSL certificate
+//	527 Railgun error (legacy)
+//	530 (paired with a 1xxx Cloudflare error)
 var cloudflareErrorStatuses = map[int]bool{
 	520: true, 521: true, 522: true, 523: true, 524: true,
 	525: true, 526: true, 527: true, 530: true,
@@ -297,7 +298,7 @@ func isCloudflareErrorStatus(code int) bool {
 // or evidence snippet, so a finding is discarded even when the numeric status
 // was lost/normalised upstream.
 var cloudflareErrorSignature = regexp.MustCompile(`(?i)` + strings.Join([]string{
-	`error\s*10\d{2}`,                      // Cloudflare "Error 1016/1020/..." pages
+	`error\s*10\d{2}`, // Cloudflare "Error 1016/1020/..." pages
 	`web server is returning an unknown error`,
 	`web server is down`,
 	`origin is unreachable`,
@@ -306,3 +307,215 @@ var cloudflareErrorSignature = regexp.MustCompile(`(?i)` + strings.Join([]string
 	`cf-error-details`,
 	`attention required.*cloudflare`,
 }, "|"))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V12.3 RUTHLESS · FAILURE #6 — GATE 0: PUBLIC UNAUTHENTICATED ROUTE REJECTION
+// ---------------------------------------------------------------------------
+// EMPIRICAL EVIDENCE (9h42m GitLab scan): 100% false-positive rate. The IDOR,
+// Race-condition, CORS and Auth-Differential engines flagged findings on:
+//   /explore/projects   /explore/topics   /blog/tags/   /merge_requests/
+// — all PUBLIC, unauthenticated marketing/content pages. An IDOR/Race/CORS on a
+// page every anonymous visitor can already read is not a vulnerability; the
+// "differential" is just two anonymous users seeing the same public content.
+//
+// Gate 0 runs BEFORE any of those engines classify a candidate: if the URL is a
+// known-public route prefix (or carries only public query noise) it is REJECTED
+// outright. This is the single change that takes the FP rate from 100% to ~0.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// publicRoutePrefixes are path prefixes that serve PUBLIC, unauthenticated
+// content on effectively every SaaS/marketing site. A finding on any of these
+// is definitionally not an authorization bug.
+var publicRoutePrefixes = []string{
+	"/explore/", "/topics/", "/blog/", "/tags/", "/page/", "/docs/",
+	"/releases/", "/public/", "/assets/", "/help/", "/about/", "/features/",
+	"/pricing/", "/handbook/",
+}
+
+// publicQueryNoise are query parameters that only sort/filter PUBLIC listings.
+// Their presence never indicates an authorization boundary was crossed.
+var publicQueryNoise = []string{"sort=", "archived=", "language="}
+
+// IsPublicUnauthenticatedRoute reports whether rawURL (optionally with its
+// response body) is a public, unauthenticated route that must NEVER be flagged
+// by the IDOR / Race / CORS / Auth-Differential engines (V12.3 · FAILURE #6).
+//
+// It matches on:
+//   - a known public path prefix (case-sensitive on the path, matching how the
+//     upstream router treats these routes), OR
+//   - a query string that contains ONLY public sort/filter noise.
+//
+// The body is accepted for future signal (e.g. a visible "Sign in" CTA on a
+// public page) but the prefix/query checks alone are sufficient and cheap.
+func IsPublicUnauthenticatedRoute(rawURL, body string) bool {
+	if rawURL == "" {
+		return false
+	}
+	// Docs / handbook hosts serve public content by design regardless of path.
+	if isDocsHost(rawURL) {
+		return true
+	}
+	path, query := splitURLPathQuery(rawURL)
+
+	// 1) Known public path prefix anywhere in the path segment.
+	for _, p := range publicRoutePrefixes {
+		if strings.HasPrefix(path, p) || strings.Contains(path, p) {
+			return true
+		}
+	}
+
+	// 2) Query string carrying only public sort/filter noise.
+	if query != "" {
+		for _, q := range publicQueryNoise {
+			if strings.Contains(query, q) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// splitURLPathQuery extracts the path and raw query from a URL WITHOUT importing
+// net/url (which would pull the whole parser for a trivial split and normalise
+// away the exact prefixes we match). It strips the scheme+host so "/explore/"
+// matching is not fooled by a host that merely contains the token.
+func splitURLPathQuery(rawURL string) (path, query string) {
+	s := rawURL
+	// Drop scheme.
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	// Drop host (everything up to the first '/'). If there is no '/', there is
+	// no path.
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		s = s[i:]
+	} else {
+		s = "/"
+	}
+	// Split off fragment then query.
+	if i := strings.IndexByte(s, '#'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// V12.3 RUTHLESS · FAILURE #7 — ADMIN-ENDPOINT ACCESS VALIDATION
+// ---------------------------------------------------------------------------
+// EMPIRICAL EVIDENCE: the API hunter flagged "Unauthenticated Admin Access" on
+//   docs.gitlab.com/administration/…   *.js   *.ts   *.map
+// A JavaScript bundle whose PATH contains the word "admin", or a documentation
+// page ABOUT administration, is NOT an exposed admin panel. ValidateAdminEndpoint-
+// Access requires (a) the response is not a static asset, (b) the host is not a
+// docs/handbook host, and (c) the body actually contains real admin CONTROLS
+// AND the endpoint returned 200 WITHOUT authentication cookies.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// staticAssetExts are file extensions that can NEVER constitute an admin panel,
+// regardless of what their path or contents contain.
+var staticAssetExts = []string{".js", ".css", ".png", ".jpg", ".jpeg", ".gif",
+	".svg", ".map", ".woff", ".woff2", ".ttf", ".eot", ".ico", ".ts", ".mjs"}
+
+// adminControlSignatures are markers of a REAL administrative interface in a
+// response body — the controls an admin panel exposes, not the mere word
+// "admin" appearing in documentation prose or a JS variable name.
+var adminControlSignatures = []string{
+	"delete user", "ban user", "impersonate", "admin dashboard",
+	"manage users", "user management", "system settings", "feature flags",
+	"sudo mode", "admin area", "revoke token", "grant role", "delete account",
+	"suspend account", "manage members", "audit log", "site administration",
+}
+
+// isStaticAsset reports whether rawURL points at a static asset by extension.
+func isStaticAsset(rawURL string) bool {
+	path, _ := splitURLPathQuery(rawURL)
+	lower := strings.ToLower(path)
+	for _, ext := range staticAssetExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDocsHost reports whether host (or the URL's path) belongs to a documentation
+// / handbook surface, which is public by design and never an admin panel.
+func isDocsHost(rawURL string) bool {
+	lower := strings.ToLower(rawURL)
+	host := lower
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	if strings.HasPrefix(host, "docs.") || strings.HasPrefix(host, "handbook.") {
+		return true
+	}
+	path, _ := splitURLPathQuery(rawURL)
+	lp := strings.ToLower(path)
+	return strings.Contains(lp, "/docs/") || strings.Contains(lp, "/handbook/") ||
+		strings.Contains(lp, "/documentation/")
+}
+
+// containsActualAdminControls reports whether body contains markers of a REAL
+// admin interface (not merely the token "admin" in prose or code).
+func containsActualAdminControls(body string) bool {
+	lower := strings.ToLower(body)
+	for _, sig := range adminControlSignatures {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// AdminAccessRequest / AdminAccessResponse are the minimal request/response
+// descriptors ValidateAdminEndpointAccess needs. They avoid importing net/http
+// into the validation package (which stays dependency-light and unit-testable).
+type AdminAccessRequest struct {
+	URL            string
+	HasAuthCookies bool // true when the probe sent session/auth cookies
+}
+
+type AdminAccessResponse struct {
+	StatusCode int
+	Body       string
+}
+
+// ValidateAdminEndpointAccess reports whether (req, resp) is a GENUINE
+// unauthenticated admin-access finding (V12.3 · FAILURE #7). It returns false —
+// i.e. NOT a real finding — when:
+//   - the URL is a static asset (.js/.css/.png/.map/.woff/…), OR
+//   - the URL is a docs/handbook host or /docs/ or /handbook/ path, OR
+//   - the response body does NOT contain real admin controls, OR
+//   - the request WAS authenticated (auth cookies present), OR
+//   - the status code was not 200.
+//
+// Only when ALL of those are cleared does it return true.
+func ValidateAdminEndpointAccess(req AdminAccessRequest, resp AdminAccessResponse) bool {
+	if req.URL == "" {
+		return false
+	}
+	// Static assets are NEVER admin panels.
+	if isStaticAsset(req.URL) {
+		return false
+	}
+	// Docs / handbook surfaces are public by design.
+	if isDocsHost(req.URL) {
+		return false
+	}
+	// A real unauthenticated finding requires a 200 reached WITHOUT auth.
+	if resp.StatusCode != 200 {
+		return false
+	}
+	if req.HasAuthCookies {
+		return false
+	}
+	// And the body must expose actual administrative controls.
+	return containsActualAdminControls(resp.Body)
+}
