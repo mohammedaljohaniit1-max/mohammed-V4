@@ -1,0 +1,12 @@
+{
+  "responses": [
+    {
+      "url": "https://old.example.net/",
+      "headers": { "Server": "Apache/2.2.15 (CentOS)", "X-Powered-By": "PHP/5.3.3" },
+      "set_cookie": "PHPSESSID=deadbeef; path=/"
+    }
+  ],
+  "legacy_stack": true,
+  "has_bug_bounty_program": false,
+  "resolved_reports": -1
+}

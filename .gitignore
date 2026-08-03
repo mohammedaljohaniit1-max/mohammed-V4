@@ -2,4 +2,6 @@
 output/
 *.exe
 mohammed
-mohammed
+# V13: compiled tip binary (built via `go build ./cmd/tip`)
+/tip
+cmd/tip/tip

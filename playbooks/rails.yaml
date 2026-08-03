@@ -1,0 +1,38 @@
+technology: ruby_on_rails
+match_language: ruby_on_rails
+description: >
+  Attack playbook for Ruby on Rails applications. Focuses on the mistakes Rails
+  developers actually still make in 2026, not textbook classes that modern Rails
+  defaults already prevent.
+common_vulnerabilities:
+  - name: Mass Assignment
+    when: strong_parameters not enforced on a controller
+    note: Try adding privileged attributes (role, admin, verified) to create/update bodies.
+  - name: IDOR via predictable ActiveRecord IDs
+    note: Sequential integer PKs are the default; enumerate ownership on every /:id route.
+  - name: YAML/Marshal deserialization RCE
+    when: legacy Rails, unsafe YAML.load on user input
+  - name: Verbose production error pages
+    when: config.consider_all_requests_local mis-set
+    note: Leaks stack traces, gem versions, and DB schema.
+  - name: Devise password-reset host-header poisoning
+    note: Injected Host header can control the reset link in the email.
+high_value_surfaces:
+  - /rails/info/properties   # must be disabled in production, frequently isn't
+  - /rails/info/routes
+  - ActiveStorage direct-upload endpoints
+  - ActionMailbox inbound webhook endpoints
+  - Devise auth endpoints (sign_in, password/new, confirmation)
+  - ActiveJob / Sidekiq dashboards (/sidekiq)
+detect_headers:
+  - X-Runtime
+  - X-Request-Id
+detect_cookies:
+  - _session_id
+custom_checks:
+  - rails_info_controller_exposed
+  - rails_mass_assignment
+  - devise_password_reset_poisoning
+priority_note: >
+  On ClassA Rails targets (e.g. GitLab), generic Rails CVEs are already patched;
+  spend the time on mass-assignment and per-object authorization instead.
