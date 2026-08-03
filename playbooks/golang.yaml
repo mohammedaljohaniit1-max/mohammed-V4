@@ -1,0 +1,33 @@
+technology: golang
+match_language: golang
+description: >
+  Attack playbook for Go backends. Go's memory safety removes whole bug classes,
+  so the yield is in authorization logic, SSRF via net/http clients, and
+  path handling — not injection.
+common_vulnerabilities:
+  - name: Broken authorization in handlers
+    note: Go has no framework-enforced auth; each handler checks (or forgets to check) itself.
+  - name: SSRF via http.Get on user-supplied URLs
+    note: net/http follows redirects by default; check import/fetch/webhook features.
+  - name: Path traversal via filepath.Join on user input
+    note: Serving files by name without filepath.Clean + base-dir containment.
+  - name: IDOR on integer/UUID resource IDs
+    note: Same as any language; enumerate ownership on detail routes.
+  - name: Decompression bombs / unbounded body reads
+    when: io.ReadAll without a limit reader
+high_value_surfaces:
+  - /debug/pprof/            # net/http/pprof mounted in prod = infra + memory leak
+  - /metrics                 # prometheus client, sometimes unauth
+  - REST + gRPC endpoints (grpc reflection if enabled)
+  - any "fetch remote URL" feature (SSRF surface)
+detect_headers:
+  - Server                   # often "Go-http-client" on internal services
+detect_body_signatures:
+  - "http: "                 # Go net/http error strings
+custom_checks:
+  - go_pprof_exposed
+  - go_ssrf_url_fetch
+  - go_path_traversal_fileserver
+priority_note: >
+  Do NOT waste time on memory-corruption or classic injection against Go; the
+  language prevents most of it. Concentrate 100% on authorization and SSRF.

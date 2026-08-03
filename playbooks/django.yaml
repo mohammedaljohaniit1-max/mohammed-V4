@@ -1,0 +1,35 @@
+technology: python_django
+match_language: python_django
+description: >
+  Attack playbook for Python/Django applications, targeting real-world
+  misconfigurations rather than classes Django's ORM/templating already prevent.
+common_vulnerabilities:
+  - name: DEBUG=True in production
+    note: Exposes settings, installed apps, stack traces, and SQL. High-value recon.
+  - name: IDOR on DRF ViewSets
+    when: get_queryset not scoped to request.user
+    note: Django REST Framework ModelViewSets often forget object-level permissions.
+  - name: SSRF via URLField / requests in views
+    note: Image proxies, webhook senders, and "fetch URL" features.
+  - name: Mass assignment via ModelForm / serializer fields = '__all__'
+    note: fields='__all__' exposes every model column to the client.
+  - name: Weak SECRET_KEY -> session/signature forgery
+    when: default or leaked SECRET_KEY
+high_value_surfaces:
+  - /admin/                      # Django admin (default path)
+  - /api/ DRF browsable API root
+  - /static/ + /media/ misconfig (directory listing, uploaded-file exec)
+  - password reset + set_password flows
+detect_cookies:
+  - csrftoken
+  - sessionid
+detect_body_signatures:
+  - "django.core"
+  - "Traceback (most recent call last)"
+custom_checks:
+  - django_debug_true_exposed
+  - drf_object_permission_idor
+  - django_admin_default_path
+priority_note: >
+  DRF object-level authorization gaps are the highest-yield Django finding class;
+  build the authorization matrix around every ViewSet detail route.

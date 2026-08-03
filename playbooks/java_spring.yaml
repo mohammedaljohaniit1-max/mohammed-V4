@@ -1,0 +1,34 @@
+technology: java_spring
+match_language: java_spring
+description: >
+  Attack playbook for Java / Spring (Boot) applications. Targets actuator
+  exposure, SpEL/deserialization, and the authorization gaps that Spring
+  Security misconfiguration produces.
+common_vulnerabilities:
+  - name: Spring Boot Actuator exposure
+    note: /actuator/env, /actuator/heapdump, /actuator/mappings leak secrets & routes.
+  - name: Spring Security path-matching bypass
+    note: Trailing slash, case, %2e, and matrix params can dodge antMatchers rules.
+  - name: SpEL / OGNL injection
+    when: user input reaches an expression evaluator
+  - name: Insecure deserialization
+    when: Java native serialization or unsafe Jackson polymorphic typing
+  - name: Mass assignment via @ModelAttribute binding
+    note: Bind unexpected fields (role, enabled) unless @InitBinder restricts them.
+high_value_surfaces:
+  - /actuator, /actuator/env, /actuator/heapdump, /actuator/health, /actuator/mappings
+  - /error (Whitelabel Error Page leaks stack traces)
+  - Spring Data REST auto-exposed repositories (/api/{entity})
+  - SAML/OAuth endpoints (Spring Security SAML has had signature-wrapping issues)
+detect_cookies:
+  - JSESSIONID
+detect_body_signatures:
+  - "org.springframework"
+  - "Whitelabel Error Page"
+custom_checks:
+  - spring_actuator_exposed
+  - spring_security_path_bypass
+  - spring_data_rest_repository_exposure
+priority_note: >
+  Actuator heapdump + env is the single highest-yield Spring finding: a heapdump
+  frequently contains live credentials/session tokens. Check it first.

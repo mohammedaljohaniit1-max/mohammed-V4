@@ -1863,6 +1863,67 @@ check_grep pkg/exploit/burp.go 'skipped-community' \
 check_grep pkg/exploit/burp_capabilities_test.go 'func TestV123_DetectBurpCapabilities_Community' \
     "FAILURE 10: Community-detection unit test present" "FAILURE 10: capability test MISSING"
 
+# ═══════════════════════════════════════════════════════════════════════
+# V13 SUPREME MANDATE — Milestone 1: Intelligence + Triage backbone
+# Scope honesty: this block verifies ONLY what was actually built and tested
+# in Milestone 1 (mandate §1.1 TIP + §1.2 A/B/C/D classifier + §1.3 playbooks
+# + §6.1 rejection-suppression list). Modules deferred as untestable in-sandbox
+# (protocols/evasion/businesslogic/authorization/database, GL-01..06) are
+# intentionally NOT asserted here — see HONEST_ASSESSMENT.md.
+# ═══════════════════════════════════════════════════════════════════════
+hdr "V13 M1 — Intelligence Core source files"
+check_file "pkg/intelligence/core.go"
+check_file "pkg/intelligence/classify.go"
+check_file "pkg/intelligence/fingerprint.go"
+check_file "pkg/intelligence/profile.go"
+check_file "pkg/intelligence/playbook.go"
+check_file "cmd/tip/main.go"
+check_file "pkg/reporting/suppression.go"
+check_file "HONEST_ASSESSMENT.md"
+
+hdr "V13 M1 — Key symbols present (§1.1/§1.2/§6.1)"
+check_grep pkg/intelligence/core.go 'type IntelligenceCore struct' \
+    "core.go: IntelligenceCore present (§4.2)" "core.go: IntelligenceCore MISSING"
+check_grep pkg/intelligence/core.go 'Learn\(d Discovery\)' \
+    "core.go: Learn(Discovery) present (§4.2)" "core.go: Learn MISSING"
+check_grep pkg/intelligence/classify.go 'Classify\(in ClassifyInput\)' \
+    "classify.go: A/B/C/D Classify present (§1.2)" "classify.go: Classify MISSING"
+check_grep pkg/intelligence/profile.go 'intelligence_profile.json|func .*Profile()' \
+    "profile.go: Profile serializer present (§1.1)" "profile.go: Profile MISSING"
+check_grep cmd/tip/main.go 'intelligence_profile.json' \
+    "cmd/tip: writes intelligence_profile.json (§1.1)" "cmd/tip: profile path MISSING"
+check_grep pkg/reporting/suppression.go 'DefaultRules' \
+    "suppression.go: GitLab rejection rules present (§6.1)" "suppression.go: DefaultRules MISSING"
+check_grep pkg/reporting/suppression_test.go 'TestSuppress_NeverDropsHighImpact' \
+    "suppression: never-drop-high-impact guard test present" "suppression: high-impact guard test MISSING"
+
+hdr "V13 M1 — Per-tech playbooks (§1.3)"
+for pb in rails django nodejs golang java_spring; do
+    if [ -f "playbooks/$pb.yaml" ]; then pass "playbooks/$pb.yaml present"; else fail "playbooks/$pb.yaml MISSING"; fi
+done
+
+hdr "V13 M1 — Package tests (intelligence + reporting + tip)"
+if go test ./pkg/intelligence/... ./pkg/reporting/... ./cmd/tip/... >/dev/null 2>&1; then
+    pass "V13 M1 package tests pass"
+else
+    fail "V13 M1 package tests FAILED"
+fi
+
+hdr "V13 M1 — TIP engine end-to-end smoke (deterministic fixture)"
+if [ -f "testdata/tip/rails_hardened.json" ]; then
+    _tiptmp="$(mktemp -d)"
+    if go run ./cmd/tip -target gitlab.example.com -signals testdata/tip/rails_hardened.json -out "$_tiptmp" >/dev/null 2>&1 \
+       && [ -f "$_tiptmp/gitlab.example.com/intelligence_profile.json" ] \
+       && grep -q '"class": "A"' "$_tiptmp/gitlab.example.com/intelligence_profile.json"; then
+        pass "cmd/tip produced a Class-A profile for the hardened Rails fixture"
+    else
+        fail "cmd/tip end-to-end smoke FAILED"
+    fi
+    rm -rf "$_tiptmp"
+else
+    warn "testdata/tip/rails_hardened.json missing — skipping TIP smoke"
+fi
+
 hdr "V12.3 — Go build gates (tests compile + run)"
 if go build ./... >/dev/null 2>&1; then pass "go build ./... — 0 errors"; else fail "go build ./... — BUILD ERRORS"; fi
 if go vet ./... >/dev/null 2>&1; then pass "go vet ./... — 0 warnings"; else fail "go vet ./... — VET WARNINGS"; fi

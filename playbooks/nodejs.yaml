@@ -1,0 +1,34 @@
+technology: nodejs_express
+match_language: nodejs_express
+description: >
+  Attack playbook for Node.js / Express (and common Node frameworks). Emphasises
+  prototype pollution, mass assignment, and JS-bundle intelligence which are the
+  highest-yield Node-specific classes in 2026.
+common_vulnerabilities:
+  - name: Prototype pollution
+    note: __proto__/constructor.prototype in JSON bodies or query params; can chain to RCE/auth-bypass.
+  - name: Mass assignment via Object.assign(model, req.body)
+    note: Add is_admin/role/verified fields to request bodies.
+  - name: NoSQL injection (MongoDB)
+    note: Operator injection with {"$gt":""}, {"$ne":null} in JSON auth params.
+  - name: SSRF via server-side fetch/axios/request
+    note: URL preview, avatar-from-URL, webhook, and import features.
+  - name: JWT algorithm confusion
+    when: jsonwebtoken misconfigured (alg none / HS-vs-RS confusion)
+high_value_surfaces:
+  - JavaScript bundles (main.*.js) — extract API keys, endpoints, feature flags
+  - /api/ REST routes and any /graphql
+  - websocket upgrade endpoints (socket.io, ws)
+  - source maps (*.js.map) if exposed
+detect_headers:
+  - X-Powered-By   # "Express"
+detect_body_signatures:
+  - "Cannot GET /"
+custom_checks:
+  - node_prototype_pollution
+  - node_nosql_operator_injection
+  - js_bundle_secret_extraction
+priority_note: >
+  Always download and statically analyse the JS bundles first — Node SPAs leak
+  internal endpoint maps and occasionally credentials, which seeds every later
+  authorization test.
