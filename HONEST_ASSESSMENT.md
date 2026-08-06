@@ -125,6 +125,34 @@ can state truthfully:
 
 ---
 
+## 3b. THE SESSION-DEATH BUG (root cause of many zero-result scans)
+
+This was raised by the operator and it is **correct and important**:
+
+On a 10–12 hour scan, the authenticated session is created ONCE at bootstrap
+(`pkg/exploit/autobootstrap.go`) and there is **no mechanism to keep it alive
+or re-authenticate when it dies**. Real sessions expire in 30–60 minutes. So:
+
+> For ~11 of the 12 hours, the scanner is silently browsing as an ANONYMOUS
+> visitor. IDOR, BOLA, privilege-escalation and business-logic bugs — which are
+> the ONLY bug classes worth finding on a hardened target — are **impossible to
+> detect without a live logged-in session.**
+
+This alone can explain a large fraction of "12 hours → 0 vulns".
+
+**Proposed fix (not yet built): `pkg/session` — a Session Keeper**
+- **Heartbeat:** every N minutes, hit a known authenticated endpoint and check
+  the response still proves "logged in".
+- **Liveness detector:** detect death signals — redirect to `/login`, sudden
+  401/403 on a previously-working endpoint, appearance of "Sign in" text,
+  disappearance of the username from the response.
+- **Auto re-auth:** on death, re-login with the bootstrap credentials, refresh
+  the cookies across every engine, and resume.
+
+**Honest limits:** works for plain user/pass login. **Fails against CAPTCHA / 2FA**
+— for those the only path is an operator-supplied cookie + a "give me a fresh
+cookie on demand" hook. Buildable and testable offline with fixtures.
+
 ## 4. What is still needed to make V13 real
 
 1. A staging/live authorized target (ideally a self-hosted GitLab) to validate
