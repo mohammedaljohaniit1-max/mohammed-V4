@@ -1,0 +1,19 @@
+{
+  "program": "Nournet eServices (CST initiative)",
+  "platform": "bugbounty.sa",
+  "in_scope": [
+    "https://eservices.nour.net.sa/"
+  ],
+  "out_of_scope": [],
+  "automation": "reports_rejected",
+  "max_rps": 0,
+  "sensitive_gov": true,
+  "email_convention": "BugBounty_[username]@example.com",
+  "notes": [
+    "SENSITIVE GOV (CST/هيئة الاتصالات initiative): sensitive_gov=true FORCES passive-only + Gentle Mode. Even nmap/port-scan may be banned; infra is limited/under load (operator idea #2).",
+    "Policy: 'Reports from automated tools or scans are not acceptable.'",
+    "Account creation email convention REQUIRED: BugBounty_[username]@example.com (marks you as a researcher).",
+    "Out of scope incl: physical, third-party software, social engineering/identity theft, open-source lib, self-XSS, CSRF unauthenticated/no-sensitive, CSV injection w/o impact, DoS, rate-limit/brute-force non-auth, account/email enumeration via brute-force, clickjacking non-sensitive, content spoofing w/o vector, MITM, TLS/CSP best-practice, weak password policy, outdated-browser-only, SPF/DKIM/DMARC, no-rate-limit/missing-captcha on login/register/forgot-password, email/OTP flooding, secure/HTTPOnly flag, text injection in 404.",
+    "PoC/exploit code MANDATORY. Single host only. 18+, not a Nournet employee within 6 months."
+  ]
+}

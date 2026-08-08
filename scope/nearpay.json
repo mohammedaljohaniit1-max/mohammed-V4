@@ -1,0 +1,21 @@
+{
+  "program": "Nearpay - Payment Infra",
+  "platform": "bugbounty.sa",
+  "in_scope": [
+    "https://sa-dev.nearpay.io/",
+    "https://sa-dev-admin.nearpay.io/",
+    "https://sa-dev-api.nearpay.io",
+    "*-sa-dev-*.nearpay.io"
+  ],
+  "out_of_scope": [],
+  "automation": "reports_rejected",
+  "max_rps": 0,
+  "sensitive_gov": false,
+  "email_convention": "",
+  "notes": [
+    "DEV environment (sa-dev) + wildcard => decent surface, lower blast radius than prod. Still a PAYMENT provider: treat integrity/availability with care.",
+    "Policy: 'Reports consisting solely of automated tool output without manual analysis are not accepted.' => manual validation mandatory.",
+    "Out of scope incl: assets not explicitly listed, physical, DoS/DDoS/resource-exhaustion, email/OTP flooding, stolen-credential issues, brute-force/credential-stuffing/ATO-via-brute-force, account/email enumeration w/o impact, self-XSS, clickjacking non-sensitive, content spoofing w/o impact, CSV injection w/o impact, CSRF unauthenticated/no-sensitive, missing TLS/CSP/header best-practice w/o exploitation, mobile reverse-engineering w/o runtime exploit, MITM/local-network, SPF/DKIM/DMARC w/o impact.",
+    "PoC/screenshots/repro steps mandatory. Each vuln = separate report. No public disclosure without written permission."
+  ]
+}
