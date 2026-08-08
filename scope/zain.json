@@ -1,0 +1,18 @@
+{
+  "program": "Zain.App Main Website (CST initiative)",
+  "platform": "bugbounty.sa",
+  "in_scope": [
+    "https://zain.app"
+  ],
+  "out_of_scope": [],
+  "automation": "rate_limited",
+  "max_rps": 100,
+  "sensitive_gov": true,
+  "notes": [
+    "TELECOM (Zain), CST initiative: policy explicitly permits automation but 'Limit any automated scanning to 100 requests per second.' HOWEVER also 'Reports from automated tools or scans are not acceptable' => any aggressive run must stay <=100 rps AND every finding must be manually validated. sensitive_gov=true keeps Gentle Mode on by default given telecom load concerns.",
+    "Single host in scope (zain.app).",
+    "Out of scope incl: physical, third-party, social engineering/identity theft, open-source lib, self-XSS, CSRF unauthenticated/no-sensitive, CSV injection w/o impact, DoS, rate-limit/brute-force non-auth, account/email enumeration via brute-force, clickjacking non-sensitive, content spoofing w/o vector, MITM, TLS/CSP best-practice, weak password policy, outdated-browser-only, SPF/DKIM/DMARC, email/OTP flooding, secure/HTTPOnly flag, open redirect (unless extra impact).",
+    "PoC/exploit code MANDATORY. 18+, not a Zain employee within 6 months.",
+    "NOTE: max_rps=100 lets aggressive tools pass the guard-rail, but the operator must ALSO configure the tool to actually cap at 100 rps and prefer manual validation."
+  ]
+}
