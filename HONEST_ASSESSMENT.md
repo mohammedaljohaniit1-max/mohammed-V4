@@ -166,6 +166,43 @@ cookie on demand" hook. Buildable and testable offline with fixtures.
 
 ---
 
+## 4b. Session keeper, OSINT tool, and the scope guard-rail (2026-08-08)
+
+Three new, fully-tested packages were added after the operator selected six
+bugbounty.sa targets and asked for interactive login, phone/email OSINT, and a
+plan for sensitive Saudi/gov targets.
+
+- **`pkg/session`** — live-session Keeper (heartbeat + `judge()` death detector +
+  auto re-auth), `GentleMode` (pacer + 429/503 circuit breaker), and the
+  *testable core* of interactive browser login (`CookiesToHeader`,
+  `LoginDetected`). 32 tests, race-clean. **Honest limit:** the go-rod glue that
+  actually opens Chrome and harvests cookies is NOT built/tested — the sandbox
+  has no browser. The pure cookie/decision logic is done; the Chrome driver is
+  deferred and must be validated by an operator with a real browser.
+
+- **`pkg/osint` + `cmd/osint`** — the SEPARATE phone/email OSINT tool the operator
+  asked for (request #4), which did not previously exist. It generates
+  holehe/phoneinfoga/maigret-style *candidate* leads offline. **Honest limit:**
+  a candidate is a place to look, never proof. Only the optional `--live` gentle
+  GET/HEAD check can confirm existence, and a network error never fabricates a
+  positive. It does not scrape search engines or bypass any auth.
+
+- **`pkg/scope` + `cmd/scope`** — a legal guard-rail. Every one of the six chosen
+  programs forbids or rejects automated scanning (ejada & Mobily warn of *legal
+  action*). The guard classifies all 25 tools passive/probe/active/aggressive and
+  refuses forbidden tooling per program. **Honest limit:** it is NOT yet wired
+  into the actual runner — it is a library + preflight CLI. Until wired (M5), the
+  operator must consult `cmd/scope` manually before running the scanner.
+
+**Correction on local models:** an earlier summary dismissed "Kimi K3" as
+non-existent. A 2026-08-08 web check shows `qwen3.6:27b` and PrismML `Bonsai 27B`
+are real Ollama-runnable models and Ollama lists a cloud `kimi-k3`. That earlier
+dismissal was over-skeptical. The standing rule is unchanged: pull only from
+official sources, and keep the AI layer pluggable (planned `pkg/ai/provider`) so
+the model can be swapped without code changes.
+
+---
+
 ## 5. One-line summary
 
 **Milestone 1 delivers a small, correct, fully-tested intelligence + triage
