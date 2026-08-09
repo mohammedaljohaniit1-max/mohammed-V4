@@ -1,0 +1,18 @@
+{
+  "program": "ejada eHub Marketplace",
+  "platform": "bugbounty.sa",
+  "in_scope": [
+    "https://ehub.ejada.com/"
+  ],
+  "out_of_scope": [],
+  "automation": "forbidden",
+  "max_rps": 0,
+  "sensitive_gov": false,
+  "notes": [
+    "DANGER: 'Automated scanning is strictly prohibited. Violations may result in legal action.' => NO aggressive/active tooling. Passive OSINT ONLY. Manual testing 100%.",
+    "Single host in scope (ehub.ejada.com). Nothing else.",
+    "Program-specific rules: do NOT interact with customer service reps (legal escalation). Label all testing artifacts (e.g. bugbounty001.sh naming). Do not disrupt/degrade availability.",
+    "Out of scope incl: physical/social engineering, credential harvesting/phishing/cookie theft, DoS/flooding, bulk account/group/project creation, OTP/email flooding, public/non-sensitive info disclosure, DNS/SPF/DKIM/DMARC/TLS misconfig, missing secure/HTTPOnly cookie flags, missing security headers, predictable/weak randomness, clickjacking/tapjacking/UI-redress, MITM, known CVEs w/o working exploit, account/email enumeration, self-XSS, brute-force, open redirect, CSRF login/logout, CSRF unauthenticated forms, content spoofing, weak password policy, autocomplete on sensitive fields, missing custom error pages, enabled HTTP methods w/o risk, mixed content (passive).",
+    "PoC/exploit code MANDATORY. Each vuln = separate report. Must be 18+, not an ejada employee (within 2 months)."
+  ]
+}

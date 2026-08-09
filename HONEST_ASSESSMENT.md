@@ -125,6 +125,34 @@ can state truthfully:
 
 ---
 
+## 3b. THE SESSION-DEATH BUG (root cause of many zero-result scans)
+
+This was raised by the operator and it is **correct and important**:
+
+On a 10–12 hour scan, the authenticated session is created ONCE at bootstrap
+(`pkg/exploit/autobootstrap.go`) and there is **no mechanism to keep it alive
+or re-authenticate when it dies**. Real sessions expire in 30–60 minutes. So:
+
+> For ~11 of the 12 hours, the scanner is silently browsing as an ANONYMOUS
+> visitor. IDOR, BOLA, privilege-escalation and business-logic bugs — which are
+> the ONLY bug classes worth finding on a hardened target — are **impossible to
+> detect without a live logged-in session.**
+
+This alone can explain a large fraction of "12 hours → 0 vulns".
+
+**Proposed fix (not yet built): `pkg/session` — a Session Keeper**
+- **Heartbeat:** every N minutes, hit a known authenticated endpoint and check
+  the response still proves "logged in".
+- **Liveness detector:** detect death signals — redirect to `/login`, sudden
+  401/403 on a previously-working endpoint, appearance of "Sign in" text,
+  disappearance of the username from the response.
+- **Auto re-auth:** on death, re-login with the bootstrap credentials, refresh
+  the cookies across every engine, and resume.
+
+**Honest limits:** works for plain user/pass login. **Fails against CAPTCHA / 2FA**
+— for those the only path is an operator-supplied cookie + a "give me a fresh
+cookie on demand" hook. Buildable and testable offline with fixtures.
+
 ## 4. What is still needed to make V13 real
 
 1. A staging/live authorized target (ideally a self-hosted GitLab) to validate
@@ -135,6 +163,43 @@ can state truthfully:
 5. H1 API access before "program intelligence" is more than a data model.
 6. Wiring `IntelligenceCore` into the existing 8-phase pipeline so `Learn()` is
    actually fed by the running scanner (currently it's fed by cmd/tip fixtures).
+
+---
+
+## 4b. Session keeper, OSINT tool, and the scope guard-rail (2026-08-08)
+
+Three new, fully-tested packages were added after the operator selected six
+bugbounty.sa targets and asked for interactive login, phone/email OSINT, and a
+plan for sensitive Saudi/gov targets.
+
+- **`pkg/session`** — live-session Keeper (heartbeat + `judge()` death detector +
+  auto re-auth), `GentleMode` (pacer + 429/503 circuit breaker), and the
+  *testable core* of interactive browser login (`CookiesToHeader`,
+  `LoginDetected`). 32 tests, race-clean. **Honest limit:** the go-rod glue that
+  actually opens Chrome and harvests cookies is NOT built/tested — the sandbox
+  has no browser. The pure cookie/decision logic is done; the Chrome driver is
+  deferred and must be validated by an operator with a real browser.
+
+- **`pkg/osint` + `cmd/osint`** — the SEPARATE phone/email OSINT tool the operator
+  asked for (request #4), which did not previously exist. It generates
+  holehe/phoneinfoga/maigret-style *candidate* leads offline. **Honest limit:**
+  a candidate is a place to look, never proof. Only the optional `--live` gentle
+  GET/HEAD check can confirm existence, and a network error never fabricates a
+  positive. It does not scrape search engines or bypass any auth.
+
+- **`pkg/scope` + `cmd/scope`** — a legal guard-rail. Every one of the six chosen
+  programs forbids or rejects automated scanning (ejada & Mobily warn of *legal
+  action*). The guard classifies all 25 tools passive/probe/active/aggressive and
+  refuses forbidden tooling per program. **Honest limit:** it is NOT yet wired
+  into the actual runner — it is a library + preflight CLI. Until wired (M5), the
+  operator must consult `cmd/scope` manually before running the scanner.
+
+**Correction on local models:** an earlier summary dismissed "Kimi K3" as
+non-existent. A 2026-08-08 web check shows `qwen3.6:27b` and PrismML `Bonsai 27B`
+are real Ollama-runnable models and Ollama lists a cloud `kimi-k3`. That earlier
+dismissal was over-skeptical. The standing rule is unchanged: pull only from
+official sources, and keep the AI layer pluggable (planned `pkg/ai/provider`) so
+the model can be swapped without code changes.
 
 ---
 

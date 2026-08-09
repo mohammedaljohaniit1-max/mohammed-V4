@@ -1,0 +1,17 @@
+{
+  "program": "Flagyard Platform (Tuwaiq Academy)",
+  "platform": "bugbounty.sa",
+  "in_scope": [
+    "*.flagyard.com"
+  ],
+  "out_of_scope": [],
+  "automation": "reports_rejected",
+  "max_rps": 0,
+  "sensitive_gov": false,
+  "notes": [
+    "RECOMMENDED FIRST TARGET: wildcard scope (*.flagyard.com) + a CTF platform built to be attacked + lower sensitivity than telecom/gov.",
+    "Policy: 'Reports from automated tools or scans are not acceptable.' => aggressive scanners produce rejected reports; drive manually and validate.",
+    "Out of scope incl: Self-XSS, CSRF on unauthenticated/no-sensitive-action forms, DoS, rate-limit/brute-force on non-auth endpoints, account/email enumeration via brute-force, clickjacking on non-sensitive pages, MITM, SSL/TLS best-practice, CSP best-practice (unless demonstrable impact), weak password policy, outdated-browser-only, email/OTP flooding, missing SPF/DKIM/DMARC.",
+    "Exploit code / PoC is MANDATORY. Each vuln = separate report. Do not disclose publicly."
+  ]
+}

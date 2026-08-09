@@ -1,0 +1,18 @@
+{
+  "program": "Mobily Main Portal",
+  "platform": "bugbounty.sa",
+  "in_scope": [
+    "https://mobily.com.sa"
+  ],
+  "out_of_scope": [],
+  "automation": "forbidden",
+  "max_rps": 0,
+  "sensitive_gov": false,
+  "notes": [
+    "TELECOM (Mobily): 'Automated scans/tools should not be used in the testing process.' => automation forbidden. Passive OSINT only; manual testing.",
+    "Program rule: tests requiring communication with customer service agents are prohibited (formal report if breached). Use standard names for uploads/accounts.",
+    "Single host in scope (mobily.com.sa).",
+    "Out of scope incl: account/email enumeration (even non-brute-force), directory enumeration (unless exceptionally sensitive), password/credential-strength/lockout/rate-limit, lack of SSL/mixed content, sensitive-data leak requiring MITM, SSL/TLS best-practice w/o full PoC, physical, third-party, social engineering, open-source lib, stolen-credential/physical-access, banking functionality, fraud/rogue-merchant, self-XSS, host-header injection w/o impact, CSRF unauthenticated/no-sensitive, CSV injection w/o impact, DoS, rate-limit non-auth, clickjacking non-sensitive, content spoofing w/o vector, MITM, TLS/CSP best-practice, outdated-browser-only, IIS tilde disclosure, SSH user enum, missing headers, missing cookie flags, WordPress user enum, weak ciphers/POODLE/Heartbleed (discretion), PHP info, server-status (discretion).",
+    "PoC/exploit code MANDATORY. 18+, not a Mobily employee within 6 months."
+  ]
+}
