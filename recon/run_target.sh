@@ -52,12 +52,18 @@ if scope_allows "$SCOPE_FILE" "httpx" && [[ "$SENSITIVE" == "0" ]]; then
   HTTPX_OK=1
 fi
 
-# ---- 2. passive subdomains (crt.sh) ----------------------------------------
+# ---- 2. passive subdomains (crt.sh + installed passive tools) --------------
 : > "$OUT/subdomains.txt"
 for h in "${HOSTS[@]}"; do
   apex="$(echo "$h" | sed -E 's#^https?://##; s#/.*$##')"
   log "crt.sh subdomains for $apex ..."
   passive_subdomains "$apex" >> "$OUT/subdomains.txt"
+  # Extra PASSIVE sources from installed tools (subfinder/assetfinder/amass),
+  # each gated by the guard-rail. Cleaned to valid hosts under the apex.
+  passive_tool_subdomains "$apex" "$SCOPE_FILE" \
+    | sed 's/^\*\.//' | tr 'A-Z' 'a-z' | tr -d ' \t\r' \
+    | grep -E '^[a-z0-9._-]+$' \
+    | grep -Ei "(^|\.)${apex//./\\.}$" >> "$OUT/subdomains.txt" || true
 done
 # Always include the seed hosts themselves.
 for h in "${HOSTS[@]}"; do echo "$h" | sed -E 's#^https?://##; s#/.*$##'; done >> "$OUT/subdomains.txt"
@@ -70,6 +76,8 @@ for h in "${HOSTS[@]}"; do
   apex="$(echo "$h" | sed -E 's#^https?://##; s#/.*$##')"
   log "wayback URLs for $apex ..."
   passive_urls "$apex" >> "$OUT/urls.txt"
+  # Extra PASSIVE URL sources from installed tools (gau/waybackurls), gated.
+  passive_tool_urls "$apex" "$SCOPE_FILE" >> "$OUT/urls.txt" || true
   sleep "$DELAY"
 done
 sort -u -o "$OUT/urls.txt" "$OUT/urls.txt"
