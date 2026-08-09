@@ -47,16 +47,27 @@ export PATH="$PATH:$GOBIN"
 mkdir -p "$GOBIN"
 
 # ---- 2. allowed passive recon tools (optional but recommended) --------------
-# Only PASSIVE/PROBE tools. NEVER installs aggressive scanners here.
-info "Installing allowed passive recon tools (subfinder, httpx) via Go ..."
-if ! have subfinder; then
-  go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest 2>/dev/null \
-    && ok "subfinder installed" || warn "subfinder install failed (crt.sh fallback still works)"
-fi
-if ! have httpx; then
-  go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest 2>/dev/null \
-    && ok "httpx installed" || warn "httpx install failed (liveness step will be skipped)"
-fi
+# Only PASSIVE/PROBE tools. NEVER installs aggressive scanners here
+# (no nuclei/ffuf/dalfox/naabu/nmap/puredns — those stay DENIED by the guard-rail).
+# Format: "binary|go-install-path"
+PASSIVE_TOOLS=(
+  "subfinder|github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"   # passive subdomains
+  "assetfinder|github.com/tomnomnom/assetfinder@latest"                        # passive subdomains
+  "amass|github.com/owasp-amass/amass/v4/...@master"                           # used ONLY with -passive
+  "gau|github.com/lc/gau/v2/cmd/gau@latest"                                    # passive archived URLs
+  "waybackurls|github.com/tomnomnom/waybackurls@latest"                        # passive archived URLs
+  "httpx|github.com/projectdiscovery/httpx/cmd/httpx@latest"                   # gentle liveness (probe)
+)
+info "Installing allowed PASSIVE recon tools via Go (subfinder, assetfinder, amass, gau, waybackurls, httpx) ..."
+for entry in "${PASSIVE_TOOLS[@]}"; do
+  bin="${entry%%|*}"; path="${entry##*|}"
+  if have "$bin"; then ok "$bin already present"; continue; fi
+  if go install -v "$path" 2>/dev/null; then
+    ok "$bin installed"
+  else
+    warn "$bin install failed (skipped; crt.sh/wayback built-ins still work)"
+  fi
+done
 
 # ---- 3. build MOHAMMED binaries --------------------------------------------
 info "Building MOHAMMED binaries into ./bin ..."
@@ -95,6 +106,11 @@ Next — run a PASSIVE scan for any target (each has its own command/scope):
   bash recon/nournet.sh       # eservices.nour.net.sa (PASSIVE ONLY, gov)
   bash recon/zain.sh          # zain.app         (PASSIVE ONLY, gov)
   bash recon/mobily.sh        # mobily.com.sa    (PASSIVE ONLY)
+
+Each preset now runs (only if installed + allowed by the guard-rail):
+  crt.sh + subfinder + assetfinder + amass(-passive)  -> subdomains
+  wayback + gau + waybackurls                         -> archived URLs
+All PASSIVE. Aggressive scanners (nuclei/ffuf/dalfox/naabu/nmap) stay DENIED.
 
 Then bundle + hand to an EXTERNAL AI:
   bash recon/collect.sh <target>

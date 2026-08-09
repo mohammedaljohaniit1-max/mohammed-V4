@@ -86,6 +86,46 @@ passive_subdomains() {
   rm -f "$tmp"
 }
 
+# passive_tool_subdomains <apex> <scope-file> -> extra subdomains from installed
+# PASSIVE subdomain tools, each only if the guard-rail allows it AND it exists.
+#   * subfinder  : passive sources only (-silent, no bruteforce)  [ALLOWED as passive]
+#   * assetfinder: passive OSINT                                   [ALLOWED as passive]
+#   * amass      : passive enum only (-passive, never active)      [ALLOWED as passive]
+# All of these query third-party OSINT DBs, NOT the target's servers.
+passive_tool_subdomains() {
+  local apex="$1" sf="$2"
+  # subfinder (passive by default; -all uses more passive sources, still passive)
+  if have subfinder && scope_allows "$sf" "subfinder"; then
+    log "subfinder (passive) for $apex ..."
+    subfinder -silent -all -d "$apex" 2>/dev/null || true
+  fi
+  # assetfinder (passive OSINT)
+  if have assetfinder && scope_allows "$sf" "assetfinder"; then
+    log "assetfinder (passive) for $apex ..."
+    assetfinder --subs-only "$apex" 2>/dev/null || true
+  fi
+  # amass PASSIVE ONLY — we force -passive so it never sends active DNS/HTTP.
+  if have amass && scope_allows "$sf" "amass"; then
+    log "amass (passive-only) for $apex ..."
+    amass enum -passive -silent -d "$apex" 2>/dev/null || true
+  fi
+}
+
+# passive_tool_urls <apex> <scope-file> -> extra archived URLs from installed
+# PASSIVE url tools (gau, waybackurls), each only if allowed + installed.
+# Both read public archives (Wayback/CommonCrawl/OTX), NOT the target.
+passive_tool_urls() {
+  local apex="$1" sf="$2"
+  if have gau && scope_allows "$sf" "gau"; then
+    log "gau (passive archives) for $apex ..."
+    gau --subs "$apex" 2>/dev/null | grep -Ei '^https?://' || true
+  fi
+  if have waybackurls && scope_allows "$sf" "waybackurls"; then
+    log "waybackurls (passive) for $apex ..."
+    waybackurls "$apex" 2>/dev/null | grep -Ei '^https?://' || true
+  fi
+}
+
 # passive_urls <apex> -> archived URLs via the Wayback Machine CDX API.
 # PASSIVE: queries web.archive.org, not the target. Filters out non-URL lines
 # (e.g. a 429 HTML error page) so only real http(s) URLs are kept.
