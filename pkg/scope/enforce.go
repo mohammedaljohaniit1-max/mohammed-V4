@@ -105,6 +105,11 @@ func (sf *ScopeFile) ToolAllowed(tool string) (bool, string) {
 			return false, "DENIED: aggressive tool needs an explicit max_rps ceiling for this program"
 		}
 		return true, "allowed — caller MUST cap traffic at max_rps"
+	case AutoWildcardBounty:
+		// The program explicitly WANTS automated tooling within a rate cap.
+		// Validate() guarantees MaxRPS>0 here, so every class is allowed and
+		// the full engine (governor + WAF-bypass + AI) is unleashed — throttled.
+		return true, "ALLOWED — program permits automated tooling; engine capped at max_rps"
 	default:
 		return false, "DENIED: unknown automation policy (safe default)"
 	}

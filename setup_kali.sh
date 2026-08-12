@@ -2,14 +2,17 @@
 # setup_kali.sh — one-shot installer/preparer for MOHAMMED on Kali Linux.
 #
 # What it does:
-#   1. checks/installs Go (>=1.22), git, curl, jq
-#   2. installs the passive recon helper tools that ARE allowed (subfinder, httpx)
-#      via the Go toolchain (no root needed for these)
-#   3. builds all MOHAMMED binaries (mohammed, tip, osint, scope)
-#   4. runs the guard-rail self-check for every target scope
+#   1. checks/installs base deps (git, curl, jq, go >= 1.22)
+#   2. installs the recon/scan toolset the engine drives (subfinder, httpx,
+#      naabu, nuclei, katana, dnsx, gau, ffuf, dalfox, ...). These are only
+#      ACTUALLY used on programs whose policy permits them — the guard-rail
+#      (pkg/scope) refuses to run aggressive tools on forbidden/gov targets, so
+#      installing them is safe; the policy, not the install, controls usage.
+#   3. builds all MOHAMMED binaries (mohammed, tip, osint, scope, preset)
+#   4. runs the guard-rail self-check for every target scope + verifies the
+#      engine plan (passive-forced vs full) is correct per policy
 #
-# It is SAFE to re-run. It does NOT run any scan. Run the scans separately with
-# recon/<target>.sh (all passive).
+# It is SAFE to re-run. It does NOT run any scan. Run scans with recon/<t>.sh.
 #
 # Usage:  bash setup_kali.sh
 
@@ -41,33 +44,37 @@ GOV="$(go version 2>/dev/null | grep -oE 'go[0-9]+\.[0-9]+' | head -1)"
 ok "Go: ${GOV:-not found}"
 if [[ -z "$GOV" ]]; then err "Go is required (>=1.22). Install from https://go.dev/dl/ then re-run."; exit 1; fi
 
-# Ensure GOPATH/bin on PATH for the tools we 'go install'.
 export GOBIN="${GOBIN:-$HOME/go/bin}"
 export PATH="$PATH:$GOBIN"
 mkdir -p "$GOBIN"
 
-# ---- 2. allowed passive recon tools (optional but recommended) --------------
-# Only PASSIVE/PROBE tools. NEVER installs aggressive scanners here
-# (no nuclei/ffuf/dalfox/naabu/nmap/puredns — those stay DENIED by the guard-rail).
+# ---- 2. recon/scan toolset --------------------------------------------------
+# The engine drives these. The guard-rail decides per-program whether each may
+# actually run — so installing the aggressive ones is safe (they stay DENIED on
+# forbidden/gov targets and only fire on wildcard_bounty programs like ICI).
 # Format: "binary|go-install-path"
-PASSIVE_TOOLS=(
-  "subfinder|github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"   # passive subdomains
-  "assetfinder|github.com/tomnomnom/assetfinder@latest"                        # passive subdomains
-  "amass|github.com/owasp-amass/amass/v4/...@master"                           # used ONLY with -passive
-  "gau|github.com/lc/gau/v2/cmd/gau@latest"                                    # passive archived URLs
-  "waybackurls|github.com/tomnomnom/waybackurls@latest"                        # passive archived URLs
-  "httpx|github.com/projectdiscovery/httpx/cmd/httpx@latest"                   # gentle liveness (probe)
+TOOLS=(
+  "subfinder|github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest"
+  "assetfinder|github.com/tomnomnom/assetfinder@latest"
+  "httpx|github.com/projectdiscovery/httpx/cmd/httpx@latest"
+  "dnsx|github.com/projectdiscovery/dnsx/cmd/dnsx@latest"
+  "naabu|github.com/projectdiscovery/naabu/v2/cmd/naabu@latest"
+  "katana|github.com/projectdiscovery/katana/cmd/katana@latest"
+  "nuclei|github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest"
+  "gau|github.com/lc/gau/v2/cmd/gau@latest"
+  "waybackurls|github.com/tomnomnom/waybackurls@latest"
+  "ffuf|github.com/ffuf/ffuf/v2@latest"
+  "dalfox|github.com/hahwul/dalfox/v2@latest"
+  "gospider|github.com/jaeles-project/gospider@latest"
 )
-info "Installing allowed PASSIVE recon tools via Go (subfinder, assetfinder, amass, gau, waybackurls, httpx) ..."
-for entry in "${PASSIVE_TOOLS[@]}"; do
+info "Installing recon/scan toolset via Go (${#TOOLS[@]} tools) ..."
+for entry in "${TOOLS[@]}"; do
   bin="${entry%%|*}"; path="${entry##*|}"
   if have "$bin"; then ok "$bin already present"; continue; fi
-  if go install -v "$path" 2>/dev/null; then
-    ok "$bin installed"
-  else
-    warn "$bin install failed (skipped; crt.sh/wayback built-ins still work)"
-  fi
+  if go install -v "$path" 2>/dev/null; then ok "$bin installed"
+  else warn "$bin install failed (skipped; engine degrades gracefully / crt.sh+wayback built-ins still work)"; fi
 done
+info "Tip: 'nuclei -update-templates' once, to pull the latest templates."
 
 # ---- 3. build MOHAMMED binaries --------------------------------------------
 info "Building MOHAMMED binaries into ./bin ..."
@@ -76,43 +83,45 @@ go build -o bin/mohammed ./cmd/mohammed 2>/dev/null && ok "bin/mohammed" || warn
 go build -o bin/tip      ./cmd/tip      && ok "bin/tip"
 go build -o bin/osint    ./cmd/osint    && ok "bin/osint"
 go build -o bin/scope    ./cmd/scope    && ok "bin/scope"
+go build -o bin/preset   ./cmd/preset   && ok "bin/preset"
 
-# ---- 4. guard-rail self-check for every target ------------------------------
-info "Guard-rail self-check (per target: is nuclei denied? is subfinder allowed?)"
+# ---- 4. guard-rail + engine-plan self-check for every target ----------------
+info "Guard-rail + engine-plan self-check (per target) ..."
 FAIL=0
 for f in scope/*.json; do
   t="$(basename "$f" .json)"
   nu="$(./bin/scope -file "$f" -tool nuclei 2>/dev/null | grep -o 'ALLOWED\|DENIED' | head -1)"
   su="$(./bin/scope -file "$f" -tool subfinder 2>/dev/null | grep -o 'ALLOWED\|DENIED' | head -1)"
-  if [[ "$nu" != "DENIED" || "$su" != "ALLOWED" ]]; then
-    err "  $t: nuclei=$nu subfinder=$su  (UNEXPECTED)"; FAIL=1
-  else
-    ok "  $t: nuclei=DENIED subfinder=ALLOWED"
-  fi
+  plan="$(./bin/preset -file "$f" -mode full 2>/dev/null | grep -oE 'profile=[a-z]+' | head -1)"
+  printf "    %-12s nuclei=%-7s subfinder=%-7s full-plan=%s\n" "$t" "$nu" "$su" "$plan"
+  # Invariant: subfinder (passive) must always be allowed.
+  [[ "$su" == "ALLOWED" ]] || { err "  $t: subfinder unexpectedly $su"; FAIL=1; }
 done
 
 echo
-if [[ "$FAIL" == "0" ]]; then
-  ok "SETUP COMPLETE. Everything verified."
-else
-  err "SETUP finished with guard-rail warnings above — review before scanning."
-fi
-cat <<EOF
+if [[ "$FAIL" == "0" ]]; then ok "SETUP COMPLETE. Guard-rail + engine plans verified."
+else err "SETUP finished with warnings above — review before scanning."; fi
 
-Next — run a PASSIVE scan for any target (each has its own command/scope):
-  bash recon/flagyard.sh      # *.flagyard.com   (passive + gentle liveness)
-  bash recon/nearpay.sh       # *-sa-dev-*.nearpay.io
-  bash recon/ejada.sh         # ehub.ejada.com   (PASSIVE ONLY)
-  bash recon/nournet.sh       # eservices.nour.net.sa (PASSIVE ONLY, gov)
-  bash recon/zain.sh          # zain.app         (PASSIVE ONLY, gov)
-  bash recon/mobily.sh        # mobily.com.sa    (PASSIVE ONLY)
+cat <<'EOF'
 
-Each preset now runs (only if installed + allowed by the guard-rail):
-  crt.sh + subfinder + assetfinder + amass(-passive)  -> subdomains
-  wayback + gau + waybackurls                         -> archived URLs
-All PASSIVE. Aggressive scanners (nuclei/ffuf/dalfox/naabu/nmap) stay DENIED.
+── HOW TO SCAN ──────────────────────────────────────────────────────────────
+Each target has TWO commands. Default is FULL (the guard-rail keeps it legal:
+forbidden/gov targets are auto-pinned to passive). Add 'passive' for OSINT-only.
 
-Then bundle + hand to an EXTERNAL AI:
-  bash recon/collect.sh <target>
-  bash recon/ai_summarize.sh <target>        # paste prompt into ChatGPT/Claude/Gemini
+  FULL (max legal intensity — real engine: governor + WAF-bypass + AI):
+    bash recon/iciparisxl.sh          # Intigriti: automation ALLOWED @5 req/s → FULL engine
+    bash recon/flagyard.sh            # reports_rejected → active recon (no aggressive)
+    bash recon/nearpay.sh             # reports_rejected → active recon
+    bash recon/ejada.sh               # FORBIDDEN → auto PASSIVE
+    bash recon/nournet.sh             # gov → auto PASSIVE
+    bash recon/zain.sh                # gov → auto PASSIVE
+    bash recon/mobily.sh              # FORBIDDEN → auto PASSIVE
+
+  PASSIVE (OSINT only, safe anywhere):
+    bash recon/iciparisxl.sh passive
+
+Then hand results to an EXTERNAL AI:
+    bash recon/collect.sh iciparisxl-full
+    bash recon/ai_summarize.sh iciparisxl-full     # paste prompt into ChatGPT/Claude/Gemini
+──────────────────────────────────────────────────────────────────────────────
 EOF
