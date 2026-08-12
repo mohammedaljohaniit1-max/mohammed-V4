@@ -20,12 +20,24 @@
 
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$DIR/lib.sh"
+REPO_ROOT="$(cd "$DIR/.." && pwd)"
+ENGINE_OUT="${ENGINE_OUT:-$REPO_ROOT/recon/out-engine}"
+ok()   { printf '\033[32m[+]\033[0m %s\n' "$*" >&2; }
+log()  { printf '\033[36m[*]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[33m[!]\033[0m %s\n' "$*" >&2; }
+err()  { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
 SLUG="${1:-}"; shift || true
-[[ -z "$SLUG" ]] && { err "usage: ai_summarize.sh <program-slug> [--api] [--model M]"; exit 1; }
-RUN="$OUT_ROOT/$SLUG/latest"
-[[ -d "$RUN" ]] || { err "no run for $SLUG (run recon/$SLUG.sh then recon/collect.sh $SLUG)"; exit 1; }
+[[ -z "$SLUG" ]] && { err "usage: ai_summarize.sh <slug>[-mode] [--api] [--model M]"; exit 1; }
+
+# Resolve run dir the same way collect.sh does (exact, then newest <slug>*).
+if [[ -d "$ENGINE_OUT/$SLUG" ]]; then
+  RUN="$ENGINE_OUT/$SLUG"
+else
+  RUN="$(ls -dt "$ENGINE_OUT/$SLUG"* 2>/dev/null | head -1 || true)"
+fi
+[[ -n "$RUN" && -d "$RUN" ]] || { err "no run for $SLUG (run recon/$SLUG.sh then recon/collect.sh $SLUG)"; exit 1; }
 [[ -f "$RUN/digest.txt" ]] || { err "no digest — run recon/collect.sh $SLUG first"; exit 1; }
 
 USE_API=0; MODEL="gpt-5-mini"
@@ -38,28 +50,28 @@ while [[ $# -gt 0 ]]; do
   shift || true
 done
 
-POLICY="$(cat "$RUN/00_scope_policy.txt" 2>/dev/null | sed -n '/POLICY NOTES/,$p')"
-
 read -r -d '' SYS <<'EOSYS'
-You are a senior bug-bounty triage analyst. You receive PASSIVE recon evidence
-(subdomains from certificate transparency + archived URLs) for an authorised
-bug-bounty program. Your job:
-  1. Group the assets and point out the highest-value places a HUMAN should test
-     manually (auth flows, IDOR/BOLA candidates, upload/API/admin/GraphQL, params).
-  2. Respect the program policy notes: several forbid automated scanning; do NOT
-     suggest running scanners. Suggest MANUAL test ideas only.
-  3. Be brutally honest. Do NOT claim any vulnerability exists — this is only
-     recon. Never fabricate endpoints that are not in the evidence.
-  4. Output: (a) 5-10 prioritised manual test targets with WHY, (b) any obvious
-     out-of-scope items to avoid, (c) concise notes. Keep it tight.
+You are a senior bug-bounty triage analyst. You receive the output of an
+automated scan engine (MOHAMMED) run against an AUTHORISED bug-bounty program:
+confirmed findings, manual-review candidates, and recon evidence. Your job:
+  1. Summarise and DE-DUPLICATE the findings; drop noise and likely false
+     positives; cluster related issues (same root cause / shared codebase).
+  2. Prioritise what a HUMAN should verify first, with a short WHY and the exact
+     asset/endpoint. Map each to a plausible impact (auth bypass, IDOR/BOLA,
+     payment/order abuse, mass data exposure, RCE) where the evidence supports it.
+  3. Respect the program's out-of-scope list (e.g. rate-limit bypass, self-XSS,
+     missing headers, low-impact CSRF, email spoofing) — flag and drop those.
+  4. Be brutally honest. Do NOT claim a vulnerability is confirmed unless the
+     engine marked it CONFIRMED with proof. Never fabricate endpoints.
+  5. Output: (a) top 5-10 things to verify manually with WHY + asset, (b) items
+     to drop (out-of-scope / FP), (c) a one-paragraph honest summary.
 EOSYS
 
 PROMPT_FILE="$RUN/ai_prompt.txt"
 {
-  echo "### PROGRAM POLICY NOTES ###"
-  echo "$POLICY"
+  echo "### PROGRAM: $SLUG ###"
   echo
-  echo "### PASSIVE RECON DIGEST ###"
+  echo "### MOHAMMED ENGINE DIGEST ###"
   cat "$RUN/digest.txt"
 } > "$PROMPT_FILE"
 

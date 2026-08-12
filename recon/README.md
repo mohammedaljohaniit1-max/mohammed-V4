@@ -1,62 +1,80 @@
-# recon/ — per-target PASSIVE recon presets (bugbounty.sa)
+# recon/ — per-program drivers for the REAL MOHAMMED engine
 
-These are **safe, policy-aware bash presets** for the six targets. They do **not**
-modify the Go tool. Every preset is **passive by default** and obeys each
-program's scope via the Go guard-rail (`cmd/scope`). They **never** run
-nuclei / ffuf / dalfox / naabu / nmap / puredns.
+These scripts are **thin wrappers** that drive the real scanner
+(`cmd/mohammed`) at the **legally-correct intensity** for each bug-bounty
+program. They do **not** re-implement scanning — the engine's governor
+(WAF-adaptive rate control), 8-WAF bypass matrix, AI cascade, and 65+ phases do
+the work. The wrappers only compute *how hard* the engine may push, from each
+program's policy.
 
-## Why passive-only?
+## How it works
 
-All six programs forbid or reject automated scanning (ejada & Mobily warn of
-*legal action*). So the tool's job here is **passive OSINT + evidence gathering**;
-**you** do the manual testing. See `../خطة_الاهداف_والتطوير.md`.
-
-## The 4-step workflow
-
-```bash
-# 1) Run the preset for a target (passive: crt.sh subdomains + wayback URLs,
-#    plus a GENTLE httpx liveness pass ONLY where policy allows it).
-bash recon/flagyard.sh          # or nearpay / ejada / nournet / zain / mobily
-
-# 2) Bundle the latest run into one JSON + a compact text digest.
-bash recon/collect.sh flagyard
-
-# 3a) Build a ready-to-paste prompt for ANY external AI (ChatGPT/Claude/Gemini).
-bash recon/ai_summarize.sh flagyard
-#     -> prints the system prompt + writes recon/out/flagyard/latest/ai_prompt.txt
-#        Paste both into your external AI to get a prioritised MANUAL test plan.
-
-# 3b) OR call the external OpenAI-compatible API directly (needs the LLM key
-#     Injected in the project's API Keys tab; otherwise it fails with a clear 403).
-bash recon/ai_summarize.sh flagyard --api --model gpt-5-mini
+```
+scope/<program>.json   →   cmd/preset (bridge)   →   scope.txt + mohammed flags   →   ./bin/mohammed scan ...
+   (legal policy)            (EnginePlan)              (profile/rate/threads/UA)         (real engine)
 ```
 
-## Per-target behaviour (enforced automatically)
+`cmd/preset` reads the program's `automation` policy and picks a plan:
 
-| preset        | scope file              | automation        | httpx liveness |
-|---------------|-------------------------|-------------------|----------------|
-| `flagyard.sh` | `scope/flagyard.json`   | reports_rejected  | YES (gentle)   |
-| `nearpay.sh`  | `scope/nearpay.json`    | reports_rejected  | YES (gentle)   |
-| `ejada.sh`    | `scope/ejada.json`      | **forbidden**     | **NO** (passive-only) |
-| `nournet.sh`  | `scope/nournet.json`    | reports_rejected + **gov** | **NO** |
-| `zain.sh`     | `scope/zain.json`       | rate_limited + **gov** | **NO** |
-| `mobily.sh`   | `scope/mobily.json`     | **forbidden**     | **NO** (passive-only) |
+| policy in scope JSON | full-mode plan | meaning |
+|---|---|---|
+| `wildcard_bounty` | `--profile large --waf-bypass`, rate = 90% of `max_rps` | automation explicitly allowed → **unleash the engine, throttled** |
+| `rate_limited` | `large`, capped at `max_rps` | allowed under a ceiling |
+| `reports_rejected` | `--profile small` | active recon + probe, **no aggressive vuln-scan** |
+| `forbidden` | `--profile passive` | **auto-pinned passive** (legal-action clause) |
+| `sensitive_gov: true` | `--profile passive` | **auto-pinned passive** regardless of automation |
 
-"Passive OSINT" here means crt.sh (certificate transparency) and
-web.archive.org (Wayback) — **public third-party sources that never touch the
-target's own servers**. The optional httpx pass is the only step that contacts
-the target, and it is skipped entirely for forbidden / sensitive-gov programs.
+The `full` mode is **safe on every target**: forbidden/gov programs are
+automatically downgraded to passive, so you can run `recon/ejada.sh` without
+ever sending active traffic.
 
-## Tuning (env vars)
+## Commands (each target has its own)
 
-- `DELAY=2`      seconds between active requests (politeness).
-- `HTTPX_RL=5`   httpx max requests/second (only where allowed).
-- `UA="..."`     User-Agent string.
-- `OUT_ROOT=...` where results are written (default `recon/out/`).
+```bash
+# FULL (default) — max legal intensity for that program
+bash recon/iciparisxl.sh            # Intigriti ICI PARIS XL — FULL engine @ 5 req/s
+bash recon/flagyard.sh              # reports_rejected — active recon only
+bash recon/ejada.sh                 # forbidden — auto passive
+bash recon/mobily.sh                # forbidden — auto passive
+bash recon/nournet.sh               # gov — auto passive
+bash recon/zain.sh                  # gov — auto passive
+bash recon/nearpay.sh               # reports_rejected — active recon only
 
-## Honesty
+# PASSIVE — OSINT only, safe anywhere
+bash recon/iciparisxl.sh passive
+```
 
-Output is **raw evidence only**. Nothing is marked "confirmed" and no bug is
-claimed. The AI step is asked to *triage and prioritise*, and is explicitly told
-not to fabricate endpoints or claim vulnerabilities. You verify manually and
-submit a PoC (all programs require exploit code).
+You can also drive the bridge directly (prints the exact command without
+running it):
+
+```bash
+./bin/preset -file scope/iciparisxl.json -mode full          # print plan + command
+./bin/preset -file scope/iciparisxl.json -mode full -run     # actually run the engine
+```
+
+## Then: hand results to an EXTERNAL AI
+
+```bash
+bash recon/collect.sh iciparisxl-full        # aggregate engine output → digest.txt + bundle.json
+bash recon/ai_summarize.sh iciparisxl-full   # prints a ready-to-paste prompt (ChatGPT/Claude/Gemini)
+```
+
+`ai_summarize.sh` defaults to **prompt mode** (always works, no key). The
+`--api` mode calls the configured LLM proxy but currently returns 403 until the
+key is Injected in the project's API Keys tab — prompt mode is the reliable
+external-AI path.
+
+## Per-target summary
+
+| target | scope | policy | full-mode behaviour |
+|---|---|---|---|
+| ICI PARIS XL | `scope/iciparisxl.json` | wildcard_bounty (5 req/s, UA `@intigriti.me`) | **FULL engine + WAF-bypass, rate-capped** |
+| Flagyard | `scope/flagyard.json` | reports_rejected | active recon, no aggressive |
+| Nearpay | `scope/nearpay.json` | reports_rejected | active recon, no aggressive |
+| ejada | `scope/ejada.json` | forbidden | auto passive |
+| Nournet | `scope/nournet.json` | reports_rejected + gov | auto passive |
+| Zain | `scope/zain.json` | rate_limited + gov | auto passive |
+| Mobily | `scope/mobily.json` | forbidden | auto passive |
+
+Nothing here is fabricated: the engine produces the evidence; a human verifies
+before reporting.

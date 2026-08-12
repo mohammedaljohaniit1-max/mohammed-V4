@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-# Zain.App — zain.app — SENSITIVE GOV (telecom) => PASSIVE ONLY + Gentle (<=100 rps if ever active)
+# Zain — sensitive_gov (rate_limited on paper, but gov => PASSIVE-pinned).
+# Usage: recon/zain.sh [passive|full]   (both stay passive by policy)
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$DIR/run_target.sh" "$DIR/../scope/zain.json" zain.app
+exec "$DIR/run_target.sh" "$DIR/../scope/zain.json" "${1:-full}"

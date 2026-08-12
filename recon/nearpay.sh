@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-# Nearpay — *-sa-dev-*.nearpay.io (dev) — reports_rejected (passive + gentle liveness OK)
+# Nearpay — reports_rejected. FULL = active recon (no aggressive scan).
+# Usage: recon/nearpay.sh [passive|full]   (default: full)
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$DIR/run_target.sh" "$DIR/../scope/nearpay.json" nearpay.io
+exec "$DIR/run_target.sh" "$DIR/../scope/nearpay.json" "${1:-full}"

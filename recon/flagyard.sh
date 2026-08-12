@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
-# Flagyard (Tuwaiq) — *.flagyard.com — reports_rejected (passive + gentle liveness OK)
+# Flagyard (Tuwaiq) — reports_rejected. FULL = active recon (no aggressive scan).
+# Usage: recon/flagyard.sh [passive|full]   (default: full)
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$DIR/run_target.sh" "$DIR/../scope/flagyard.json" flagyard.com
+exec "$DIR/run_target.sh" "$DIR/../scope/flagyard.json" "${1:-full}"

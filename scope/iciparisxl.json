@@ -1,0 +1,40 @@
+{
+  "program": "AS Watson — ICI PARIS XL",
+  "platform": "intigriti.com",
+  "automation": "wildcard_bounty",
+  "max_rps": 5,
+  "sensitive_gov": false,
+  "required_ua": "@intigriti.me",
+  "email_convention": "self-register on e-commerce apps using your @intigriti.me address",
+  "in_scope": [
+    "https://www.iciparisxl.nl",
+    "https://www.iciparisxl.be",
+    "https://www.iciparisxl.lu",
+    "https://app.iciparisxl.nl",
+    "https://app.iciparisxl.be",
+    "https://app.iciparisxl.lu",
+    "https://media.iciparisxl.nl",
+    "https://media.iciparisxl.be",
+    "https://media.iciparisxl.lu",
+    "https://api.iciparisxl.nl",
+    "https://api.iciparisxl.be",
+    "https://api.iciparisxl.lu",
+    "https://www.iciparisxl.com",
+    "*.iciparisxl.nl",
+    "*.iciparisxl.be",
+    "*.iciparisxl.lu",
+    "https://www.pourvous.nl",
+    "*.pourvous.nl"
+  ],
+  "out_of_scope": [],
+  "notes": [
+    "Intigriti public program (Open, Retail). Automated tooling ALLOWED at max 5 requests/sec.",
+    "MANDATORY: every request's User-Agent must contain an @intigriti.me identifier (required_ua).",
+    "Tier 1 = e-commerce apps (www/app/media/api iciparisxl.{nl,be,lu}) — the main focus & highest bounty.",
+    "Tier 5 = wildcards (*.iciparisxl.{nl,be,lu}, *.pourvous.nl) — lower impact, may earn bonuses.",
+    "Shared Hybris/SAP codebase: a bug on one asset may apply across assets (treated as one issue).",
+    "Focus: e-commerce payment/order flows, API/microservice authz, customer-data processing.",
+    "Out-of-scope classes include: rate-limit bypass, self-XSS, missing headers, CSRF low-impact, email spoofing/SPF/DMARC, banner/version disclosure, blind SSRF w/o impact — do NOT report these.",
+    "Do NOT brute-force login/OTP/giftcards/promo/registration (explicitly out of scope). Governor rate-cap enforced."
+  ]
+}

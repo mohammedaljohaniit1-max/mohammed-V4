@@ -34,6 +34,14 @@ const (
 	AutoReportsRejected Automation = "reports_rejected"
 	// AutoRateLimited: automation allowed under a request/second ceiling.
 	AutoRateLimited Automation = "rate_limited"
+	// AutoWildcardBounty: the program EXPLICITLY permits automated tooling
+	// (e.g. Intigriti ICI Paris XL: "Automated tooling: max. 5 requests/sec").
+	// FULL automation is allowed — every tool, including aggressive scanners —
+	// but the caller MUST honour MaxRPS. This is the mode that unleashes the
+	// real engine (governor + WAF-bypass + AI) legally. Distinct from
+	// rate_limited so the intent ("this program WANTS tools, just throttled")
+	// is explicit in the descriptor.
+	AutoWildcardBounty Automation = "wildcard_bounty"
 )
 
 // ScopeFile is the on-disk descriptor for one program (JSON). It is authored by
@@ -51,6 +59,11 @@ type ScopeFile struct {
 	// EmailConvention is the required researcher email/account naming, if any
 	// (e.g. "BugBounty_[username]@example.com"). Informational.
 	EmailConvention string `json:"email_convention,omitempty"`
+	// RequiredUA, when set, is a mandatory User-Agent substring the program
+	// requires on every request so they can attribute traffic to the researcher
+	// (e.g. Intigriti requires an "@intigriti.me" identifier). The engine bridge
+	// passes this straight through to the scanner's User-Agent.
+	RequiredUA string `json:"required_ua,omitempty"`
 	// Notes carries verbatim policy caveats worth surfacing to the operator.
 	Notes []string `json:"notes,omitempty"`
 }
@@ -80,12 +93,17 @@ func (sf *ScopeFile) Validate() error {
 		return fmt.Errorf("scope: in_scope must list at least one asset")
 	}
 	switch sf.Automation {
-	case AutoForbidden, AutoReportsRejected, AutoRateLimited:
+	case AutoForbidden, AutoReportsRejected, AutoRateLimited, AutoWildcardBounty:
 	case "":
 		// Unspecified automation is treated as the SAFEST option.
 		sf.Automation = AutoForbidden
 	default:
 		return fmt.Errorf("scope: unknown automation %q", sf.Automation)
+	}
+	// A rate-capped mode with no ceiling is a footgun: refuse it so the operator
+	// must copy the program's published limit into the descriptor.
+	if (sf.Automation == AutoRateLimited || sf.Automation == AutoWildcardBounty) && sf.MaxRPS <= 0 {
+		return fmt.Errorf("scope: automation %q requires a positive max_rps (program's published limit)", sf.Automation)
 	}
 	return nil
 }
