@@ -1216,6 +1216,34 @@ apikey = ""
 	return cfgPath
 }
 
+// detectWildcardDNS reports whether *.apex is a wildcard zone — i.e. random,
+// certainly-non-existent labels still resolve. Such zones make every subdomain
+// look "live" and are the root cause of the nournet 5494/5495 and ICI phantom
+// resolves (V12.4 FAILURE #10). It probes 3 random labels via the system
+// resolver with a short per-lookup deadline; if ≥2 resolve, the zone is a
+// wildcard. It is deliberately conservative (a single fluke NXDOMAIN-that-
+// resolves does not trip it) and fails CLOSED (returns false) so a probe error
+// never suppresses legitimate resolution.
+func detectWildcardDNS(ctx context.Context, apex, _ string) bool {
+	if apex == "" {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolved := 0
+	for i := 0; i < 3; i++ {
+		label := fmt.Sprintf("mhd-wildcard-probe-%d-%d", time.Now().UnixNano(), i)
+		lctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		addrs, err := net.DefaultResolver.LookupHost(lctx, label+"."+apex)
+		cancel()
+		if err == nil && len(addrs) > 0 {
+			resolved++
+		}
+	}
+	return resolved >= 2
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Phase 05: DNS Resolution & Enrichment
 // ═══════════════════════════════════════════════════════════════
@@ -1282,13 +1310,39 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 		return hosts, res
 	}
 
+	// V12.4 FAILURE #10: detect a WILDCARD DNS zone up front. A wildcard zone
+	// resolves EVERY label (including random garbage) to the same origin IP, so
+	// both the -wd pass and the no-wd retry are meaningless — the no-wd retry in
+	// particular would happily accept thousands of phantom "live" hosts (the
+	// nournet 5494/5495 and ICI 779→106 artefacts). When a wildcard is detected
+	// we (a) trust the -wd result and NEVER do the no-wd recovery, and (b) never
+	// fall back to the raw subdomain list on failure.
+	wildcard := detectWildcardDNS(ctx, apex, resolverFile)
+	if wildcard {
+		s.Printf("│  ⚠ WILDCARD DNS detected on *.%s — trusting -wd results, skipping no-wildcard recovery\n", apex)
+	}
+
 	hosts, res := runDnsx(true)
 
 	if !res.OK() {
-		// dnsx failed entirely — fall back to the full subdomain list so the
-		// pipeline is not starved (IMPROVEMENT #6).
-		s.LiveHosts = append(s.LiveHosts, deduped...)
-		s.Printf("│  dnsx: FAILED (%v) — fallback to %d subdomains\n", res.Err, len(s.LiveHosts))
+		// dnsx failed (usually a timeout on a very large input). Do NOT declare
+		// the entire raw subdomain list "live" — that is a lie that poisons every
+		// downstream phase (the nournet 5494/5495 artefact). Cap the fallback to
+		// a bounded set and label it UNVERIFIED so httpx re-validates it; on a
+		// wildcard zone, emit nothing (the list is phantom).
+		if wildcard {
+			s.Printf("│  dnsx: FAILED (%v) on a WILDCARD zone — emitting 0 unverified hosts (all phantom)\n", res.Err)
+			writeLines(dnsxOut, nil)
+			return nil
+		}
+		const fallbackCap = 500
+		fb := deduped
+		if len(fb) > fallbackCap {
+			fb = fb[:fallbackCap]
+		}
+		s.LiveHosts = append(s.LiveHosts, fb...)
+		s.Printf("│  dnsx: FAILED (%v) — UNVERIFIED fallback to %d/%d subdomains (httpx will re-validate)\n",
+			res.Err, len(fb), len(deduped))
 		writeLines(dnsxOut, s.LiveHosts)
 		return nil
 	}
@@ -1297,7 +1351,7 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 	// If wildcard elimination nuked more than 85% of the input, it is almost
 	// certainly over-filtering legitimate hosts (a real regression symptom).
 	// Re-run WITHOUT -wd and keep whichever pass yielded more live hosts.
-	if inputN > 0 && len(hosts)*100 < inputN*15 {
+	if !wildcard && inputN > 0 && len(hosts)*100 < inputN*15 {
 		s.Printf("│  ⚠ WARNING: dnsx resolved only %d/%d (<15%%) with wildcard filter — retrying without -wd\n", len(hosts), inputN)
 		noWildHosts, res2 := runDnsx(false)
 		if res2.OK() && len(noWildHosts) > len(hosts) {

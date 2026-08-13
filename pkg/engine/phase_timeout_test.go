@@ -24,6 +24,28 @@ func TestV122_PhaseTimeout_PortScanningCapped(t *testing.T) {
 	}
 }
 
+// TestV124_PhaseTimeout_WastefulPhasesCapped is the FAILURE #6 unit guard:
+// three pure internal-compute phases that hit the 20m DEFAULT cap and were
+// force-killed with ZERO confirmed results in the field (ICI Paris XL) MUST now
+// carry a tighter explicit cap. Each must be strictly below the default so the
+// override is actually taking effect, and none may be zero/negative.
+func TestV124_PhaseTimeout_WastefulPhasesCapped(t *testing.T) {
+	want := map[string]time.Duration{
+		"SSTI (Arithmetic Oracle)": 8 * time.Minute,
+		"Google Dorking":           8 * time.Minute,
+		"Parameter Discovery":      12 * time.Minute,
+	}
+	for name, exp := range want {
+		got := PhaseTimeout(name)
+		if got != exp {
+			t.Fatalf("%q cap = %v, want %v", name, got, exp)
+		}
+		if got >= DefaultPhaseTimeout {
+			t.Fatalf("%q cap %v is not tighter than default %v — no reclaim", name, got, DefaultPhaseTimeout)
+		}
+	}
+}
+
 // TestV123_CalculateAdaptiveTimeout is the FAILURE #2 unit guard: the per-phase
 // cap MUST scale with host count so nuclei/ffuf/gau are never starved on large
 // targets, while small/passive scans keep tight caps and every result is still

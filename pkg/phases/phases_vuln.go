@@ -1064,7 +1064,14 @@ func (p *SmugglingPhase) Execute(ctx context.Context, s *engine.State) error {
 			// artifact, not an exploitable smuggling primitive against the origin.
 			severity := "Critical"
 			cdn := detectCDNForHost(ctx, s, u)
+			_, cdnKnown := s.CDNVendorFor(u)
 			sev, informational := smugglingSeverity(severity, cdn)
+			if cdn == "" && !cdnKnown {
+				// V12.4 FAILURE #9: unknown CDN status (probe failed) → default to
+				// Informational rather than upgrading a likely edge artefact to a
+				// Critical false positive.
+				sev, informational = "Informational", true
+			}
 			f := map[string]interface{}{
 				"title": "HTTP Request Smuggling", "severity": sev,
 				"url": u, "tool": "smuggler", "evidence": strings.TrimSpace(combined),

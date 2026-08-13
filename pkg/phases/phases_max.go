@@ -164,6 +164,13 @@ func (p *FinancialLogicPhase) Execute(ctx context.Context, s *engine.State) erro
 		if s.IsWAFProtected(u) {
 			continue
 		}
+		// V12.4 · FAILURE #8: financial abuse is impossible on a public,
+		// unauthenticated catalog/content read (e.g. /products/…/paginatedReviews,
+		// /catalogs/brands). Gate 0 rejects these before the engine can mislabel a
+		// public product read as a "Financial Business Logic" finding.
+		if validation.IsPublicUnauthenticatedRoute(u, "") {
+			continue
+		}
 		results := append(eng.TestFinancial(ctx, u), eng.TestWorkflowBypass(ctx, u)...)
 		for _, r := range results {
 			if !r.Exploitable {
@@ -218,10 +225,19 @@ func (p *AdvancedWebPhase) Execute(ctx context.Context, s *engine.State) error {
 			if !r.Vulnerable {
 				continue
 			}
-			// V12.1 FIX #5: CDN-fronted origins get the smuggling finding demoted
-			// to Informational (edge-queueing artifact, not origin-exploitable).
+			// V12.1 FIX #5 + V12.4 FAILURE #9: CDN-fronted origins get the
+			// smuggling finding demoted to Informational (edge-queueing artifact,
+			// not origin-exploitable). Critically, a Critical is now only kept
+			// when we can POSITIVELY prove a DIRECT origin — if the CDN status is
+			// unknown (probe failed under load) we default to Informational rather
+			// than upgrading a likely edge artefact to a Critical false positive.
 			cdn := detectCDNForHost(ctx, s, r.URL)
+			_, cdnKnown := s.CDNVendorFor(r.URL)
 			sev, informational := smugglingSeverity("Critical", cdn)
+			if cdn == "" && !cdnKnown {
+				// Unknown CDN status → treat as if CDN-fronted for severity.
+				sev, informational = "Informational", true
+			}
 			extra := map[string]interface{}{"variant": r.Variant}
 			c := validation.Candidate{
 				Type: "http-smuggling", URL: r.URL, Evidence: r.Evidence,

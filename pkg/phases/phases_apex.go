@@ -118,6 +118,15 @@ func (p *ApexOrchestrationPhase) Execute(ctx context.Context, s *engine.State) e
 			continue
 		}
 		fp := s.FingerprintAndMarkWAF(hostOnly(origin), resp.Status, resp.Headers, resp.Body)
+		// V12.4 FAILURE #9: record the CDN vendor (from the WAF fingerprint and,
+		// as a second source, the raw response headers) so the smuggling severity
+		// policy has authoritative CDN state and never upgrades a CDN-edge desync
+		// to a Critical because a later per-finding probe returned "".
+		vendor := cdnVendorFromHTTPHeader(resp.Headers, resp.Body)
+		if vendor == "" && fp.Detected && isCDNVendorName(string(fp.Vendor)) {
+			vendor = string(fp.Vendor)
+		}
+		s.MarkCDN(hostOnly(origin), vendor)
 		if fp.Detected {
 			wafCount++
 			kind := "passthrough CDN"

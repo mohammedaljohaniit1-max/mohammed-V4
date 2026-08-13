@@ -74,6 +74,15 @@ type State struct {
 	// vulnerability (zero-false-positive). Keyed by bare host (no scheme).
 	WAFProtected map[string]bool
 
+	// CDNVendors caches the CDN vendor detected for a host ("Akamai",
+	// "CloudFront", "Cloudflare", "Fastly", …) or the empty string when a host
+	// was positively probed and looked like a DIRECT origin. Populated by the
+	// recon/orchestration phases and consumed by the smuggling severity policy
+	// (V12.4 FAILURE #9) so a transient per-finding probe failure can no longer
+	// upgrade a CDN-edge desync artefact to a Critical false positive. Keyed by
+	// bare host (no scheme). A host absent from the map = CDN status UNKNOWN.
+	CDNVendors map[string]string
+
 	// AIOnline records the result of the one-time startup Ollama connectivity
 	// probe (FIX #7). When false, findings that require AI confirmation are
 	// downgraded by the confidence policy rather than reported as confirmed.
@@ -166,7 +175,15 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 	if len(scope.Domains) > 0 {
 		target = scope.Domains[0]
 	}
-	outDir := config.GetOutputFolder(target)
+	// BUGFIX: honour an explicit --output directory. Previously the engine
+	// always derived output/<target> from the first scope domain and silently
+	// discarded whatever the operator passed via --output, which broke the
+	// preset→collect→ai_summarize handoff (collect looked in the --output path
+	// but the engine had written to output/<target>). Now:
+	//   • default (--output == "output" / empty) → output/<target> as before
+	//     (keeps auto-resume's output/*/checkpoint.json discovery working);
+	//   • explicit --output DIR                  → DIR itself is the run folder.
+	outDir := config.ResolveOutputFolder(cfg.OutputDir, target)
 	config.EnsureDir(outDir)
 
 	pm := proxy.NewProxyManager(cfg.BurpProxy)
@@ -215,6 +232,7 @@ func NewState(cfg *config.Config, scope *config.Scope) *State {
 		Parameters:   make(map[string][]string),
 		Findings:     make([]map[string]interface{}, 0),
 		WAFProtected: make(map[string]bool),
+		CDNVendors:   make(map[string]string),
 		OutputFolder: outDir,
 		StartTime:    time.Now(),
 	}
@@ -251,6 +269,58 @@ func (s *State) IsWAFProtected(hostOrURL string) bool {
 	s.findingsMu.Lock()
 	defer s.findingsMu.Unlock()
 	return s.WAFProtected[h]
+}
+
+// hostOnly reduces a host-or-URL to its bare lower-cased host component.
+func hostOnly(hostOrURL string) string {
+	h := strings.ToLower(strings.TrimSpace(hostOrURL))
+	if i := strings.Index(h, "://"); i != -1 {
+		h = h[i+3:]
+	}
+	if i := strings.IndexAny(h, "/:?"); i != -1 {
+		h = h[:i]
+	}
+	return h
+}
+
+// MarkCDN records the CDN vendor observed for a host (thread-safe). Pass a
+// non-empty vendor when a CDN signature was seen, or the empty string to record
+// that the host was probed and looked like a DIRECT origin. V12.4 FAILURE #9.
+func (s *State) MarkCDN(hostOrURL, vendor string) {
+	h := hostOnly(hostOrURL)
+	if h == "" {
+		return
+	}
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	if s.CDNVendors == nil {
+		s.CDNVendors = make(map[string]string)
+	}
+	// Never overwrite a positive vendor with a later "" (direct) reading — once
+	// a host is known CDN-fronted it stays CDN-fronted for severity purposes.
+	if vendor == "" {
+		if _, seen := s.CDNVendors[h]; seen {
+			return
+		}
+	}
+	s.CDNVendors[h] = vendor
+}
+
+// CDNVendorFor returns (vendor, known). known=false means the host's CDN status
+// has not been observed yet; vendor=="" with known=true means a positively
+// probed DIRECT origin. V12.4 FAILURE #9.
+func (s *State) CDNVendorFor(hostOrURL string) (string, bool) {
+	h := hostOnly(hostOrURL)
+	if h == "" {
+		return "", false
+	}
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	if s.CDNVendors == nil {
+		return "", false
+	}
+	v, ok := s.CDNVendors[h]
+	return v, ok
 }
 
 // ─────────────────────────────────────────────────────────────────────────
