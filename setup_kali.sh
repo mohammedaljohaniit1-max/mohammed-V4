@@ -66,6 +66,17 @@ TOOLS=(
   "ffuf|github.com/ffuf/ffuf/v2@latest"
   "dalfox|github.com/hahwul/dalfox/v2@latest"
   "gospider|github.com/jaeles-project/gospider@latest"
+  # V12.4: the 7 tools the ICI PARIS XL run reported as Missing. The engine
+  # degrades gracefully without them, but they materially improve enumeration
+  # (alterx permutations, anew dedup, cero cert-SAN scraping, httprobe liveness,
+  # notify alerting, subjs JS-URL mining, uncover engine pivots).
+  "alterx|github.com/projectdiscovery/alterx/cmd/alterx@latest"
+  "anew|github.com/tomnomnom/anew@latest"
+  "cero|github.com/glebarez/cero@latest"
+  "httprobe|github.com/tomnomnom/httprobe@latest"
+  "notify|github.com/projectdiscovery/notify/cmd/notify@latest"
+  "subjs|github.com/lc/subjs@latest"
+  "uncover|github.com/projectdiscovery/uncover/cmd/uncover@latest"
 )
 info "Installing recon/scan toolset via Go (${#TOOLS[@]} tools) ..."
 for entry in "${TOOLS[@]}"; do

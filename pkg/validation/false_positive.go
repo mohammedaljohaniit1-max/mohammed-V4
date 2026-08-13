@@ -336,6 +336,79 @@ var publicRoutePrefixes = []string{
 // Their presence never indicates an authorization boundary was crossed.
 var publicQueryNoise = []string{"sort=", "archived=", "language="}
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V12.4 · FAILURE #8 — PUBLIC E-COMMERCE / CATALOG READ REJECTION
+// ---------------------------------------------------------------------------
+// EMPIRICAL EVIDENCE (ICI PARIS XL / AS Watson scan): the IDOR (Phase 33),
+// Financial-Business-Logic (Phase 47) and Advanced-API engines flagged 14 IDOR
+// + 3 "Financial" findings — 100% false positives — on world-readable catalog
+// endpoints such as:
+//   /api/v2/icinl2/breadcrumbs?code=1252879           (product breadcrumb)
+//   /api/v2/icibe2/catalogs/brands?codes=1094         (brand listing)
+//   /api/v2/icinl2/products/BP_1175033/paginatedReviews  (public reviews)
+//   /api/v2/icinl2/redirects/parfum/c/2               (SEO redirect map)
+//   /api/v2/icinl3/search?query=…                      (public search)
+// Every anonymous shopper can read these; iterating the numeric product code
+// just returns a DIFFERENT PUBLIC product — that is a catalog, not an
+// authorization boundary. Gate 0's GitLab-tuned prefixes never matched them, so
+// this generic e-commerce classifier is required. It is INTENTIONALLY narrow:
+// it only fires on unmistakably public catalog/content read tokens, so genuine
+// account/order/cart/payment object routes still flow through to the engines.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// publicCatalogTokens are path segments that denote PUBLIC, unauthenticated
+// storefront/catalog/content reads on e-commerce and CMS APIs. A differential
+// on any of these is "two anonymous shoppers see two public products", never an
+// IDOR/BOLA/financial bug. Matched as whole "/token" or "/token/" path pieces.
+var publicCatalogTokens = []string{
+	"breadcrumbs", "catalogs", "brands", "categories", "category",
+	"paginatedreviews", "reviews", "enhance-reviews", "ratings",
+	"redirects", "search", "suggestions", "populardterms", "popularterms",
+	"products", "product", "productreferences", "stores", "storefinder",
+	"deliverymodes", "configurations", "languages", "currencies",
+	"sitemap", "navigation", "menu", "content", "cms", "banners", "promotions",
+}
+
+// accountBoundaryTokens are path segments that DO cross an authorization
+// boundary (a user's own data / an admin function). If any of these is present
+// the URL is NEVER treated as a public catalog read, even if it also contains a
+// catalog token (e.g. /users/42/orders/products) — the account context wins so
+// we never suppress a real IDOR/BOLA.
+var accountBoundaryTokens = []string{
+	"account", "accounts", "customer", "customers", "user", "users",
+	"orders", "order", "cart", "carts", "checkout", "payment", "payments",
+	"invoice", "invoices", "wishlist", "addresses", "address", "profile",
+	"me", "token", "tokens", "session", "auth", "admin", "consent",
+	"subscription", "subscriptions", "loyalty", "vouchers", "giftcard",
+}
+
+// isPublicCatalogRead reports whether the URL path is an unmistakably public
+// e-commerce/CMS catalog read. It requires a catalog token AND the absence of
+// any account-boundary token, so it can never mask a genuine account-scoped
+// authorization bug.
+func isPublicCatalogRead(path string) bool {
+	lower := strings.ToLower(path)
+	segs := strings.Split(lower, "/")
+	inSeg := func(set []string) bool {
+		for _, s := range segs {
+			if s == "" {
+				continue
+			}
+			for _, tok := range set {
+				if s == tok {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// An account/admin boundary anywhere → not a public catalog read.
+	if inSeg(accountBoundaryTokens) {
+		return false
+	}
+	return inSeg(publicCatalogTokens)
+}
+
 // IsPublicUnauthenticatedRoute reports whether rawURL (optionally with its
 // response body) is a public, unauthenticated route that must NEVER be flagged
 // by the IDOR / Race / CORS / Auth-Differential engines (V12.3 · FAILURE #6).
@@ -362,6 +435,13 @@ func IsPublicUnauthenticatedRoute(rawURL, body string) bool {
 		if strings.HasPrefix(path, p) || strings.Contains(path, p) {
 			return true
 		}
+	}
+
+	// 1b) V12.4 · FAILURE #8 — public e-commerce/CMS catalog read (a catalog
+	// token with no account/admin boundary). Rejects the ICI PARIS XL catalog
+	// IDOR/financial false positives without masking account-scoped bugs.
+	if isPublicCatalogRead(path) {
+		return true
 	}
 
 	// 2) Query string carrying only public sort/filter noise.

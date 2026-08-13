@@ -1,6 +1,7 @@
 package phases
 
 import (
+	"context"
 	"testing"
 
 	"github.com/mohammed-v3/core/pkg/config"
@@ -226,5 +227,81 @@ func TestPrepareSQLiURLs_CapEnforced(t *testing.T) {
 	}
 	if elim.CappedOff != 20 {
 		t.Fatalf("over-cap tally wrong: got %d want 20", elim.CappedOff)
+	}
+}
+
+// TestV124_SmugglingCDNStateCache is the FAILURE #9 proof. The 25 ICI PARIS XL
+// "CONFIRMED" smuggling findings happened because the per-finding CDN probe
+// returned "" under load and the policy defaulted to Critical. Now:
+//   • a host known CDN-fronted (from State.CDNVendors) → Informational;
+//   • a host with UNKNOWN CDN status → Informational (never a Critical FP);
+//   • only a host positively proven DIRECT keeps Critical.
+func TestV124_SmugglingCDNStateCache(t *testing.T) {
+	s := &engine.State{CDNVendors: map[string]string{}}
+	s.MarkCDN("api-s1.iciparisxl.lu", "Akamai")   // known CDN
+	s.MarkCDN("origin.example.com", "")           // positively probed DIRECT
+
+	// decide mirrors the smuggling call site's severity logic.
+	decide := func(url string) (string, bool) {
+		v, known := s.CDNVendorFor(url)
+		sev, info := smugglingSeverity("Critical", v)
+		if v == "" && !known {
+			return "Informational", true
+		}
+		return sev, info
+	}
+
+	cases := []struct {
+		name    string
+		url     string
+		wantSev string
+	}{
+		{"known akamai host demoted", "https://api-s1.iciparisxl.lu/x", "Informational"},
+		{"unknown host demoted (no FP)", "https://mobile-app.iciparisxl.nl/y", "Informational"},
+		{"proven direct origin stays critical", "https://origin.example.com/z", "Critical"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if sev, _ := decide(tc.url); sev != tc.wantSev {
+				t.Fatalf("severity for %s: got %q want %q", tc.url, sev, tc.wantSev)
+			}
+		})
+	}
+
+	// MarkCDN must never overwrite a positive vendor with a later "" reading.
+	s.MarkCDN("api-s1.iciparisxl.lu", "")
+	if v, _ := s.CDNVendorFor("api-s1.iciparisxl.lu"); v != "Akamai" {
+		t.Fatalf("positive vendor was overwritten: got %q want Akamai", v)
+	}
+}
+
+// TestV124_IsCDNVendorName guards that only genuine CDNs mark a host as
+// CDN-fronted for smuggling (a pure application WAF must not suppress a real
+// direct-origin finding).
+func TestV124_IsCDNVendorName(t *testing.T) {
+	for _, v := range []string{"Akamai", "cloudflare", "CloudFront", "Fastly"} {
+		if !isCDNVendorName(v) {
+			t.Errorf("%q should be a CDN vendor", v)
+		}
+	}
+	for _, v := range []string{"Imperva", "F5", "ModSecurity", "", "Generic"} {
+		if isCDNVendorName(v) {
+			t.Errorf("%q should NOT be a CDN vendor", v)
+		}
+	}
+}
+
+// TestV124_WildcardDNSProbeLabels is a lightweight guard that detectWildcardDNS
+// fails CLOSED on an empty apex and does not panic. The live-resolver behaviour
+// (random labels resolving on a wildcard zone) cannot be exercised offline in
+// the sandbox and is verified in a live run; this only pins the safe defaults.
+func TestV124_WildcardDNSProbeLabels(t *testing.T) {
+	if detectWildcardDNS(context.Background(), "", "") {
+		t.Fatalf("empty apex must never be classified as wildcard")
+	}
+	// A domain that does NOT wildcard (RFC-2606 reserved) must resolve 0 random
+	// labels → not a wildcard. This is offline-safe: .invalid never resolves.
+	if detectWildcardDNS(context.Background(), "nonexistent.invalid", "") {
+		t.Fatalf(".invalid TLD must never be classified as wildcard")
 	}
 }

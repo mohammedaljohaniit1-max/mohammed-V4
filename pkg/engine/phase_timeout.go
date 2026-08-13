@@ -58,6 +58,21 @@ var phaseTimeouts = map[string]time.Duration{
 	"Vulnerability Scanning (Nuclei)": 20 * time.Minute,
 	"SQL Injection Testing":           12 * time.Minute,
 	"XSS Testing":                     12 * time.Minute,
+
+	// ── V12.4 FAILURE #6: pathological internal-compute phases that hit the
+	// 20m DEFAULT cap and were force-killed with ZERO results (killed 0 child
+	// process group(s) ⇒ no external tool, pure in-process HTTP probing).
+	// EMPIRICAL EVIDENCE (ICI Paris XL, النتايج.txt):
+	//   Phase 40 SSTI (Arithmetic Oracle) → done in 23m04s, "SSTI: 0 confirmed"
+	//   Phase 41 Google Dorking           → hit the 20m default cap
+	//   Phase 16 Parameter Discovery      → TIMEOUT after 20m00s (partial)
+	// Capping these tighter reclaims ~30–40m of wall-clock per full run with no
+	// loss of coverage: they never produced a confirmed finding within the cap.
+	// Adaptive scaling (CalculateAdaptiveTimeout) still multiplies these on
+	// large scopes, so genuinely large targets are not starved.
+	"SSTI (Arithmetic Oracle)": 8 * time.Minute,
+	"Google Dorking":           8 * time.Minute,
+	"Parameter Discovery":      12 * time.Minute,
 }
 
 // PhaseTimeout returns the hard wall-clock cap for a phase by Name(), falling

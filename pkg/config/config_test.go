@@ -232,3 +232,29 @@ func TestV122_FilterExcluded(t *testing.T) {
 		t.Fatalf("expected 3 in-scope hosts, got %d (%v)", len(got), got)
 	}
 }
+
+// TestResolveOutputFolder guards the --output bugfix: an explicit --output DIR
+// must be used verbatim (so the preset→collect handoff finds the artefacts),
+// while the default sentinel falls back to the per-target output/<host> folder
+// (so auto-resume's output/*/checkpoint.json discovery keeps working).
+func TestResolveOutputFolder(t *testing.T) {
+	cases := []struct {
+		name      string
+		outputDir string
+		target    string
+		want      string
+	}{
+		{"empty falls back to per-target", "", "api.iciparisxl.be", "output/api_iciparisxl_be"},
+		{"default sentinel falls back", "output", "api.iciparisxl.be", "output/api_iciparisxl_be"},
+		{"explicit dir used verbatim", "recon/out-engine/iciparisxl-full", "api.iciparisxl.be", "recon/out-engine/iciparisxl-full"},
+		{"explicit dir is cleaned", "recon/out-engine/./iciparisxl-full/", "x.com", "recon/out-engine/iciparisxl-full"},
+		{"whitespace trimmed to sentinel", "  output  ", "x.com", "output/x_com"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := ResolveOutputFolder(c.outputDir, c.target); got != c.want {
+				t.Fatalf("ResolveOutputFolder(%q, %q) = %q, want %q", c.outputDir, c.target, got, c.want)
+			}
+		})
+	}
+}

@@ -116,3 +116,40 @@ func TestV123_ValidateAdminEndpointAccess(t *testing.T) {
 		})
 	}
 }
+
+// TestV124_PublicCatalogReadRejection is the FAILURE #8 proof: the exact ICI
+// PARIS XL catalog endpoints that Phase 33 (IDOR) and Phase 47 (Financial)
+// wrongly flagged MUST be rejected by Gate 0 as public catalog reads, while
+// genuine account/order/payment object routes MUST still pass through.
+func TestV124_PublicCatalogReadRejection(t *testing.T) {
+	publicCatalog := []string{
+		"https://api.iciparisxl.nl/api/v2/icinl2/breadcrumbs?code=1252879&curr=EUR&lang=nl_NL&pageId=productDetailsSPR_icinl2",
+		"https://api.iciparisxl.be/api/v2/icibe2/catalogs/brands?codes=1094&curr=EUR&fields=DEFAULT&lang=fr_BE",
+		"https://api.iciparisxl.nl/api/v2/icinl2/products/BP_1175033/paginatedReviews?currentPage=0&pageSize=5&lang=nl_NL&curr=EUR",
+		"https://api.iciparisxl.nl/api/v2/icinl2/redirects/parfum/c/2?lang=nl_NL&curr=EUR",
+		"https://api.iciparisxl.nl/api/v2/icinl3/search?curr=EUR&fields=FULL&lang=nl_NL&query=la+poche",
+		"https://api.iciparisxl.nl/api/v2/icinl3/enhance-reviews/BP_1240042/images?curr=EUR&currentPage=1&lang=nl_NL&pageSize=100",
+		"https://api.iciparisxl.be/api/v2/icibe2/configurations?curr=EUR&key=criteo.enabled.content.pages&lang=fr_BE",
+	}
+	for _, u := range publicCatalog {
+		if !IsPublicUnauthenticatedRoute(u, "") {
+			t.Errorf("expected PUBLIC catalog read to be rejected by Gate 0: %q", u)
+		}
+	}
+
+	// Account / order / payment object routes cross an authorization boundary
+	// and MUST NOT be suppressed — even when a catalog token also appears in
+	// the path (the account boundary wins).
+	private := []string{
+		"https://api.iciparisxl.nl/api/v2/icinl2/users/42/orders",
+		"https://api.iciparisxl.nl/api/v2/icinl2/carts/current/entries",
+		"https://api.iciparisxl.be/api/v2/icibe2/customers/me/paymentdetails",
+		"https://api.iciparisxl.nl/api/v2/icinl2/users/7/wishlist/products", // catalog token 'products' but account boundary 'users' wins
+		"https://api.iciparisxl.nl/api/v2/icinl2/orders/BP_1/invoice",
+	}
+	for _, u := range private {
+		if IsPublicUnauthenticatedRoute(u, "") {
+			t.Errorf("account/order route wrongly classified public by Gate 0: %q", u)
+		}
+	}
+}

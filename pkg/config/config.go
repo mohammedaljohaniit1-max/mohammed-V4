@@ -661,3 +661,20 @@ func GetOutputFolder(target string) string {
 	clean = strings.ReplaceAll(clean, "/", "_")
 	return filepath.Join("output", clean)
 }
+
+// ResolveOutputFolder decides where a scan writes its artefacts.
+//
+// If outputDir is empty or the default sentinel "output", the engine keeps its
+// historical behaviour and derives output/<sanitised-target> (so auto-resume's
+// output/*/checkpoint.json discovery keeps working). If the operator passed an
+// explicit --output DIR (anything other than "" / "output"), that DIR is used
+// verbatim as the run folder — this is what the preset→collect handoff relies
+// on so `collect.sh` finds report.json/final_report.json exactly where it was
+// told the engine would write.
+func ResolveOutputFolder(outputDir, target string) string {
+	trimmed := strings.TrimSpace(outputDir)
+	if trimmed == "" || trimmed == "output" {
+		return GetOutputFolder(target)
+	}
+	return filepath.Clean(trimmed)
+}
