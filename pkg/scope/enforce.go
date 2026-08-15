@@ -26,8 +26,12 @@ var toolClasses = map[string]ToolClass{
 	"findomain":   ClassPassive,
 	"chaos":       ClassPassive,
 	"assetfinder": ClassPassive,
-	"amass":       ClassPassive, // amass passive mode; active mode must be off
-	"gau":         ClassPassive,
+	// V12.3 FAILURE #1: the legacy OWASP enumerator was PURGED (0 results for 8
+	// versions) and is no longer in the recon inventory or invoked anywhere. Its
+	// stale classification entry is removed so the code matches the README's
+	// "purged" claim; if it ever reappears it falls through to the safe
+	// aggressive-by-default classification.
+	"gau": ClassPassive,
 	"waybackurls": ClassPassive,
 	"cariddi":     ClassPassive,
 	"trufflehog":  ClassPassive,

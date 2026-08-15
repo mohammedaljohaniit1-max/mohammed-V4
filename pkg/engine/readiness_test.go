@@ -1,6 +1,10 @@
 package engine
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestReconTools_Inventory(t *testing.T) {
 	if len(reconTools) < 45 {
@@ -40,6 +44,60 @@ func TestProbeReconTools_Populates(t *testing.T) {
 	got := probeReconTools()
 	if len(got) != len(reconTools) {
 		t.Fatalf("probeReconTools should return every tool, got %d want %d", len(got), len(reconTools))
+	}
+}
+
+// TestFindInBinDirs_SudoSecurePathFallback proves the V12.5 fix: a tool that
+// exists in a known bin dir ($HOME/.local/bin here) is found by findInBinDirs
+// EVEN THOUGH it is not on the test process $PATH — the exact "12/45" bug where
+// sudo's secure_path hid /usr/local/bin and /root/go/bin.
+func TestFindInBinDirs_SudoSecurePathFallback(t *testing.T) {
+	tmpHome := t.TempDir()
+	localBin := filepath.Join(tmpHome, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A fake executable that is NOT on $PATH.
+	toolName := "mohammed_fake_recon_tool"
+	toolPath := filepath.Join(localBin, toolName)
+	if err := os.WriteFile(toolPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tmpHome)
+
+	got := findInBinDirs(toolName)
+	if got != toolPath {
+		t.Fatalf("findInBinDirs should locate %q at %q via the HOME/.local/bin fallback, got %q", toolName, toolPath, got)
+	}
+
+	// A non-executable file with the same name must NOT be treated as present.
+	noExec := filepath.Join(localBin, "not_executable_tool")
+	if err := os.WriteFile(noExec, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if p := findInBinDirs("not_executable_tool"); p != "" {
+		t.Fatalf("findInBinDirs must ignore non-executable files, got %q", p)
+	}
+
+	// A tool that exists nowhere must return "".
+	if p := findInBinDirs("definitely_does_not_exist_zzz"); p != "" {
+		t.Fatalf("findInBinDirs must return \"\" for a missing tool, got %q", p)
+	}
+}
+
+// TestCandidateBinDirs_IncludesSudoStrippedDirs asserts the fallback dir list
+// covers the exact locations sudo's secure_path drops (proven present on the
+// user's Kali box: /usr/local/bin, /root/go/bin).
+func TestCandidateBinDirs_IncludesSudoStrippedDirs(t *testing.T) {
+	dirs := candidateBinDirs()
+	set := map[string]bool{}
+	for _, d := range dirs {
+		set[d] = true
+	}
+	for _, must := range []string{"/usr/local/bin", "/root/go/bin", "/usr/bin"} {
+		if !set[must] {
+			t.Errorf("candidateBinDirs must include %q (a sudo-secure_path-stripped location)", must)
+		}
 	}
 }
 
