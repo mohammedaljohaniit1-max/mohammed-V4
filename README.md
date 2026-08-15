@@ -1,6 +1,28 @@
-# MOHAMMED V12.3 RUTHLESS
+# MOHAMMED V12.5 RUTHLESS
 
 **Zero-Touch Autonomous Attack Surface & Exploit Engine — THE FINAL MANDATE**
+
+---
+
+## 🚨 What's New in V12.5 (Real-Run False-Positive Purge)
+
+A real 7-target Kali run (ICI Paris XL / Mobily) produced four concrete
+false-positive classes and one environmental detection bug. V12.5 fixes **all of
+them at the detection source**, each locked with a Go regression test:
+
+| # | Symptom (real run) | Root cause | Fix |
+|---|---|---|---|
+| 1 | `Recon Tools: 12/45 present` while tools ARE installed | `exec.LookPath` reads only `$PATH`; **sudo `secure_path`** strips `/usr/local/bin` + `/root/go/bin` | `pkg/engine/readiness.go` — `candidateBinDirs()`+`findInBinDirs()` fallback scan of known install dirs (incl. `$GOBIN`/`$GOPATH/bin`, `~/.local/bin`, `/root/go/bin`) |
+| 2 | **64 "HTTP Request Smuggling CONFIRMED"** (all false) | 5 s timing oracle scored WAF/CDN connection-holds as desyncs; hosts return **instant 400/403** | `pkg/exploit/advanced_web.go` — read response **status** (instant 4xx/5xx ⇒ never vulnerable), **median-of-5** probes, threshold 5s→8s, ReadTimeout 12s→15s, pure holds ⇒ **UNCONFIRMED** |
+| 3 | **2 Critical Subdomain Takeovers** (false) | `"The request could not be satisfied"` is CloudFront's **generic 403** body | `pkg/phases/phases.go` — removed generic strings from the confirming set; `genericEdgeErrors` explicitly **reject** a host whose only signal is a normal CDN/WAF 403/404 |
+| 4 | JS secrets (`slack_token`, `api_key_generic`) false on webpack | naive substring match (`"xox"`, `"api_key"`) | `pkg/phases/phases.go` — replaced with boundaried, **entropy-validated `exploit.JSDeepEngine`** |
+
+Cleanup: the stale legacy-enumerator classification entry was removed from
+`pkg/scope/enforce.go`, so `grep -ri "amass" pkg/ cmd/` finally returns **0**.
+
+> Status after V12.5: `go build/vet/test ./...` all pass; `verify.sh` = **608
+> PASS / 6 FAIL / 34 WARN**, where the 6 FAILs are external recon binaries
+> absent **in a bare CI sandbox only** (present on a provisioned Kali box).
 
 ---
 

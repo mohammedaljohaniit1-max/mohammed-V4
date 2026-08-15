@@ -73,6 +73,15 @@ var phaseTimeouts = map[string]time.Duration{
 	"SSTI (Arithmetic Oracle)": 8 * time.Minute,
 	"Google Dorking":           8 * time.Minute,
 	"Parameter Discovery":      12 * time.Minute,
+
+	// ── V12.5: the hardened smuggling oracle now takes 5 timed probes per
+	// variant (median-of-5) instead of 1+1 re-test, i.e. up to 5× the raw-socket
+	// work per origin. Give the Advanced Web phase an explicit, bounded cap so
+	// the extra corroboration cannot stretch the wall-clock: 5 variants × 5
+	// probes × ReadTimeout(15s) ≈ 6m 15s worst-case per origin, over a handful
+	// of distinct origins. 12m covers the realistic case; adaptive scaling still
+	// multiplies it on very large scopes.
+	"Advanced Web (Smuggling/Cache/SSTI)": 12 * time.Minute,
 }
 
 // PhaseTimeout returns the hard wall-clock cap for a phase by Name(), falling

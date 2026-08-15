@@ -21,7 +21,9 @@ package engine
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -177,12 +179,85 @@ func probeBrowser(ctx context.Context, b interface{ Available() bool }) (bool, s
 	}
 }
 
-// probeReconTools resolves each recon binary on $PATH, filling Present/Path.
+// candidateBinDirs returns the well-known directories that hold recon binaries,
+// used as a fallback when exec.LookPath fails. This is REQUIRED because MOHAMMED
+// is frequently launched via `sudo` from inside a preset, and sudo resets $PATH
+// to a hardened `secure_path` (typically /usr/sbin:/usr/bin:/sbin:/bin) that
+// DROPS /usr/local/bin, /root/go/bin and $GOPATH/bin — exactly where subfinder,
+// dnsx, katana, dalfox, etc. live. Without this fallback the readiness report
+// mis-declares present tools as missing (the "12/45" bug). Duplicates are fine;
+// os.Stat de-dupes by first hit.
+func candidateBinDirs() []string {
+	dirs := []string{
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+		"/usr/local/sbin",
+		"/usr/sbin",
+		"/sbin",
+		"/snap/bin",
+		"/usr/local/go/bin",
+	}
+	// Go install targets: $GOBIN, then $GOPATH/bin, then the default ~/go/bin.
+	if gobin := os.Getenv("GOBIN"); gobin != "" {
+		dirs = append(dirs, gobin)
+	}
+	if gopath := os.Getenv("GOPATH"); gopath != "" {
+		for _, gp := range filepath.SplitList(gopath) {
+			dirs = append(dirs, filepath.Join(gp, "bin"))
+		}
+	}
+	// Per-user install locations. Cover both the invoking user ($HOME) and, when
+	// running under sudo, the original user ($SUDO_USER's home is not exported,
+	// but /root/go/bin and ~/.local/bin are the common cases).
+	if home := os.Getenv("HOME"); home != "" {
+		dirs = append(dirs,
+			filepath.Join(home, "go", "bin"),
+			filepath.Join(home, ".local", "bin"),
+			filepath.Join(home, ".cargo", "bin"),
+		)
+	}
+	// Explicit root defaults (sudo often keeps HOME=/root or clears it).
+	dirs = append(dirs,
+		"/root/go/bin",
+		"/root/.local/bin",
+		"/root/.cargo/bin",
+	)
+	return dirs
+}
+
+// findInBinDirs scans the well-known binary directories for an executable file
+// named `name`, following symlinks. Returns the resolved absolute path or "".
+func findInBinDirs(name string) string {
+	for _, dir := range candidateBinDirs() {
+		cand := filepath.Join(dir, name)
+		info, err := os.Stat(cand) // Stat follows symlinks (the go bin dir is full of them)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		// Require at least one executable bit (owner/group/other).
+		if info.Mode().Perm()&0o111 != 0 {
+			return cand
+		}
+	}
+	return ""
+}
+
+// probeReconTools resolves each recon binary, filling Present/Path. It first
+// consults $PATH via exec.LookPath, then — critically for sudo/secure_path
+// environments — falls back to scanning the well-known bin directories so tools
+// that genuinely exist are never reported missing.
 func probeReconTools() []ToolStatus {
 	out := make([]ToolStatus, len(reconTools))
 	copy(out, reconTools)
 	for i := range out {
 		if p, err := exec.LookPath(out[i].Name); err == nil {
+			out[i].Present = true
+			out[i].Path = p
+			continue
+		}
+		// $PATH miss — try the known install directories directly.
+		if p := findInBinDirs(out[i].Name); p != "" {
 			out[i].Present = true
 			out[i].Path = p
 		}
