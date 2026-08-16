@@ -618,6 +618,8 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	sqliOut := filepath.Join(s.OutputFolder, "sqli_results.txt")
 	var results []string
+	var rejected []string // raw tool-hits the triage gate did NOT confirm (V12.6)
+	toolHits := 0         // count of raw sqlmap/ghauri "injectable" hits (pre-triage)
 	for _, u := range targets {
 		// FIX #6 step 1: WAF pre-check. A WAF-fronted endpoint gives sqlmap
 		// unstable responses that it misreads as injectable → skip it.
@@ -659,7 +661,6 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 		} else if sqlmapHit && ghauriHit {
 			tool = "sqlmap+ghauri"
 		}
-		results = append(results, u+" ["+tool+"]")
 		f := map[string]interface{}{
 			"title": "SQL Injection", "severity": "Critical",
 			"url": u, "tool": tool, "evidence": tool + " reports parameter injectable",
@@ -671,12 +672,33 @@ func (p *SQLiPhase) Execute(ctx context.Context, s *engine.State) error {
 		}
 		// FIX #3/#7: triage + confidence gate. An AI-offline unconfirmed
 		// Critical is auto-downgraded to Info; low confidence is discarded.
-		s.TriageAndScore(ctx, "SQL Injection", u, f["evidence"].(string), f,
+		//
+		// V12.6 DISCREPANCY FIX: the previous code appended to `results`
+		// (→ "confirmed N injectable") BEFORE this gate ran, so the phase log
+		// claimed "1 injectable" while TriageAndScore silently discarded it —
+		// leaving CONFIRMED_VULNS.txt at 0 with NO explanation (the exact Kali
+		// iciparisxl contradiction). We now key the count on the gate's return
+		// value and log every raw hit that the gate rejected, WITH the reason.
+		toolHits++
+		kept := s.TriageAndScore(ctx, "SQL Injection", u, f["evidence"].(string), f,
 			func(ff map[string]interface{}) bool { return filter.ApplyConfidencePolicy(ff, s.Scope) })
+		if kept {
+			results = append(results, u+" ["+tool+"]")
+		} else {
+			sev, _ := f["severity"].(string)
+			rejected = append(rejected, fmt.Sprintf("%s [%s] → NOT reported (triage/confidence gate; downgraded to %q — AI offline or single-tool low-confidence)", u, tool, sev))
+		}
 		s.Governor.Throttle()
 	}
 	writeLines(sqliOut, results)
-	s.Printf("│  SQLi: tested %d, confirmed %d injectable (post-triage)\n", len(targets), len(results))
+	if len(rejected) > 0 {
+		writeLines(filepath.Join(s.OutputFolder, "sqli_rejected_by_triage.txt"), rejected)
+	}
+	s.Printf("│  SQLi: tested %d, %d raw tool-hit(s), %d CONFIRMED after triage, %d rejected (see sqli_rejected_by_triage.txt)\n",
+		len(targets), toolHits, len(results), len(rejected))
+	if toolHits > 0 && len(results) == 0 {
+		s.Printf("│  ⚠ NOTE: %d SQLi tool-hit(s) did NOT reach CONFIRMED_VULNS — they need a single-tool AI verdict or manual replay. This is WHY CONFIRMED_VULNS can be 0 despite a raw hit.\n", toolHits)
+	}
 	return nil
 }
 
@@ -716,7 +738,9 @@ func (p *SSRFPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	res := runner.RunTool(ctx, "nuclei", args, nil)
 	if res.OK() || res.TimedOut {
-		count := 0
+		count := 0     // findings stored (any severity)
+		highKept := 0  // findings that KEPT High/Critical → these reach CONFIRMED_VULNS
+		demoted := 0   // stored but downgraded to Info/Low by triage
 		for _, line := range readNonEmptyLines(ssrfJSONL) {
 			var rec map[string]interface{}
 			if json.Unmarshal([]byte(line), &rec) != nil {
@@ -732,9 +756,24 @@ func (p *SSRFPhase) Execute(ctx context.Context, s *engine.State) error {
 			if s.TriageAndScore(ctx, "SSRF", matched, "template="+tid, f,
 				func(m map[string]interface{}) bool { return filter.ApplyConfidencePolicy(m, s.Scope) }) {
 				count++
+				// V12.6: distinguish "stored" from "reportable". A finding
+				// downgraded to Info by triage is STORED (count++) but does NOT
+				// reach CONFIRMED_VULNS — this is the SSRF "3 kept" vs 0-confirmed
+				// contradiction. Report the post-triage severity honestly.
+				sev, _ := f["severity"].(string)
+				switch strings.ToLower(sev) {
+				case "high", "critical":
+					highKept++
+				default:
+					demoted++
+				}
 			}
 		}
-		s.Printf("│  nuclei SSRF: %d finding(s) kept\n", count)
+		s.Printf("│  nuclei SSRF: %d stored (%d reportable High/Critical, %d demoted to Info/Low by triage)\n",
+			count, highKept, demoted)
+		if count > 0 && highKept == 0 {
+			s.Printf("│  ⚠ NOTE: all %d SSRF finding(s) were demoted by triage (no interactsh OOB callback / AI offline) → they do NOT enter CONFIRMED_VULNS. This is WHY '3 kept' can show 0 confirmed.\n", count)
+		}
 	} else {
 		s.Printf("│  nuclei SSRF: SKIP (%v)\n", res.Err)
 	}

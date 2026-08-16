@@ -98,17 +98,10 @@ func (e *Engine) launch() error {
 		}
 	}()
 
-	l := launcher.New().
-		Headless(true).
-		NoSandbox(true). // required in most CI/container environments
-		Set("disable-gpu").
-		Set("disable-dev-shm-usage").
-		Set("disable-setuid-sandbox").
-		Set("no-first-run").
-		Set("disable-extensions")
-	if e.binPath != "" {
-		l = l.Bin(e.binPath)
+	if e.binPath == "" {
+		e.binPath = detectChromiumBinary()
 	}
+	l := newHardenedLauncher(e.binPath)
 
 	controlURL, err := l.Launch()
 	if err != nil {
@@ -201,6 +194,69 @@ func (e *Engine) Restart() error {
 	return e.launchLocked()
 }
 
+// detectChromiumBinary returns the path to an installed Chromium/Chrome binary,
+// or "" if none is found (the launcher then falls back to its managed download).
+// V12.6: on Kali the managed download frequently fails / is unstable; a
+// system-installed Chromium is far more reliable and is what fixes the DOM-XSS
+// "browser unrecoverable" crash loop.
+func detectChromiumBinary() string {
+	if env := strings.TrimSpace(os.Getenv("MOHAMMED_CHROME_BIN")); env != "" {
+		if fi, err := os.Stat(env); err == nil && !fi.IsDir() {
+			return env
+		}
+	}
+	candidates := []string{
+		"/usr/bin/chromium",
+		"/usr/bin/chromium-browser",
+		"/usr/bin/google-chrome",
+		"/usr/bin/google-chrome-stable",
+		"/snap/bin/chromium",
+		"/usr/bin/brave-browser",
+		"/opt/google/chrome/chrome",
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+			return c
+		}
+	}
+	return ""
+}
+
+// newHardenedLauncher builds a Chromium launcher with the V12.6 stability flag
+// set. The Kali run crashed the renderer 3× in a row on DOM-XSS ("browser
+// unrecoverable"). Root causes on Kali/containers: tiny /dev/shm → renderer
+// SIGBUS/OOM; GPU/Vulkan probes crashing headless Chromium; zygote/namespace
+// sandbox death under sudo. This is the widely-used "Chromium in Docker"
+// hardening set — it turns the 3×-crash into a stable long-lived browser.
+func newHardenedLauncher(binPath string) *launcher.Launcher {
+	l := launcher.New().
+		Headless(true).
+		NoSandbox(true). // required in most CI/container environments
+		Set("disable-gpu").
+		Set("disable-dev-shm-usage").
+		Set("disable-setuid-sandbox").
+		Set("no-first-run").
+		Set("disable-extensions").
+		Set("no-zygote").
+		Set("disable-software-rasterizer").
+		Set("disable-features", "VizDisplayCompositor,UseChromeOSDirectVideoDecoder,Vulkan").
+		Set("disable-accelerated-2d-canvas").
+		Set("disable-background-networking").
+		Set("disable-background-timer-throttling").
+		Set("disable-renderer-backgrounding").
+		Set("disable-backgrounding-occluded-windows").
+		Set("disable-crash-reporter").
+		Set("disable-breakpad").
+		Set("mute-audio").
+		Set("hide-scrollbars").
+		Set("window-size", "1280,900").
+		Set("js-flags", "--max-old-space-size=512")
+	if binPath != "" {
+		l = l.Bin(binPath)
+	}
+	return l
+}
+
 // launchLocked is the body of launch() assuming e.mu is already held and the
 // once-flags have been reset. It exists so Restart can relaunch without the
 // double-lock that calling launch() under e.mu would cause. FIX #6.
@@ -215,17 +271,10 @@ func (e *Engine) launchLocked() error {
 			e.browser = nil
 		}
 	}()
-	l := launcher.New().
-		Headless(true).
-		NoSandbox(true).
-		Set("disable-gpu").
-		Set("disable-dev-shm-usage").
-		Set("disable-setuid-sandbox").
-		Set("no-first-run").
-		Set("disable-extensions")
-	if e.binPath != "" {
-		l = l.Bin(e.binPath)
+	if e.binPath == "" {
+		e.binPath = detectChromiumBinary()
 	}
+	l := newHardenedLauncher(e.binPath)
 	controlURL, err := l.Launch()
 	if err != nil {
 		e.launchErr = &LaunchError{Reason: err.Error()}

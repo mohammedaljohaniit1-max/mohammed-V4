@@ -993,8 +993,8 @@ check_grep cmd/mohammed/main.go 'phases.DeepBurpOOBPhase\{\}' \
 # Version bump (V11.0 FINAL SOVEREIGN supersedes V10.0 SOVEREIGN)
 check_grep cmd/mohammed/main.go 'V11.0 FINAL SOVEREIGN' \
     "main.go: V11.0 FINAL SOVEREIGN banner present" "main.go: version NOT bumped to V11.0"
-check_grep pkg/engine/engine.go 'MOHAMMED V12.3 RUTHLESS Engine Started' \
-    "engine.go: V12.3 RUTHLESS startup banner present" "engine.go: startup banner NOT bumped to V12.3"
+check_grep pkg/engine/engine.go 'MOHAMMED V12.6 RUTHLESS Engine Started' \
+    "engine.go: V12.6 RUTHLESS startup banner present" "engine.go: startup banner NOT bumped to V12.6"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # V9.0 ABSOLUTE APEX checks
@@ -1606,19 +1606,19 @@ check_grep pkg/phases/modern_tools_test.go 'func TestModernTools_' \
 check_grep pkg/engine/readiness_test.go 'TestReconTools_V121ModernToolsPresent' \
     "readiness: V12.1 modern-tool inventory test present" "readiness V12.1 test MISSING"
 
-hdr "V12.3 RUTHLESS — Version + Docs Bump"
-check_grep cmd/mohammed/main.go 'V12.3 RUTHLESS' \
-    "main.go: V12.3 RUTHLESS banner present" "main.go: version NOT bumped to V12.3"
-check_grep pkg/engine/engine.go 'V12.3 RUTHLESS' \
-    "engine.go: V12.3 RUTHLESS startup banner present" "engine.go: banner NOT bumped to V12.3"
-check_grep README.md 'V12.3 RUTHLESS' \
-    "README.md: V12.3 RUTHLESS title present" "README.md: version NOT bumped to V12.3"
-check_grep config.yaml 'V12.3 RUTHLESS' \
-    "config.yaml: V12.3 RUTHLESS header present" "config.yaml: version NOT bumped to V12.3"
-check_grep setup.sh 'V12.3 RUTHLESS' \
-    "setup.sh: V12.3 RUTHLESS completion message present" "setup.sh: version NOT bumped to V12.3"
-check_grep RESPONSIBLE_DISCLOSURE.md 'V12.3 RUTHLESS' \
-    "RESPONSIBLE_DISCLOSURE.md: V12.3 RUTHLESS title present" "RESPONSIBLE_DISCLOSURE.md: version NOT bumped to V12.3"
+hdr "V12.6 RUTHLESS — Version + Docs Bump"
+check_grep cmd/mohammed/main.go 'V12.6 RUTHLESS' \
+    "main.go: V12.6 RUTHLESS banner present" "main.go: version NOT bumped to V12.6"
+check_grep pkg/engine/engine.go 'V12.6 RUTHLESS' \
+    "engine.go: V12.6 RUTHLESS startup banner present" "engine.go: banner NOT bumped to V12.6"
+check_grep README.md 'V12.6 RUTHLESS' \
+    "README.md: V12.6 RUTHLESS title present" "README.md: version NOT bumped to V12.6"
+check_grep config.yaml 'V12.6 RUTHLESS' \
+    "config.yaml: V12.6 RUTHLESS header present" "config.yaml: version NOT bumped to V12.6"
+check_grep setup.sh 'V12.6 RUTHLESS' \
+    "setup.sh: V12.6 RUTHLESS completion message present" "setup.sh: version NOT bumped to V12.6"
+check_grep RESPONSIBLE_DISCLOSURE.md 'V12.6 RUTHLESS' \
+    "RESPONSIBLE_DISCLOSURE.md: V12.6 RUTHLESS title present" "RESPONSIBLE_DISCLOSURE.md: version NOT bumped to V12.6"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # V12.2 PROCESS-CRISIS — the 6 tested process fixes + 6 mandated features

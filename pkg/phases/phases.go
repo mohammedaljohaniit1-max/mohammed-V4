@@ -1245,6 +1245,140 @@ func detectWildcardDNS(ctx context.Context, apex, _ string) bool {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// V12.6 · DNS RESOLUTION HEALTH & NATIVE FALLBACK
+//
+// ROOT CAUSE of the Kali "dnsx: 0 live hosts resolved" on 6/7 targets:
+// dnsx speaks raw UDP/53 to the resolvers in resolverFile. On locked-down
+// networks (corp WiFi, VPN, some Kali NAT setups) outbound UDP/53 to public
+// resolvers (1.1.1.1, 8.8.8.8, …) is silently dropped. dnsx then exits 0 with
+// ZERO output — indistinguishable, to the old code, from "the target has no
+// live hosts". Every downstream phase then ran on an empty corpus → hollow
+// scan. There was NO health check and NO resolver-independent fallback.
+//
+// dnsHealthCheck() proves whether the machine can resolve DNS AT ALL by
+// resolving a set of always-up anchor domains through BOTH (a) the OS stub
+// resolver (net.DefaultResolver, which will use TCP/DoT/systemd-resolved and
+// therefore survive a UDP block) and (b) a direct UDP probe to the first
+// resolver in resolverFile. It returns which transports work so the caller can
+// pick a strategy and, critically, tell the user the TRUTH about why 0 hosts
+// came back.
+// ═══════════════════════════════════════════════════════════════
+
+// dnsHealth summarises what DNS transports actually work on this host.
+type dnsHealth struct {
+	OSResolverOK bool // net.DefaultResolver (systemd-resolved / /etc/resolv.conf, TCP-capable)
+	UDP53OK      bool // raw UDP/53 to the first configured resolver
+	Detail       string
+}
+
+// dnsHealthCheck resolves well-known anchor domains to determine which DNS
+// transports are usable. It NEVER blocks longer than ~10s total.
+func dnsHealthCheck(ctx context.Context, resolverFile string) dnsHealth {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	anchors := []string{"one.one.one.one", "dns.google", "example.com"}
+
+	var h dnsHealth
+
+	// (a) OS stub resolver — this is the transport our native fallback uses.
+	for _, a := range anchors {
+		lctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		addrs, err := net.DefaultResolver.LookupHost(lctx, a)
+		cancel()
+		if err == nil && len(addrs) > 0 {
+			h.OSResolverOK = true
+			break
+		}
+	}
+
+	// (b) Raw UDP/53 to the first configured resolver (what dnsx uses).
+	if first := firstResolverIP(resolverFile); first != "" {
+		r := &net.Resolver{
+			PreferGo: true,
+			Dial: func(dctx context.Context, network, _ string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 3 * time.Second}
+				return d.DialContext(dctx, "udp", net.JoinHostPort(first, "53"))
+			},
+		}
+		lctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		addrs, err := r.LookupHost(lctx, "one.one.one.one")
+		cancel()
+		if err == nil && len(addrs) > 0 {
+			h.UDP53OK = true
+		}
+	}
+
+	switch {
+	case h.OSResolverOK && h.UDP53OK:
+		h.Detail = "OS resolver + UDP/53 both OK"
+	case h.OSResolverOK && !h.UDP53OK:
+		h.Detail = "OS resolver OK but outbound UDP/53 is BLOCKED (dnsx will return 0 — using native fallback)"
+	case !h.OSResolverOK && h.UDP53OK:
+		h.Detail = "UDP/53 OK but OS resolver broken (unusual)"
+	default:
+		h.Detail = "NO DNS transport works — machine cannot resolve anything (check /etc/resolv.conf, VPN, firewall)"
+	}
+	return h
+}
+
+// firstResolverIP returns the first non-comment IP in a resolvers file.
+func firstResolverIP(path string) string {
+	for _, l := range readNonEmptyLines(path) {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		if ip := net.ParseIP(l); ip != nil {
+			return l
+		}
+	}
+	return ""
+}
+
+// nativeResolveHosts resolves a slice of hostnames using the OS stub resolver
+// (net.DefaultResolver) concurrently. This is transport-independent of dnsx —
+// it works over whatever /etc/resolv.conf / systemd-resolved provides,
+// including TCP/DoT, so it survives a UDP/53 block. Returns the hosts that
+// resolved to at least one A/AAAA record. Bounded concurrency + per-host
+// deadline keep it fast and safe on large inputs.
+func nativeResolveHosts(ctx context.Context, hosts []string, concurrency int) []string {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if concurrency <= 0 {
+		concurrency = 100
+	}
+	sem := make(chan struct{}, concurrency)
+	var mu sync.Mutex
+	var live []string
+	var wg sync.WaitGroup
+
+	for _, host := range hosts {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(h string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			lctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			defer cancel()
+			addrs, err := net.DefaultResolver.LookupHost(lctx, h)
+			if err == nil && len(addrs) > 0 {
+				mu.Lock()
+				live = append(live, h)
+				mu.Unlock()
+			}
+		}(host)
+	}
+	wg.Wait()
+	return live
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Phase 05: DNS Resolution & Enrichment
 // ═══════════════════════════════════════════════════════════════
 type DNSResolvePhase struct{}
@@ -1278,6 +1412,16 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 
 	inputN := len(deduped)
 	s.Printf("│  dnsx input: %d unique hosts to resolve\n", inputN)
+
+	// V12.6: prove DNS actually works BEFORE trusting a "0 hosts" result.
+	// This is the difference between "target has no live hosts" (real) and
+	// "this machine can't do UDP/53 so dnsx returns 0" (the Kali hollow-scan).
+	health := dnsHealthCheck(ctx, resolverFile)
+	s.Printf("│  DNS health: %s\n", health.Detail)
+	if !health.OSResolverOK && !health.UDP53OK {
+		s.Printf("│  ✗ FATAL DNS: this host cannot resolve ANY domain. Every downstream phase will be empty.\n")
+		s.Printf("│    Fix: check /etc/resolv.conf, disable restrictive VPN/firewall, or run: echo 'nameserver 1.1.1.1' | sudo tee /etc/resolv.conf\n")
+	}
 
 	// runDnsx resolves subFile through dnsx and returns the deduped host list.
 	// withWildcard toggles the -wd wildcard-elimination pass.
@@ -1335,6 +1479,19 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 			writeLines(dnsxOut, nil)
 			return nil
 		}
+		// V12.6: before the crude UNVERIFIED fallback, try the native Go resolver
+		// — it VERIFIES each host over a working transport instead of blindly
+		// trusting the raw list. Only if it too finds nothing do we fall back.
+		if health.OSResolverOK {
+			s.Printf("│  dnsx: FAILED (%v) — trying native Go resolver over %d hosts\n", res.Err, len(deduped))
+			native := nativeResolveHosts(ctx, deduped, 150)
+			if len(native) > 0 {
+				s.LiveHosts = append(s.LiveHosts, native...)
+				s.Printf("│  ✓ native resolver recovered %d VERIFIED live hosts\n", len(native))
+				writeLines(dnsxOut, s.LiveHosts)
+				return nil
+			}
+		}
 		const fallbackCap = 500
 		fb := deduped
 		if len(fb) > fallbackCap {
@@ -1357,6 +1514,21 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 		if res2.OK() && len(noWildHosts) > len(hosts) {
 			s.Printf("│  no-wildcard retry recovered %d hosts (was %d)\n", len(noWildHosts), len(hosts))
 			hosts = noWildHosts
+		}
+	}
+
+	// V12.6 NATIVE FALLBACK: dnsx exited 0 but produced ZERO hosts while the OS
+	// resolver demonstrably works → dnsx's UDP/53 path is blocked. Re-resolve the
+	// whole input through the OS stub resolver (TCP/DoT-capable), which is exactly
+	// what turned the Kali "0 live hosts" hollow scans into real ones.
+	if len(hosts) == 0 && inputN > 0 && health.OSResolverOK {
+		s.Printf("│  ⚠ dnsx returned 0 hosts but OS resolver works — running native Go resolver fallback over %d hosts\n", inputN)
+		native := nativeResolveHosts(ctx, deduped, 150)
+		if len(native) > 0 {
+			s.Printf("│  ✓ native resolver recovered %d live hosts (dnsx UDP/53 was blocked)\n", len(native))
+			hosts = native
+		} else {
+			s.Printf("│  native resolver also found 0 — the target genuinely has no resolvable hosts in this list\n")
 		}
 	}
 
@@ -2505,11 +2677,111 @@ func (p *WaybackPhase) Execute(ctx context.Context, s *engine.State) error {
 	for u := range allURLs {
 		lines = append(lines, u)
 	}
+
+	// V12.6 URL-BLOAT FIX: the Kali iciparisxl run collected 188,039 URLs, of
+	// which the overwhelming majority were the SAME path with a different query
+	// VALUE (?id=1, ?id=2, …, product/1, product/2 …). Feeding 188k near-identical
+	// URLs into crawl/param/nuclei is what blew Wayback (20m) and downstream
+	// phases past their caps for ZERO extra coverage. collapseURLPatterns keeps
+	// ONE representative per (host+path+param-KEYS) signature, then a hard global
+	// cap guards against a pathological archive. Distinct endpoints are preserved;
+	// only redundant value-permutations are dropped.
+	rawN := len(lines)
+	lines = collapseURLPatterns(lines, 25000)
+	if rawN != len(lines) {
+		s.Printf("│  URL de-bloat: %d → %d unique endpoint patterns (dropped %d redundant value-permutations)\n",
+			rawN, len(lines), rawN-len(lines))
+	}
+
 	archiveFile := filepath.Join(s.OutputFolder, "urls_archive.txt")
 	writeLines(archiveFile, lines)
 	s.URLs = appendUnique(s.URLs, lines)
-	s.Printf("│  Total Archive URLs: %d\n", len(allURLs))
+	s.Printf("│  Total Archive URLs: %d\n", len(lines))
 	return nil
+}
+
+// collapseURLPatterns de-duplicates a URL list by ENDPOINT SIGNATURE
+// (scheme+host+path+sorted-query-KEYS) so that ?id=1 / ?id=2 / ?id=3 collapse
+// to a single representative, and numeric path IDs (/product/1, /product/2) are
+// treated as one pattern. It preserves the FIRST URL seen for each signature
+// (which keeps a concrete, replayable example) and enforces a hard cap. This is
+// the fix for the 188k-URL bloat that starved downstream phases.
+func collapseURLPatterns(urls []string, cap int) []string {
+	if cap <= 0 {
+		cap = 25000
+	}
+	seen := make(map[string]bool)
+	var out []string
+	numRe := "0123456789"
+	isAllDigits := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		for _, c := range s {
+			if !strings.ContainsRune(numRe, c) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			continue
+		}
+		sig := u
+		if i := strings.Index(u, "?"); i >= 0 {
+			base := u[:i]
+			query := u[i+1:]
+			// Signature = base path + sorted parameter KEYS (values dropped).
+			var keys []string
+			for _, kv := range strings.Split(query, "&") {
+				k := kv
+				if eq := strings.Index(kv, "="); eq >= 0 {
+					k = kv[:eq]
+				}
+				if k != "" {
+					keys = append(keys, k)
+				}
+			}
+			sortStrings(keys)
+			sig = base + "?" + strings.Join(keys, "&")
+		}
+		// Collapse numeric path segments (/product/12345 → /product/{n}).
+		segs := strings.Split(sig, "/")
+		for i, seg := range segs {
+			// Split off a possible ?keys suffix on the last segment.
+			q := ""
+			if j := strings.Index(seg, "?"); j >= 0 {
+				q = seg[j:]
+				seg = seg[:j]
+			}
+			if isAllDigits(seg) {
+				seg = "{n}"
+			}
+			segs[i] = seg + q
+		}
+		sig = strings.Join(segs, "/")
+
+		if !seen[sig] {
+			seen[sig] = true
+			out = append(out, u) // keep the concrete example
+			if len(out) >= cap {
+				break
+			}
+		}
+	}
+	return out
+}
+
+// sortStrings is a tiny dependency-free ascending string sort (avoids importing
+// sort just for query-key ordering in collapseURLPatterns).
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
 }
 
 // waybackTargets builds the URL-archive query set for BUG #3: the union of
