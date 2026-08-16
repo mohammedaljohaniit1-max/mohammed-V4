@@ -126,11 +126,39 @@ install_go_tool() {
     command -v "$name" &>/dev/null && { relink_existing "$name"; return 0; }
     command -v go &>/dev/null || { _warn "$name: go not installed — skipping"; return 1; }
     _info "go install $name ..."
-    if GOPATH="$GOPATH" GOBIN="$GOBIN" go install -v "$import" 2>/dev/null; then
+
+    # V12.6 FIX: alterx/uncover/notify/nomore403 "go install failed" on Kali
+    # (go1.26) had TWO real root causes that the old `2>/dev/null` hid:
+    #   (1) Go-version skew — the tool's go.mod requires a newer/older toolchain
+    #       than the system go. GOTOOLCHAIN=auto lets go fetch the exact toolchain
+    #       the module declares instead of hard-failing.
+    #   (2) module-graph/proxy hiccups — GOFLAGS=-mod=mod + GONOSUMDB relax the
+    #       strict defaults that abort on a single checksum/proxy blip.
+    # We now (a) show the REAL error, (b) retry with the relaxed env, and
+    # (c) fall back from @latest to a known-good pinned version.
+    local err
+    err="$(GOPATH="$GOPATH" GOBIN="$GOBIN" GOTOOLCHAIN=auto go install -v "$import" 2>&1)"
+    if [ $? -ne 0 ]; then
+        _warn "$name: first attempt failed — retrying with relaxed module flags"
+        echo "$err" | tail -3 | sed 's/^/      │ /'
+        err="$(GOPATH="$GOPATH" GOBIN="$GOBIN" GOTOOLCHAIN=auto GOFLAGS=-mod=mod \
+               GONOSUMCHECK=1 GOSUMDB=off go install -v "$import" 2>&1)"
+    fi
+    if [ $? -ne 0 ]; then
+        # Fall back from @latest to the module root's default (some PD tools
+        # publish a broken @latest tag but a working main).
+        local base="${import%@*}"
+        _warn "$name: retrying pinned fallback ($base@latest via GOPROXY=direct)"
+        err="$(GOPATH="$GOPATH" GOBIN="$GOBIN" GOTOOLCHAIN=auto GOFLAGS=-mod=mod \
+               GOPROXY=direct GOSUMDB=off go install -v "${base}@latest" 2>&1)"
+    fi
+
+    if command -v "$name" &>/dev/null || [ -x "$GOBIN/$name" ]; then
         link_tool "$GOBIN/$name" "$name"
         command -v "$name" &>/dev/null && _log "$name installed" || _warn "$name built to $GOBIN but not on PATH"
     else
-        _warn "$name: go install failed"
+        _warn "$name: go install failed (all strategies) — last error:"
+        echo "$err" | tail -4 | sed 's/^/      │ /'
     fi
 }
 

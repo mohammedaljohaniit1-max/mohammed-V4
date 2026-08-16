@@ -6,6 +6,47 @@
 
 ---
 
+## ⚡ CURRENT VERSION: V12.6 RUTHLESS — read this first
+
+If you are an AI assisting the operator **during a live scan**, these are the
+most recent behavioural facts (post the second Kali run). Do NOT re-introduce
+bugs these fixes removed.
+
+**Ground truth from the last two real Kali runs:**
+- **0 confirmed vulnerabilities** were produced across all 7 targets. Do not
+  claim otherwise. `Findings: N` in the summary = Info + Low + manual-review
+  noise, NOT reportable bugs. Only `CONFIRMED_VULNS.txt` counts.
+- The FIRST hollow-scan cause: **DNS resolved 0 live hosts on 6/7 targets**
+  because the run's network **blocked outbound UDP/53** (what dnsx uses).
+
+**What V12.6 changed (so you interpret logs correctly):**
+1. **DNS**: a `DNS health:` line now prints at Phase 05. If it says
+   *"outbound UDP/53 is BLOCKED"* the engine automatically runs a **native Go
+   resolver fallback** (`nativeResolveHosts`) over the OS stub resolver. If you
+   still see 0 live hosts AND the health line says *"NO DNS transport works"*,
+   the operator's machine cannot resolve DNS — tell them to fix
+   `/etc/resolv.conf` / disable VPN; it is NOT a tool bug.
+2. **Banner** now says **V12.6 RUTHLESS** (was wrongly V12.3).
+3. **Counts are honest**: `SQLi: … N CONFIRMED after triage, M rejected` — the
+   rejected raw hits are written to `sqli_rejected_by_triage.txt`. A raw
+   sqlmap/ghauri "injectable" that fails the triage/confidence gate (AI offline,
+   single-tool) does NOT enter `CONFIRMED_VULNS`. SSRF prints a
+   reportable-vs-demoted split for the same reason.
+4. **Compute-bound phases** (Advanced Web, SSTI, Google Dorking) are exempt from
+   host-count adaptive timeout scaling — they use a flat cap.
+5. **CDP/Chromium** launcher is hardened for Kali; set `MOHAMMED_CHROME_BIN` to
+   point at a system Chromium if DOM-XSS still reports "browser unrecoverable".
+6. **URL de-bloat**: `collapseURLPatterns` collapses `?id=1/2/3…` and numeric
+   path IDs to one replayable example (hard cap 25k) — the 188k-URL bloat fix.
+7. **Tool install**: `install_path.sh` now prints the real `go install` error
+   and retries with `GOTOOLCHAIN=auto` / `-mod=mod` / `GOPROXY=direct`.
+
+**Your division of labour (operator's instruction):** during a scan another AI
+may help *read/interpret*; but **all fixing/editing is done by the primary
+engineer** following the git workflow below.
+
+---
+
 ## 0. What this project is (and the legal frame)
 
 **MOHAMMED-V4** is a phase-based automated **security reconnaissance and

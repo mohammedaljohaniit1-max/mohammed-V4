@@ -597,7 +597,7 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 	o.State.StartTime = time.Now()
 
 	// ── Print initial header ──────────────────────────────
-	fmt.Printf("\n[+] MOHAMMED V12.3 RUTHLESS Engine Started | Output: %s\n", o.State.OutputFolder)
+	fmt.Printf("\n[+] MOHAMMED V12.6 RUTHLESS Engine Started | Output: %s\n", o.State.OutputFolder)
 	fmt.Printf("⏱  SCAN STARTED: %s\n", o.State.StartTime.Format("2006-01-02 15:04:05 MST"))
 
 	// V9.0 System Resource Shield: report the adaptive concurrency posture up
@@ -812,7 +812,15 @@ func (o *Orchestrator) Run(ctx context.Context) error {
 		if o.State.Config != nil {
 			profile = o.State.Config.Profile
 		}
-		phaseTO := CalculateAdaptiveTimeout(PhaseTimeout(phase.Name()), hostCount, profile)
+		// V12.6: compute-bound phases (Advanced Web / SSTI / Google Dorking) do
+		// NOT scale with host count — adaptive ×2/×3 just wasted ~75m on the Kali
+		// iciparisxl run for 0 findings. Exempt them so they keep their flat cap.
+		var phaseTO time.Duration
+		if IsComputeBound(phase.Name()) {
+			phaseTO = PhaseTimeout(phase.Name())
+		} else {
+			phaseTO = CalculateAdaptiveTimeout(PhaseTimeout(phase.Name()), hostCount, profile)
+		}
 		phaseCtx, phaseCancel := context.WithTimeout(ctx, phaseTO)
 
 		// ── V12.3 · FAILURE #2: BACKUP HARD-KILL TIMER ──────────────────────

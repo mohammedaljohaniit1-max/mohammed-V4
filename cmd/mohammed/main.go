@@ -26,11 +26,11 @@ const banner = `
 ██║╚██╔╝██║██║   ██║██╔══██║██╔══██║██║╚██╔╝██║██║╚██╔╝██║██╔══╝  ██║  ██║
 ██║ ╚═╝ ██║╚██████╔╝██║  ██║██║  ██║██║ ╚═╝ ██║██║ ╚═╝ ██║███████╗██████╔╝
 ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚══════╝╚═════╝ 
-                     V12.3 RUTHLESS | Zero-Touch Autonomous Attack & Discovery Engine
+                     V12.6 RUTHLESS | Zero-Touch Autonomous Attack & Discovery Engine
 `
 
 const helpText = `
-MOHAMMED V12.3 RUTHLESS — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], modern recon/vuln toolset [subfinder/bbot/findomain/chaos/assetfinder/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, adaptive 429/WAF stealth shield. V12.3 RUTHLESS: legacy enumerator PURGED [concurrent per-apex fan-out: subfinder+bbot+findomain+chaos+assetfinder, each own goroutine+timeout], scale-adaptive per-phase timeouts [×2 >1000 hosts, ×3 >5000] + backup hard-kill timers, httpx WAF-403/429-aware LIVE detection + resilient TCP probe fallback, staged nuclei [critical/high→medium→dev-origin-first], Gate-0 public-route + admin-endpoint FP rejection [zero public-page findings], exact HackerOne scope, bootstrap user-page guard, Burp Community/Pro auto-detect [proxy-relay when no Pro REST])
+MOHAMMED V12.6 RUTHLESS — Zero-Touch Autonomous Attack & Discovery Engine (65+ phases, 76+ OSINT, 16+ Go exploit engines incl. 5 Secret Weapons [API Endpoint Intelligence, Response Differential, WAF-Adaptive Smart Fuzz, JavaScript Deep Analysis, Subdomain Correlation Intelligence], modern recon/vuln toolset [subfinder/bbot/findomain/chaos/assetfinder/alterx/cdncheck/uncover/cariddi/trufflehog/notify/ppmap], 3-tier Ollama AI cascade [llama3.2:3b/qwen2.5:7b/deepseek-r1:7b], Go-Rod headless-Chrome DOM/postMessage/CORS with crash-recovery+memory-recycle, target-adaptive Phase-0 classifier, CAPTCHA-aware User A/B bootstrapper, 8 chained stateful attack graphs, 8-WAF bypass matrix, CDN-aware smuggling demotion, PoE responsible-disclosure boundary, auto HackerOne-report generation, pre-scan readiness auto-fix, SimHash/Levenshtein + DOM-proof + AI-triage 5-gate FP with Cloudflare-52x auto-reject, adaptive 429/WAF stealth shield. V12.6 RUTHLESS: legacy enumerator PURGED [concurrent per-apex fan-out: subfinder+bbot+findomain+chaos+assetfinder, each own goroutine+timeout], scale-adaptive per-phase timeouts [×2 >1000 hosts, ×3 >5000] + backup hard-kill timers, httpx WAF-403/429-aware LIVE detection + resilient TCP probe fallback, staged nuclei [critical/high→medium→dev-origin-first], Gate-0 public-route + admin-endpoint FP rejection [zero public-page findings], exact HackerOne scope, bootstrap user-page guard, Burp Community/Pro auto-detect [proxy-relay when no Pro REST])
 
 USAGE:
   ./mohammed <command> [flags]
@@ -80,7 +80,7 @@ SCAN FLAGS:
   --rate          int      Requests per minute (default: 150)
   --output        string   Output directory (default: output/)
 
-V12.3 RUTHLESS NOTES:
+V12.6 RUTHLESS NOTES:
   • Passive enumeration is a CONCURRENT PER-APEX FAN-OUT: subfinder, bbot,
     findomain, chaos and assetfinder each run in their own goroutine with their
     own timeout, so one wedged tool can NEVER starve the others (the legacy

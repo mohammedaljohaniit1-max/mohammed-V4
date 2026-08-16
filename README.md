@@ -1,6 +1,32 @@
-# MOHAMMED V12.5 RUTHLESS
+# MOHAMMED V12.6 RUTHLESS
 
 **Zero-Touch Autonomous Attack Surface & Exploit Engine — THE FINAL MANDATE**
+
+---
+
+## 🚨 What's New in V12.6 (Hollow-Scan / DNS / CDP / Honest-Count Purge)
+
+The second real Kali run exposed problems **V12.5 did not touch** — chiefly that
+**6 of 7 targets resolved 0 live hosts**, so the scans were *hollow* (DNS +
+email check only). V12.6 fixes the root causes, each with a Go regression test:
+
+| # | Symptom (real Kali run) | Root cause | Fix |
+|---|---|---|---|
+| 1 | `dnsx: 0 live hosts resolved` on **6/7 targets** ⇒ every downstream phase empty | dnsx speaks raw **UDP/53**; on the run's network outbound UDP/53 was dropped, dnsx exited 0 silently, no fallback, no diagnostic | `pkg/phases/phases.go` — `dnsHealthCheck()` proves DNS works via OS resolver **and** UDP/53; `nativeResolveHosts()` re-resolves over the OS stub resolver (TCP/DoT-capable) when dnsx returns 0; prints the TRUTH (UDP blocked vs target dead) |
+| 2 | Binary banner still said **V12.3** | only README was bumped in V12.5 | `cmd/mohammed/main.go` + `pkg/engine/engine.go` — banner now **V12.6** (verify.sh asserts it) |
+| 3 | Advanced Web / SSTI / Google Dork hit **×2 adaptive cap (24m/16m) for 0 findings** (~75m wasted) | host-count adaptive scaling applied to **compute-bound** phases that don't scale with hosts | `pkg/engine/phase_timeout.go` — `IsComputeBound()` exempts them from adaptive scaling (flat cap) |
+| 4 | `SQLi: confirmed 1 injectable` / `SSRF: 3 kept` but `CONFIRMED_VULNS.txt: 0` (silent contradiction) | phase counter counted **pre-triage** tool hits; TriageAndScore silently discarded/demoted them | `pkg/phases/phases_vuln.go` — count keyed on the **post-triage** verdict; rejected hits logged to `sqli_rejected_by_triage.txt` with the reason; SSRF reports reportable-vs-demoted split |
+| 5 | DOM XSS: **CDP dropped 3× in a row — giving up** (whole client-side phase lost) | headless Chromium crashed on Kali (tiny /dev/shm, GPU/Vulkan probes, zygote death) | `pkg/browser/cdp.go` — hardened "Chromium-in-Docker" launcher flag set + system-Chromium autodetect (`detectChromiumBinary`, `$MOHAMMED_CHROME_BIN`) |
+| 6 | `waybackurls +118807 URLs` → **188,039 URL bloat** starving crawl/param/nuclei | no de-duplication of `?id=1/2/3…` value-permutations or numeric path IDs | `pkg/phases/phases.go` — `collapseURLPatterns()` keeps ONE replayable example per endpoint signature + hard 25k cap |
+| 7 | `alterx / uncover / notify / nomore403` **go install failed** (not truly 45/45) | Go-toolchain skew + strict module/proxy defaults; the real error was hidden by `2>/dev/null` | `install_path.sh` — `install_go_tool` now shows the real error and retries with `GOTOOLCHAIN=auto`, `-mod=mod`, `GOSUMDB=off`, then `GOPROXY=direct` |
+
+> **Honest status:** on the Kali run there were **0 confirmed vulnerabilities**
+> across all 7 targets, and 6/7 were hollow due to the DNS block above. V12.6
+> makes the tool *tell you that truthfully* and recover the DNS path instead of
+> silently producing an empty scan.
+
+> Status after V12.6: `go build/vet/test ./...` all pass (18 packages + new
+> V12.6 regression tests); banner = **V12.6 RUTHLESS**.
 
 ---
 

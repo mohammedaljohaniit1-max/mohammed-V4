@@ -387,7 +387,7 @@ rm -rf "$TMP_BUILD"
 
 echo ""
 log "════════════════════════════════════════════════════════"
-log "  MOHAMMED V12.3 RUTHLESS — Setup complete."
+log "  MOHAMMED V12.6 RUTHLESS — Setup complete."
 log "  1) Reload PATH:   source $SHELL_RC"
 log "  2) Verify tools:  ./mohammed doctor   (or bash verify.sh)"
 log "  3) AI cascade:    ollama serve &"

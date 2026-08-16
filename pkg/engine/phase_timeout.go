@@ -93,6 +93,25 @@ func PhaseTimeout(name string) time.Duration {
 	return DefaultPhaseTimeout
 }
 
+// computeBoundPhases are phases whose runtime is dominated by IN-PROCESS
+// compute / a small fixed set of origins — NOT by iterating the live-host list.
+// EMPIRICAL EVIDENCE (Kali iciparisxl run): "Advanced Web", "SSTI" and "Google
+// Dorking" each hit their adaptive ×2 cap (12m→24m, 8m→16m) and STILL produced
+// ZERO confirmed findings. Their work does not scale with host count, so the
+// host-count adaptive multiplier just burns wall-clock (≈75m wasted on one
+// target). These phases keep their flat base cap regardless of scope size.
+var computeBoundPhases = map[string]bool{
+	"Advanced Web (Smuggling/Cache/SSTI)": true,
+	"SSTI (Arithmetic Oracle)":            true,
+	"Google Dorking":                      true,
+}
+
+// IsComputeBound reports whether a phase should be EXEMPT from host-count
+// adaptive scaling (it uses its flat base cap instead).
+func IsComputeBound(name string) bool {
+	return computeBoundPhases[name]
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // V12.3 RUTHLESS · FAILURE #2 — SCALE-ADAPTIVE TIMEOUTS
 // ---------------------------------------------------------------------------
