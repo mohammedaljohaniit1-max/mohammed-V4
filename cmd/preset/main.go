@@ -44,7 +44,8 @@ func run(args []string, out, errOut io.Writer) error {
 	fs.SetOutput(out)
 	var (
 		file    = fs.String("file", "", "path to a scope JSON file (required)")
-		mode    = fs.String("mode", "full", "scan mode: full | passive")
+		mode    = fs.String("mode", "", "scan mode: full | passive | stealth-audit | full-assault")
+		profile = fs.String("profile", "", "scan profile (alias for mode): stealth-audit | full-assault | full | passive")
 		outDir  = fs.String("outdir", "recon/scopes", "where to write the generated scope.txt")
 		binPath = fs.String("bin", "./bin/mohammed", "path to the mohammed binary (for -run and the printed command)")
 		doRun   = fs.Bool("run", false, "actually execute the mohammed scan (default: just print the command)")
@@ -53,7 +54,7 @@ func run(args []string, out, errOut io.Writer) error {
 		return err
 	}
 	if strings.TrimSpace(*file) == "" {
-		fmt.Fprintln(out, "usage: preset -file scope/<program>.json [-mode full|passive] [-run]")
+		fmt.Fprintln(out, "usage: preset -file scope/<program>.json [-mode full|passive|stealth-audit|full-assault] [-run]")
 		return fmt.Errorf("-file is required")
 	}
 
@@ -62,14 +63,28 @@ func run(args []string, out, errOut io.Writer) error {
 		return err
 	}
 
+	selectedMode := strings.ToLower(strings.TrimSpace(*mode))
+	if selectedMode == "" {
+		selectedMode = strings.ToLower(strings.TrimSpace(*profile))
+	}
+	if selectedMode == "" {
+		selectedMode = "full"
+	}
+
 	var plan scope.EnginePlan
-	switch strings.ToLower(*mode) {
+	switch selectedMode {
 	case "passive":
 		plan = sf.PassivePlan()
-	case "full", "":
+	case "full":
 		plan = sf.FullPlan()
+	case "stealth-audit", "stealth", "audit":
+		plan = sf.StealthAuditPlan()
+		selectedMode = "stealth-audit"
+	case "full-assault", "assault":
+		plan = sf.FullAssaultPlan()
+		selectedMode = "full-assault"
 	default:
-		return fmt.Errorf("unknown -mode %q (use full|passive)", *mode)
+		return fmt.Errorf("unknown mode/profile %q (use stealth-audit | full-assault | full | passive)", selectedMode)
 	}
 
 	// Write the mohammed scope.txt for this program.
@@ -83,7 +98,7 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 
 	// Build the mohammed argument vector.
-	outPath := filepath.Join("recon", "out-engine", slug+"-"+strings.ToLower(*mode))
+	outPath := filepath.Join("recon", "out-engine", slug+"-"+selectedMode)
 	margs := []string{
 		"scan",
 		"-s", scopeTxt,
@@ -106,7 +121,7 @@ func run(args []string, out, errOut io.Writer) error {
 	if sf.SensitiveGov {
 		fmt.Fprintf(out, "  sensitive   : YES (gov/limited infra)\n")
 	}
-	fmt.Fprintf(out, "  mode        : %s\n", strings.ToUpper(*mode))
+	fmt.Fprintf(out, "  mode        : %s\n", strings.ToUpper(selectedMode))
 	fmt.Fprintf(out, "  plan        : profile=%s rate=%d/min threads=%d waf-bypass=%v passive-only=%v\n",
 		plan.Profile, plan.RatePerMin, plan.Threads, plan.WAFBypass, plan.PassiveOnly)
 	fmt.Fprintf(out, "  rationale   : %s\n", plan.Rationale)
@@ -114,7 +129,7 @@ func run(args []string, out, errOut io.Writer) error {
 		fmt.Fprintf(out, "  REQUIRED UA : %s  (set this in config.yaml / engine User-Agent)\n", plan.UserAgent)
 	}
 	fmt.Fprintf(out, "  scope file  : %s (%d line(s))\n", scopeTxt, len(sf.ScopeHosts()))
-	if strings.ToLower(*mode) == "full" && !plan.PassiveOnly && sf.Automation != scope.AutoWildcardBounty && sf.Automation != scope.AutoRateLimited {
+	if strings.ToLower(selectedMode) == "full" && !plan.PassiveOnly && sf.Automation != scope.AutoWildcardBounty && sf.Automation != scope.AutoRateLimited {
 		fmt.Fprintf(out, "  note        : aggressive vuln-scan phases are OFF for this policy; recon+probe only.\n")
 	}
 	fmt.Fprintln(out)

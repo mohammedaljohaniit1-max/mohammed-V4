@@ -1,0 +1,40 @@
+technology: saudi_gov_safe
+match_language: saudi_gov_safe
+description: >
+  Attack playbook for Saudi Government & Enterprise targets (BugBounty.sa).
+  Surgically probes exposed credentials, git repositories, diagnostic endpoints,
+  and dangerous backups with strict rate-limiting and soft-404 baseline diffing.
+common_vulnerabilities:
+  - name: Exposed Environment & Secret Configuration
+    note: /.env and /.env.production containing APP_KEY or credentials.
+  - name: Exposed Git Version Control Metadata
+    note: /.git/config and /.git/HEAD revealing repository structure.
+  - name: Spring Boot Actuator Exposure
+    note: /actuator/health and /actuator/env diagnostic endpoints.
+  - name: Compressed Archive / Database Backup
+    note: Compressed database or webroot dumps exposed to unauthenticated users.
+  - name: Dangling CNAME Takeover
+    note: Subdomains pointing to decommissioned external service providers.
+high_value_surfaces:
+  - /.env
+  - /.env.production
+  - /.git/config
+  - /.git/HEAD
+  - /actuator/health
+  - /actuator/env
+  - /backup.zip
+  - /dump.sql.gz
+detect_headers:
+  - Server
+  - X-Powered-By
+detect_cookies:
+  - JSESSIONID
+  - PHPSESSID
+custom_checks:
+  - env_secret_exposed
+  - git_metadata_exposed
+  - actuator_diagnostic_exposed
+  - soft_404_baseline_calibration
+priority_note: >
+  Surgical probes only. Enforce max 2 req/sec and soft-404 baseline validation
+  before reporting any finding.

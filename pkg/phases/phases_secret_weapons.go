@@ -220,13 +220,16 @@ func (p *SmartFuzzPhase) Execute(ctx context.Context, s *engine.State) error {
 
 	classes := []exploit.FuzzClass{exploit.FuzzXSS, exploit.FuzzSQLI, exploit.FuzzSSRF}
 	tested := 0
-	for _, u := range budget(paramURLs(a.urls), sw.SmartFuzzBudget) {
+	for _, u := range budget(sanitizeFuzzURLs(paramURLs(a.urls)), sw.SmartFuzzBudget) {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
 		}
 		for _, key := range queryKeys(u) {
+				if filter.ShouldSkipFuzzParam(key) {
+					continue
+				}
 			for _, class := range classes {
 				if hit := fz.FuzzParam(ctx, u, key, class); hit != nil {
 					a.storeCandidate(ctx, s, validation.Candidate{
@@ -550,4 +553,16 @@ func budgetStrings(ss []string, max int) []string {
 		return ss
 	}
 	return ss[:max]
+}
+
+
+// sanitizeFuzzURLs drops URLs that only carry marketing/pagination/CMS noise
+func sanitizeFuzzURLs(rawURLs []string) []string {
+	var clean []string
+	for _, u := range rawURLs {
+		if !filter.ShouldSkipFuzzURL(u) {
+			clean = append(clean, u)
+		}
+	}
+	return clean
 }

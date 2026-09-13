@@ -1533,6 +1533,7 @@ func (p *DNSResolvePhase) Execute(ctx context.Context, s *engine.State) error {
 	}
 
 	s.LiveHosts = append(s.LiveHosts, hosts...)
+	s.LiveHosts = filter.PrioritizeLiveTargets(s.LiveHosts)
 	s.Printf("│  dnsx: %d live hosts resolved (from %d input)\n", len(s.LiveHosts), inputN)
 
 	// Persist a clean, deduplicated live host list for downstream phases.

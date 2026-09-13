@@ -82,6 +82,57 @@ func TestFullPlan_SensitiveGovIsPassive_EvenIfRateLimited(t *testing.T) {
 	}
 }
 
+func TestStealthAuditPlan(t *testing.T) {
+	sf := &ScopeFile{
+		Program: "SaudiGovSafe", InScope: []string{"*.saudi.gov.sa"},
+		Automation: AutoRateLimited, MaxRPS: 5, RequiredUA: "SurgicalAudit/1.0",
+	}
+	p := sf.StealthAuditPlan()
+	if p.Profile != "stealth-audit" {
+		t.Errorf("expected profile stealth-audit, got %s", p.Profile)
+	}
+	if p.RatePerMin != 120 {
+		t.Errorf("expected RatePerMin 120 (<=2 req/s), got %d", p.RatePerMin)
+	}
+	if p.Threads != 2 {
+		t.Errorf("expected Threads 2, got %d", p.Threads)
+	}
+	if p.UserAgent != "SurgicalAudit/1.0" {
+		t.Errorf("expected UA match, got %s", p.UserAgent)
+	}
+}
+
+func TestFullAssaultPlan(t *testing.T) {
+	sf := &ScopeFile{
+		Program: "WildTarget", InScope: []string{"*.target.com"},
+		Automation: AutoWildcardBounty, MaxRPS: 20, RequiredUA: "Assault/1.0",
+	}
+	p := sf.FullAssaultPlan()
+	if p.Profile != "full-assault" {
+		t.Errorf("expected profile full-assault, got %s", p.Profile)
+	}
+	if p.RatePerMin != 600 {
+		t.Errorf("expected RatePerMin 600 (<=10 req/s), got %d", p.RatePerMin)
+	}
+	if p.Threads != 10 {
+		t.Errorf("expected Threads 10, got %d", p.Threads)
+	}
+	if !p.WAFBypass {
+		t.Error("expected WAFBypass to be true")
+	}
+}
+
+func TestFullAssaultPlan_DowngradeSensitive(t *testing.T) {
+	sf := &ScopeFile{
+		Program: "SensitiveGovTarget", InScope: []string{"*.gov.sa"},
+		Automation: AutoRateLimited, SensitiveGov: true,
+	}
+	p := sf.FullAssaultPlan()
+	if p.Profile != "stealth-audit" {
+		t.Errorf("expected downgrade to stealth-audit, got %s", p.Profile)
+	}
+}
+
 func TestFullPlan_ReportsRejectedIsSmall(t *testing.T) {
 	sf := &ScopeFile{Program: "flag", InScope: []string{"*.flagyard.com"}, Automation: AutoReportsRejected}
 	_ = sf.Validate()

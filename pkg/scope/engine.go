@@ -18,7 +18,7 @@ import (
 
 // EnginePlan is the computed driving plan for one program.
 type EnginePlan struct {
-	// Profile is the mohammed --profile value: "passive" | "small" | "large".
+	// Profile is the mohammed --profile value: "passive" | "small" | "large" | "stealth-audit" | "full-assault".
 	Profile string
 	// RatePerMin is the mohammed --rate value (requests/MINUTE). Derived from
 	// the program's MaxRPS (requests/second) where one is published; otherwise a
@@ -36,6 +36,41 @@ type EnginePlan struct {
 	PassiveOnly bool
 	// Rationale is a human-readable one-liner explaining the choice.
 	Rationale string
+}
+
+// StealthAuditPlan computes the plan for a STEALTH AUDIT:
+// Passive OSINT + Safe surgical checks (Rate <= 2 req/s).
+func (sf *ScopeFile) StealthAuditPlan() EnginePlan {
+	return EnginePlan{
+		Profile:     "stealth-audit",
+		RatePerMin:  120, // 2 req/s max
+		Threads:     2,   // Concurrency <= 2
+		WAFBypass:   false,
+		UserAgent:   sf.RequiredUA,
+		PassiveOnly: false,
+		Rationale:   "stealth-audit profile — Passive OSINT + Safe surgical checks with rate <= 2 req/s and concurrency <= 2",
+	}
+}
+
+// FullAssaultPlan computes the plan for a FULL ASSAULT:
+// Top-100 port scan + Curated CVE/Exposure templates + Parameter fuzzing (Rate <= 10 req/s with dynamic backoff).
+func (sf *ScopeFile) FullAssaultPlan() EnginePlan {
+	if sf.SensitiveGov || sf.Automation == AutoForbidden {
+		return sf.StealthAuditPlan()
+	}
+	rpm := 600 // 10 req/s
+	if sf.MaxRPS > 0 && sf.MaxRPS < 10 {
+		rpm = rpsToRPM(sf.MaxRPS)
+	}
+	return EnginePlan{
+		Profile:     "full-assault",
+		RatePerMin:  rpm,
+		Threads:     10,
+		WAFBypass:   true,
+		UserAgent:   sf.RequiredUA,
+		PassiveOnly: false,
+		Rationale:   "full-assault profile — Top-100 port scan + Curated CVE/Exposure templates + Parameter fuzzing (rate <= 10 req/s)",
+	}
 }
 
 // FullPlan computes the plan for a FULL (maximum-intensity legal) scan.

@@ -85,3 +85,37 @@ func TestPreset_PassiveMode(t *testing.T) {
 		t.Errorf("passive mode must use --profile passive:\n%s", out.String())
 	}
 }
+
+func TestPreset_StealthAuditProfile(t *testing.T) {
+	sf := writeScope(t, `{
+		"program":"SaudiGovAudit","automation":"rate_limited","max_rps":5,
+		"in_scope":["*.target.gov.sa"]
+	}`)
+	var out, errOut bytes.Buffer
+	if err := run([]string{"-file", sf, "-profile", "stealth-audit", "-outdir", t.TempDir()}, &out, &errOut); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	s := out.String()
+	for _, want := range []string{"--profile stealth-audit", "--rate 120", "--threads 2"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("stealth-audit missing %q in output:\n%s", want, s)
+		}
+	}
+}
+
+func TestPreset_FullAssaultProfile(t *testing.T) {
+	sf := writeScope(t, `{
+		"program":"WildcardAssault","automation":"wildcard_bounty","max_rps":20,
+		"in_scope":["*.target.com"]
+	}`)
+	var out, errOut bytes.Buffer
+	if err := run([]string{"-file", sf, "-profile", "full-assault", "-outdir", t.TempDir()}, &out, &errOut); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	s := out.String()
+	for _, want := range []string{"--profile full-assault", "--rate 600", "--threads 10", "--waf-bypass"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("full-assault missing %q in output:\n%s", want, s)
+		}
+	}
+}

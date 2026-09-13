@@ -332,32 +332,35 @@ func runScan(args []string) {
 
 	orch := engine.NewOrchestrator(state)
 
-	allPhases := []engine.Phase{
-		&phases.ScopeValidationPhase{},    // 01
-		&phases.OSINTPhase{},              // 02
-		&phases.OSINTv2Phase{},            // 02b: V7 — 50+ passive OSINT sources
-		&phases.SubdomainPassivePhase{},   // 03
-		&phases.SubdomainActivePhase{},    // 04
-		&phases.DNSResolvePhase{},         // 05
-		&phases.TakeoverPhase{},           // 06
-		&phases.HTTPProbePhase{},          // 07
-		// V11.0 FINAL SOVEREIGN — Phase 0 Target Classifier (FLAW #5). Runs
-		// right after HTTP probing (so live origins exist) to fingerprint each
-		// target as WebApp/REST-API/SPA/Backend and publish a target-adaptive
-		// plan the CDP phases consult (REST/Backend skip CDP; SPA prioritizes).
-		&phases.PhaseClassifier{}, // 0: Target Classifier
-		&phases.TLSAnalysisPhase{},        // 08
-		&phases.DeepReconPhase{},          // 08b: zero-login deep external recon
-		&phases.PortScanPhase{},           // 09
-		&phases.WaybackPhase{},            // 10
-		&phases.CrawlPhase{},              // 11
-		&phases.JSAnalysisPhase{},         // 12
-		&phases.ParamDiscoveryPhase{},     // 13
-		&phases.CORSPhase{},               // 14
-		&phases.CloudReconPhase{},         // 15
-		&phases.FuzzingPhase{},            // 16
-		&phases.VulnScanPhase{},           // 17
-		&phases.XSSPhase{},                // 18
+		allPhases := []engine.Phase{
+			&phases.ScopeValidationPhase{},    // 01
+			&phases.OSINTPhase{},              // 02
+			&phases.OSINTv2Phase{},            // 02b: V7 — 50+ passive OSINT sources
+			&phases.SubdomainPassivePhase{},   // 03
+			&phases.SubdomainActivePhase{},    // 04
+			&phases.DNSResolvePhase{},         // 05
+			&phases.TakeoverPhase{},           // 06
+			&phases.HTTPProbePhase{},          // 07
+			// V11.0 FINAL SOVEREIGN — Phase 0 Target Classifier (FLAW #5). Runs
+			// right after HTTP probing (so live origins exist) to fingerprint each
+			// target as WebApp/REST-API/SPA/Backend and publish a target-adaptive
+			// plan the CDP phases consult (REST/Backend skip CDP; SPA prioritizes).
+			&phases.PhaseClassifier{}, // 0: Target Classifier
+			&phases.TLSAnalysisPhase{},        // 08
+			&phases.DeepReconPhase{},          // 08b: zero-login deep external recon
+			&phases.PortScanPhase{},           // 09
+			&phases.LightPortScanPhase{},      // 09b: Lightweight Top-100 Web/Admin Port Scan (Coffinxp)
+			&phases.WaybackPhase{},            // 10
+			&phases.CrawlPhase{},              // 11
+			&phases.JSAnalysisPhase{},         // 12
+			&phases.ParamDiscoveryPhase{},     // 13
+			&phases.CORSPhase{},               // 14
+			&phases.CloudReconPhase{},         // 15
+			&phases.FuzzingPhase{},            // 16
+			&phases.VulnScanPhase{},           // 17
+			&phases.SurgicalProbesPhase{},     // 17b: Pure Go Native Surgical Probes (.env, .git, Actuator, Swagger)
+			&phases.CuratedTemplatesPhase{},   // 17c: Curated Surgical Templates (<=30 High-Impact CVEs/Exposures)
+			&phases.XSSPhase{},                // 18
 		&phases.SQLiPhase{},               // 19
 		&phases.SSRFPhase{},               // 20
 		&phases.OpenRedirectPhase{},       // 21
@@ -474,6 +477,58 @@ func runScan(args []string) {
 		"Final Report Generation":  true,
 	}
 
+	// Profile "stealth-audit": Passive OSINT + Safe surgical checks (Rate <= 2 req/s)
+	stealthAuditPhases := map[string]bool{
+		"Scope Validation":                   true,
+		"OSINT Intelligence Gathering":       true,
+		"OSINT v2 (50+ Sources)":             true,
+		"Passive Subdomain Enumeration":      true,
+		"DNS Resolution & Enrichment":        true,
+		"Subdomain Takeover Detection":       true,
+		"HTTP Probing & Tech Fingerprinting": true,
+		"Target Classifier":                  true,
+		"TLS/SSL Analysis":                   true,
+		"Deep External Recon":                true,
+		"Wayback & Historical URL Mining":    true,
+		"JS Analysis & Secret Extraction":    true,
+		"Native Pure-Go Surgical Probes":     true,
+		"Google Dorking":                     true,
+		"Credential Intelligence":            true,
+		"Smart Correlation Engine":           true,
+		"Final Report Generation":            true,
+	}
+
+	// Profile "full-assault": Top-100 port scan + Curated CVE/Exposure templates + Parameter fuzzing (Rate <= 10 req/s with dynamic backoff)
+	fullAssaultPhases := map[string]bool{
+		"Scope Validation":                    true,
+		"OSINT Intelligence Gathering":        true,
+		"OSINT v2 (50+ Sources)":              true,
+		"Passive Subdomain Enumeration":       true,
+		"Subdomain Active Enumeration":        true,
+		"DNS Resolution & Enrichment":         true,
+		"Subdomain Takeover Detection":        true,
+		"HTTP Probing & Tech Fingerprinting":  true,
+		"Target Classifier":                   true,
+		"TLS/SSL Analysis":                    true,
+		"Deep External Recon":                 true,
+		"Lightweight Top-100 Port Scan":       true,
+		"Wayback & Historical URL Mining":     true,
+		"Web Crawling & Spidering":            true,
+		"JS Analysis & Secret Extraction":     true,
+		"Parameter Discovery":                 true,
+		"CORS Misconfiguration":               true,
+		"Directory & Content Fuzzing":         true,
+		"Native Pure-Go Surgical Probes":      true,
+		"Curated Surgical Templates":          true,
+		"XSS Vulnerability Scanner":           true,
+		"SQL Injection Scanner":               true,
+		"SSRF Detection":                      true,
+		"Git & Sensitive File Exposure":       true,
+		"Smart Correlation Engine":            true,
+		"WAF-Adaptive Smart Fuzz":             true,
+		"Final Report Generation":             true,
+	}
+
 	for i, p := range allPhases {
 		if i < *startAt {
 			continue
@@ -485,6 +540,10 @@ func runScan(args []string) {
 			include = smallPhases[p.Name()]
 		case "passive":
 			include = passivePhases[p.Name()]
+		case "stealth-audit", "stealth", "audit":
+			include = stealthAuditPhases[p.Name()]
+		case "full-assault", "assault":
+			include = fullAssaultPhases[p.Name()]
 		case "medium", "large", "full":
 			include = true
 		}
