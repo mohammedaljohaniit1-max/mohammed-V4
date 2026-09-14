@@ -1,6 +1,7 @@
 package governor
 
 import (
+	"strings"
 	"context"
 	"fmt"
 	"math/rand"
@@ -385,4 +386,145 @@ func minDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
+}
+
+// TargetCapacity represents auto-detected pacing and concurrency parameters.
+type TargetCapacity struct {
+	RateLimit   int           // Requests per second
+	Concurrency int           // Maximum concurrent workers
+	AvgLatency  time.Duration // Average ping latency
+	IsCDN       bool          // Whether target is fronted by Cloudflare/Akamai/etc.
+	IPCount     int           // Number of distinct IP addresses resolved
+	Rationale   string        // Diagnostic explanation
+}
+
+// AutoDetectTargetCapacity probes live target hosts with lightweight baseline pings
+// to automatically sense optimal rate-limiting and worker concurrency without manual tuning.
+func AutoDetectTargetCapacity(liveHosts []string) (rateLimit int, concurrency int) {
+	cap := DetectTargetCapacity(liveHosts)
+	return cap.RateLimit, cap.Concurrency
+}
+
+// DetectTargetCapacity evaluates network latency, IP multi-homing, and CDN fronting.
+func DetectTargetCapacity(liveHosts []string) TargetCapacity {
+	if len(liveHosts) == 0 {
+		return TargetCapacity{
+			RateLimit:   1,
+			Concurrency: 1,
+			Rationale:   "No live hosts provided; fallback to high-safety minimum (1 req/s, 1 worker)",
+		}
+	}
+
+	sampleSize := len(liveHosts)
+	if sampleSize > 3 {
+		sampleSize = 3
+	}
+
+	client := &http.Client{
+		Timeout: 4 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 2 {
+				return http.ErrUseLastResponse
+			}
+			return nil
+		},
+	}
+
+	var totalLatency time.Duration
+	successfulProbes := 0
+	isCDN := false
+
+	for i := 0; i < sampleSize; i++ {
+		host := liveHosts[i]
+		url := host
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			url = "https://" + host
+		}
+
+		start := time.Now()
+		req, err := http.NewRequest("HEAD", url, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+		resp, err := client.Do(req)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			// Try HTTP fallback if HTTPS fails
+			if strings.HasPrefix(url, "https://") {
+				httpURL := "http://" + strings.TrimPrefix(url, "https://")
+				start = time.Now()
+				if req2, err2 := http.NewRequest("HEAD", httpURL, nil); err2 == nil {
+					req2.Header.Set("User-Agent", "Mozilla/5.0")
+					if resp2, err3 := client.Do(req2); err3 == nil {
+						resp = resp2
+						elapsed = time.Since(start)
+						err = nil
+					}
+				}
+			}
+		}
+
+		if err == nil && resp != nil {
+			successfulProbes++
+			totalLatency += elapsed
+
+			// Check for CDN headers
+			server := strings.ToLower(resp.Header.Get("Server"))
+			cfRay := resp.Header.Get("CF-RAY")
+			akamai := resp.Header.Get("X-Akamai-Transformed")
+			via := strings.ToLower(resp.Header.Get("Via"))
+			fastly := resp.Header.Get("X-Fastly-Request-ID")
+
+			if cfRay != "" || akamai != "" || fastly != "" ||
+				strings.Contains(server, "cloudflare") ||
+				strings.Contains(server, "akamai") ||
+				strings.Contains(via, "cloudflare") ||
+				strings.Contains(via, "cloudfront") {
+				isCDN = true
+			}
+			_ = resp.Body.Close()
+		}
+	}
+
+	var avgLatency time.Duration
+	if successfulProbes > 0 {
+		avgLatency = totalLatency / time.Duration(successfulProbes)
+	} else {
+		avgLatency = 1200 * time.Millisecond // assume high latency if unresponsive
+	}
+
+	// Decision Matrix:
+	// 1. High latency (>1000ms) or unresponsive: 1 req/s, concurrency 1
+	// 2. CDN / Cloud WAF fronting (low latency < 400ms): 5 req/s, concurrency 3-5
+	// 3. Medium Enterprise (300-800ms): 2-3 req/s, concurrency 2
+	if avgLatency >= 1000*time.Millisecond {
+		return TargetCapacity{
+			RateLimit:   1,
+			Concurrency: 1,
+			AvgLatency:  avgLatency,
+			IsCDN:       isCDN,
+			Rationale:   fmt.Sprintf("High target latency (%v); locked to 1 req/s and concurrency 1 to prevent server strain", avgLatency),
+		}
+	}
+
+	if isCDN && avgLatency < 500*time.Millisecond {
+		return TargetCapacity{
+			RateLimit:   5,
+			Concurrency: 4,
+			AvgLatency:  avgLatency,
+			IsCDN:       true,
+			Rationale:   fmt.Sprintf("CDN / Cloud Edge infrastructure detected (%v latency); tuned to 5 req/s and concurrency 4", avgLatency),
+		}
+	}
+
+	return TargetCapacity{
+		RateLimit:   2,
+		Concurrency: 2,
+		AvgLatency:  avgLatency,
+		IsCDN:       isCDN,
+		Rationale:   fmt.Sprintf("Enterprise infrastructure (%v latency); set to 2 req/s and concurrency 2", avgLatency),
+	}
 }

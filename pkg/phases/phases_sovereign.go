@@ -126,7 +126,9 @@ func (p *AutonomousBootstrapPhase) Execute(ctx context.Context, s *engine.State)
 			// Record a low-noise Info finding documenting autonomous session
 			// acquisition (evidence for the report; not a vulnerability itself).
 			s.AddFinding(map[string]interface{}{
-				"type":     "Autonomous Session Bootstrap",
+				"title":    "Autonomous Session Bootstrap",
+					"tool":     "autonomous_bootstrap",
+					"type":     "Autonomous Session Bootstrap",
 				"severity": "Info",
 				"url":      res.SignupURL,
 				"target":   filter.HostOf(res.SignupURL),

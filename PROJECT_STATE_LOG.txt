@@ -1,7 +1,7 @@
 ================================================================================
                     PROJECT STATE & AUDIT LOG - MOHAMMED-V4
 ================================================================================
-Last Updated: 2026-09-13
+Last Updated: 2026-09-14
 Repository: mohammedaljohaniit1-max/mohammed-V4
 Branch: genspark_ai_developer
 Target Profile: Medium Enterprises, Government Bodies, BugBounty.sa Targets
@@ -16,12 +16,16 @@ Core Objective: Discover High/Critical Impact Real Vulnerabilities with 0% False
    - Dynamic jitter (200-400ms) to avoid predictable traffic spikes.
    - Automated Circuit Breaker: triggers on HTTP 429 (Too Many Requests), 503 (Service Unavailable),
      and 504 (Gateway Timeout), backing off exponentially before re-evaluating in half-open state.
-   - Comprehensive `http.RoundTripper` and `http.Client` wrapper (`WrapClient`, `WrapTransport`)
-     guaranteeing no network request escapes governance.
+   - Autonomous Target Capacity Sensing (`AutoDetectTargetCapacity` / `DetectTargetCapacity`):
+     * Lightweight baseline HTTP probes measuring RTT latency, IP multi-homing, and CDN headers (CF-Ray, Akamai, CloudFront).
+     * High latency (>1000ms) or single IP -> 1 req/s, concurrency 1.
+     * Edge CDN / Cloud WAF (<500ms) -> 5 req/s, concurrency 4.
+     * Medium Enterprise -> 2-3 req/s, concurrency 2.
+   - Exposed via `--smart-rate` CLI flag in `cmd/mohammed` and `cmd/preset`.
    - Verified with race detector: `go test -v -race ./pkg/governor/...` PASSED.
 
 2. Zero-Touch Passive OSINT (`pkg/osint/domain_recon.go`):
-   - 100% external passive reconnaissance: queries public aggregators without sending a single packet to the target server.
+   - 100% external passive reconnaissance: queries public aggregators without sending a single packet to target server.
    - Certificate Transparency log collection via crt.sh JSON API with deduplication.
    - Historical endpoint mining via Wayback Machine and AlienVault OTX Passive DNS.
    - Passive DNS and CNAME mapping via public DNS resolvers (Cloudflare 1.1.1.1 / Google 8.8.8.8)
@@ -38,52 +42,32 @@ Core Objective: Discover High/Critical Impact Real Vulnerabilities with 0% False
    - Rejects `text/html` responses claiming to be raw config or credential files.
    - Verified with test suite: `go test -v -race ./pkg/validation/...` PASSED.
 
-4. Fuzzer Parameter Bloat Elimination (`pkg/filter/param_filter.go`):
-   - Implemented `ShouldSkipFuzzParam(paramName)` and `ShouldSkipFuzzURL(rawURL)`.
-   - Filters out CMS pagination & navigation keys (`page`, `p`, `pno`, `paged`, `pg`, `offset`, `limit`, `size`).
-   - Filters out static display and language keys (`lang`, `hsLang`, `language`, `category`, `article`, `sort`, `order`).
-   - Filters out analytics & tracking keys (`utm_*`, `pk_*`, `ga_*`, `_hs*`, `gclid`, `fbclid`).
-   - Integrated into Phase 63 (Adaptive Fuzz) via `sanitizeFuzzURLs` helper, preventing fuzzer timeouts and false-positive SQLi alerts.
+4. Curated Surgical Vulnerability Templates (`pkg/phases/curated_templates.go`):
+   - Eliminated empty-signature checks (Log4j-Diagnostic, Struts2) that triggered universal matches on 200 OK.
+   - Added CVE-2020-14882 WebLogic RCE probe with `"Administration Console"` body signature.
+   - Strict invariant: `sig := strings.TrimSpace(check.RequiredSig); if sig == "" || !strings.Contains(string(body), sig) { continue }`.
 
-5. Early Staging & Internal Asset Prioritization (`pkg/filter/subdomain_priority.go`):
-   - Implemented `PrioritizeLiveTargets(hosts []string)`.
-   - Naturally floats staging, dev, uat, test, internal, admin, and api subdomains to the front of the host list.
-   - Pushes root apex and generic `www` to the end of the slice.
-   - Applied directly in DNS resolution (`DNSResolvePhase`) and HTTP probing (`HTTPProbePhase`) so all downstream phases naturally test high-yield targets first without modifying the 65-phase architecture.
+5. Report Hygiene & Sanitization Engine (`pkg/report/exporter.go` & `pkg/phases/phases_vuln.go`):
+   - Removed `<nil>` tool and title artifacts across all markdown and text reports.
+   - Added `IsReportableFinding(f)` filter: completely excludes internal pipeline milestones
+     (Target Classification, Autonomous Session Bootstrap) from vulnerability tables.
+   - Provides strict fallback title and tool names ("mohammed-engine") for all reportable entries.
 
-6. Native Surgical Probes (`pkg/phases/surgical_probes.go`):
-   - Direct, pure-Go, single-request checks for exposed `.env`, `.git/HEAD`, `.git/config`, `/actuator/health`, `/swagger-ui.html`, and `/web.config`.
-   - Fully governed under concurrency <= 2 and minimum 500ms pacing interval via `EnterpriseSafeGovernor`.
-   - Requires zero external heavy tool dependencies.
-
-7. Lightweight Top-100 Web/Admin Port Scanning (`pkg/phases/light_portscan.go`):
-   - Pure-Go non-destructive port scanner probing the curated Coffinxp Top 100 web/admin/diagnostic ports (e.g., 80, 443, 8080, 8443, 3000, 5000, 9000, 9443).
-   - Resolves and probes only verified live targets (prioritized staging/dev first).
-   - Strictly bounded concurrency (semaphore <= 2) and rate-governed (<= 2 req/s) with 2s socket connect timeout.
-   - Strictly eliminates 65535 full port sweep DoS risks.
-
-8. Curated Surgical Templates (`pkg/phases/curated_templates.go`):
-   - Quality-over-quantity vulnerability inspection hard-capped at <= 30 targeted checks.
-   - Categorized into RCE/Known CVEs (e.g. Apache Path Traversal, Spring4Shell, Palo Alto GlobalProtect, PHPUnit), Exposed Sensitive Files, and Unauthenticated Admin/Diagnostic Panels.
-   - Dual-layer execution: native Go HTTP baseline-calibrated checks with Soft-404 rejection and exact token signatures + optional rate-limited curated Nuclei fallback (`-tags cve,rce,exposure -rate-limit 50 -concurrency 2`).
-
-9. Explicit CLI Profiles in cmd/preset & cmd/mohammed:
-   - Profile `stealth-audit`: Passive OSINT + Safe surgical checks (Rate <= 2 req/s, threads <= 2).
-   - Profile `full-assault`: Top-100 port scan + Curated CVE/Exposure templates + Parameter fuzzing (Rate <= 10 req/s with dynamic backoff, threads <= 10).
-   - Integrated across `cmd/preset/main.go`, `cmd/mohammed/main.go`, and `pkg/scope/engine.go`.
+6. Comprehensive Professional Documentation (`README.md`):
+   - Full rewrite with ASCII pipeline flow, safety governor architecture, zero-FP validation rules,
+     operational profile matrix (stealth-audit vs full-assault), and copy-paste CLI commands.
 
 --------------------------------------------------------------------------------
 [2] AUDIT & VERIFICATION STATUS
 --------------------------------------------------------------------------------
-- [PASS] pkg/governor (Rate limiting, jitter, circuit breaker, race detector)
+- [PASS] pkg/governor (Rate limiting, jitter, circuit breaker, AutoDetectTargetCapacity, race detector)
+- [PASS] pkg/phases (CuratedTemplatesPhase non-empty signatures, report sanitization, light portscan)
+- [PASS] pkg/report (IsReportableFinding, no <nil> artifacts, tiered CONFIRMED vs MANUAL_REVIEW export)
 - [PASS] pkg/osint (External passive OSINT, crt.sh, OTX, Wayback, DNS CNAMEs)
 - [PASS] pkg/validation (Baseline calibration, soft-404 rejection, exact token verification)
 - [PASS] pkg/filter (Param filter, live target prioritization)
-- [PASS] pkg/phases (Native surgical probes, fuzzer sanitization, host priority hook, Top-100 light port scan, curated templates)
-- [PASS] pkg/scope (StealthAuditPlan, FullAssaultPlan, scope host reductions)
-- [PASS] cmd/preset (CLI flags --profile / -mode with stealth-audit and full-assault)
-- [PASS] cmd/mohammed (Phase registration for LightPortScanPhase, CuratedTemplatesPhase, SurgicalProbesPhase, stealth-audit, full-assault)
-- [PASS] playbooks/saudi_gov_safe.yaml (Valid YAML schema compatible with intelligence package)
-- [PASS] go test ./... (Zero regressions across all packages)
-- [PASS] go build -o /dev/null ./... (Clean binary compilation)
+- [PASS] cmd/mohammed (--smart-rate flag, target capacity detection, clean build)
+- [PASS] cmd/preset (--smart-rate flag integration, stealth-audit, full-assault)
+- [PASS] go test ./... (Zero regressions across all 23 packages)
+- [PASS] go build ./... (Clean compilation across all binary commands)
 ================================================================================

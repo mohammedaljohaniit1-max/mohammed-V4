@@ -1495,9 +1495,27 @@ func (p *ReportPhase) Execute(ctx context.Context, s *engine.State) error {
 			if fmt.Sprintf("%v", f["severity"]) != sev {
 				continue
 			}
-			b.WriteString(fmt.Sprintf("### [%s] %v\n", sev, f["title"]))
+			title := fmt.Sprintf("%v", f["title"])
+			if title == "" || title == "<nil>" || title == "nil" {
+				title = fmt.Sprintf("%v", f["type"])
+			}
+			if title == "" || title == "<nil>" || title == "nil" {
+				continue
+			}
+			lowerTitle := strings.ToLower(title)
+			if strings.Contains(lowerTitle, "target classification") ||
+				strings.Contains(lowerTitle, "autonomous session bootstrap") ||
+				strings.Contains(lowerTitle, "pipeline event") ||
+				strings.Contains(lowerTitle, "internal status") {
+				continue
+			}
+			tool := fmt.Sprintf("%v", f["tool"])
+			if tool == "" || tool == "<nil>" || tool == "nil" {
+				tool = "mohammed-engine"
+			}
+			b.WriteString(fmt.Sprintf("### [%s] %s\n", sev, title))
 			b.WriteString(fmt.Sprintf("- URL: %v\n", f["url"]))
-			b.WriteString(fmt.Sprintf("- Tool: %v\n", f["tool"]))
+			b.WriteString(fmt.Sprintf("- Tool: %s\n", tool))
 			b.WriteString(fmt.Sprintf("- Evidence: %v\n", f["evidence"]))
 			// BUG #8 (audit): surface the real secret value/context in the report.
 			if v, ok := f["secret_value"]; ok && fmt.Sprintf("%v", v) != "" {

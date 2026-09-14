@@ -34,9 +34,8 @@ var CuratedSurgicalChecks = []CuratedTargetCheck{
 	{ID: "CVE-2022-22965", Category: "RCE", Path: "/actuator/env", Severity: "Critical", RequiredSig: "propertySources", Disallowed: "text/html"},
 	{ID: "CVE-2024-3400", Category: "RCE", Path: "/global-protect/login.esp", Severity: "Critical", RequiredSig: "GlobalProtect", Disallowed: ""},
 	{ID: "CVE-2023-38606", Category: "RCE", Path: "/cgi-bin/test.cgi", Severity: "Critical", RequiredSig: "test", Disallowed: "text/html"},
-	{ID: "Log4j-Diagnostic", Category: "RCE", Path: "/api/health", Severity: "Critical", RequiredSig: "", Disallowed: ""},
 	{ID: "PHPUnit-RCE", Category: "RCE", Path: "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php", Severity: "Critical", RequiredSig: "php", Disallowed: "text/html"},
-	{ID: "Struts2-S2-045", Category: "RCE", Path: "/help.action", Severity: "Critical", RequiredSig: "", Disallowed: ""},
+	{ID: "CVE-2020-14882", Category: "RCE", Path: "/console/css/%252e%252e%252fconsole.portal", Severity: "Critical", RequiredSig: "Administration Console", Disallowed: ""},
 
 	// ── 2. Exposed Sensitive Files & Secrets ──────────────────────────────────
 	{ID: "ENV-Root", Category: "Sensitive File", Path: "/.env", Severity: "Critical", RequiredSig: "APP_KEY=", Disallowed: "text/html"},
@@ -180,25 +179,26 @@ func (p *CuratedTemplatesPhase) Execute(ctx context.Context, s *engine.State) er
 				continue
 			}
 
-			// Disallowed Content-Type verification
-			ct := strings.ToLower(resp.Header.Get("Content-Type"))
-			if check.Disallowed != "" && strings.Contains(ct, check.Disallowed) {
-				continue
-			}
+				// Disallowed Content-Type verification
+				ct := strings.ToLower(resp.Header.Get("Content-Type"))
+				if check.Disallowed != "" && strings.Contains(ct, check.Disallowed) {
+					continue
+				}
 
-			// Required signature verification
-			if check.RequiredSig != "" && !strings.Contains(string(body), check.RequiredSig) {
-				continue
-			}
+				// Required signature verification: MUST NOT be empty, and MUST match response body
+				sig := strings.TrimSpace(check.RequiredSig)
+				if sig == "" || !strings.Contains(string(body), sig) {
+					continue
+				}
 
-			cand := validation.Candidate{
-				Type:                   check.Category + ": " + check.ID,
-				URL:                    targetURL,
-				Evidence:               fmt.Sprintf("Status: 200 OK | Signature match: %q", check.RequiredSig),
-				InScope:                true,
-				RequiresExploitability: true,
-				Exploitable:            true,
-			}
+				cand := validation.Candidate{
+					Type:                   check.Category + ": " + check.ID,
+					URL:                    targetURL,
+					Evidence:               fmt.Sprintf("Status: 200 OK | Signature match: %q", sig),
+					InScope:                true,
+					RequiresExploitability: true,
+					Exploitable:            true,
+				}
 
 			if validator.Validate(ctx, cand).Passed {
 				s.AddFinding(map[string]interface{}{

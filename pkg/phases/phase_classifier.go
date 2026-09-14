@@ -171,6 +171,8 @@ done:
 
 	// Record an Info finding so the plan appears in the report trail.
 	s.AddFinding(map[string]interface{}{
+		"title":    "Target Classification (Phase 0)",
+		"tool":     "target_classifier",
 		"type":     "Target Classification (Phase 0)",
 		"severity": "Info",
 		"url":      firstOrigin(origins),

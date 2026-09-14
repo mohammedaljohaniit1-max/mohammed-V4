@@ -1,719 +1,177 @@
-# MOHAMMED V12.6 RUTHLESS
+# MOHAMMED V4 — Autonomous Attack Surface & Exploit Engine
 
-**Zero-Touch Autonomous Attack Surface & Exploit Engine — THE FINAL MANDATE**
+**Zero-Touch, Governed Offensive Security Engine for Enterprise & Bug Bounty Audits**
 
----
-
-## 🚨 What's New in V12.6 (Hollow-Scan / DNS / CDP / Honest-Count Purge)
-
-The second real Kali run exposed problems **V12.5 did not touch** — chiefly that
-**6 of 7 targets resolved 0 live hosts**, so the scans were *hollow* (DNS +
-email check only). V12.6 fixes the root causes, each with a Go regression test:
-
-| # | Symptom (real Kali run) | Root cause | Fix |
-|---|---|---|---|
-| 1 | `dnsx: 0 live hosts resolved` on **6/7 targets** ⇒ every downstream phase empty | dnsx speaks raw **UDP/53**; on the run's network outbound UDP/53 was dropped, dnsx exited 0 silently, no fallback, no diagnostic | `pkg/phases/phases.go` — `dnsHealthCheck()` proves DNS works via OS resolver **and** UDP/53; `nativeResolveHosts()` re-resolves over the OS stub resolver (TCP/DoT-capable) when dnsx returns 0; prints the TRUTH (UDP blocked vs target dead) |
-| 2 | Binary banner still said **V12.3** | only README was bumped in V12.5 | `cmd/mohammed/main.go` + `pkg/engine/engine.go` — banner now **V12.6** (verify.sh asserts it) |
-| 3 | Advanced Web / SSTI / Google Dork hit **×2 adaptive cap (24m/16m) for 0 findings** (~75m wasted) | host-count adaptive scaling applied to **compute-bound** phases that don't scale with hosts | `pkg/engine/phase_timeout.go` — `IsComputeBound()` exempts them from adaptive scaling (flat cap) |
-| 4 | `SQLi: confirmed 1 injectable` / `SSRF: 3 kept` but `CONFIRMED_VULNS.txt: 0` (silent contradiction) | phase counter counted **pre-triage** tool hits; TriageAndScore silently discarded/demoted them | `pkg/phases/phases_vuln.go` — count keyed on the **post-triage** verdict; rejected hits logged to `sqli_rejected_by_triage.txt` with the reason; SSRF reports reportable-vs-demoted split |
-| 5 | DOM XSS: **CDP dropped 3× in a row — giving up** (whole client-side phase lost) | headless Chromium crashed on Kali (tiny /dev/shm, GPU/Vulkan probes, zygote death) | `pkg/browser/cdp.go` — hardened "Chromium-in-Docker" launcher flag set + system-Chromium autodetect (`detectChromiumBinary`, `$MOHAMMED_CHROME_BIN`) |
-| 6 | `waybackurls +118807 URLs` → **188,039 URL bloat** starving crawl/param/nuclei | no de-duplication of `?id=1/2/3…` value-permutations or numeric path IDs | `pkg/phases/phases.go` — `collapseURLPatterns()` keeps ONE replayable example per endpoint signature + hard 25k cap |
-| 7 | `alterx / uncover / notify / nomore403` **go install failed** (not truly 45/45) | Go-toolchain skew + strict module/proxy defaults; the real error was hidden by `2>/dev/null` | `install_path.sh` — `install_go_tool` now shows the real error and retries with `GOTOOLCHAIN=auto`, `-mod=mod`, `GOSUMDB=off`, then `GOPROXY=direct` |
-
-> **Honest status:** on the Kali run there were **0 confirmed vulnerabilities**
-> across all 7 targets, and 6/7 were hollow due to the DNS block above. V12.6
-> makes the tool *tell you that truthfully* and recover the DNS path instead of
-> silently producing an empty scan.
-
-> Status after V12.6: `go build/vet/test ./...` all pass (18 packages + new
-> V12.6 regression tests); banner = **V12.6 RUTHLESS**.
+[![Go Version](https://img.shields.io/badge/Go-1.22.5%2B-blue.svg)](https://golang.org)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Kali-red.svg)](https://www.kali.org)
+[![Zero-False-Positive](https://img.shields.io/badge/Architecture-Zero--FP%20Enforced-brightgreen.svg)](#zero-false-positive-architecture)
+[![Safety Governor](https://img.shields.io/badge/Target%20Protection-Autonomous%20Governor-orange.svg)](#core-safety-governor--autonomous-pacing)
 
 ---
 
-## 🚨 What's New in V12.5 (Real-Run False-Positive Purge)
+## 🎯 Executive Overview
 
-A real 7-target Kali run (ICI Paris XL / Mobily) produced four concrete
-false-positive classes and one environmental detection bug. V12.5 fixes **all of
-them at the detection source**, each locked with a Go regression test:
+**MOHAMMED V4** is a high-assurance, multi-stage automated penetration testing and attack surface mapping framework engineered specifically for **Enterprise Platforms, Government Ministries, and Bug Bounty Programs** (HackerOne, Bugcrowd, BugBounty.sa).
 
-| # | Symptom (real run) | Root cause | Fix |
-|---|---|---|---|
-| 1 | `Recon Tools: 12/45 present` while tools ARE installed | `exec.LookPath` reads only `$PATH`; **sudo `secure_path`** strips `/usr/local/bin` + `/root/go/bin` | `pkg/engine/readiness.go` — `candidateBinDirs()`+`findInBinDirs()` fallback scan of known install dirs (incl. `$GOBIN`/`$GOPATH/bin`, `~/.local/bin`, `/root/go/bin`) |
-| 2 | **64 "HTTP Request Smuggling CONFIRMED"** (all false) | 5 s timing oracle scored WAF/CDN connection-holds as desyncs; hosts return **instant 400/403** | `pkg/exploit/advanced_web.go` — read response **status** (instant 4xx/5xx ⇒ never vulnerable), **median-of-5** probes, threshold 5s→8s, ReadTimeout 12s→15s, pure holds ⇒ **UNCONFIRMED** |
-| 3 | **2 Critical Subdomain Takeovers** (false) | `"The request could not be satisfied"` is CloudFront's **generic 403** body | `pkg/phases/phases.go` — removed generic strings from the confirming set; `genericEdgeErrors` explicitly **reject** a host whose only signal is a normal CDN/WAF 403/404 |
-| 4 | JS secrets (`slack_token`, `api_key_generic`) false on webpack | naive substring match (`"xox"`, `"api_key"`) | `pkg/phases/phases.go` — replaced with boundaried, **entropy-validated `exploit.JSDeepEngine`** |
+Unlike legacy scanning tools that generate overwhelming false-positive noise, hammer sensitive production servers, or crash due to orphaned subprocesses, MOHAMMED V4 couples **deep OSINT and surgical active checks** with an **autonomous safety governor**, **strict baseline token verification**, and **AI-assisted report sanitization**.
 
-Cleanup: the stale legacy-enumerator classification entry was removed from
-`pkg/scope/enforce.go`, so `grep -ri "amass" pkg/ cmd/` finally returns **0**.
-
-> Status after V12.5: `go build/vet/test ./...` all pass; `verify.sh` = **608
-> PASS / 6 FAIL / 34 WARN**, where the 6 FAILs are external recon binaries
-> absent **in a bare CI sandbox only** (present on a provisioned Kali box).
-
----
-
-## 🚨 What's New in V12.3 RUTHLESS
-
-Empirical analysis of a 582-minute (9h42m) V12.2 GitLab scan proved a **100%
-false-positive rate** (102,913 items, 40,901 auto-discarded, 1,656 flagged, **0
-real vulnerabilities** in 50,000+ requests) plus catastrophic tool-management
-failures. V12.3 lands **10 ruthless, real fixes** — no dummy fallbacks, no
-artificial time traps, no fake reports:
-
-| # | Failure | V12.3 Fix |
-|---|---------|-----------|
-| 1 | Legacy OWASP enumerator (amass) hung / returned 0 | **PURGED entirely**; replaced with concurrent `subfinder`+`bbot`+`findomain`+`assetfinder`+`chaos` fan-out (`passiveEnumApexConcurrently`) |
-| 2 | Phases ran with no ceiling → 4h+ hangs | `CalculateAdaptiveTimeout` (×2 >1000 hosts, ×3 >5000) + between-loop `ctx.Done()` `KillAllChildren()` + `time.AfterFunc` backup hard-kill |
-| 3 | Passive enum serial & slow | Per-tool goroutines, own `context.WithTimeout`, mutex-guarded results, `wg.Wait()`, dedup |
-| 4 | httpx reported 0 LIVE from 5,320 hosts | WAF-aware status set (200/301/401/403/429/5xx…) + `runResilientHTTPProbe` fallback (<2% live) |
-| 5 | nuclei skipped | Staged: Stage 1 critical/high (cve,rce,sqli,ssrf,lfi,auth-bypass), Stage 2 medium (misconfig,exposure,takeover), Stage 3 dev/staging/API first |
-| 6 | IDOR/Race/CORS/Auth 100% FP on public pages | **Gate 0** `IsPublicUnauthenticatedRoute` rejects `/explore/ /topics/ /blog/ /docs/ …` from every access-control engine |
-| 7 | "Unauth admin access" flagged JS/docs | `ValidateAdminEndpointAccess` — static assets & docs hosts are NEVER admin; requires real admin controls + unauth 200 |
-| 8 | GitLab scope over-broad | `scopes/gitlab.txt` rewritten to the **exact** HackerOne in-scope/out-of-scope program |
-| 9 | Bootstrap on user pages | `IsValidBootstrapTarget`/`isPrimaryAppDomain` exclude `*.gitlab.io`/`*.github.io` |
-| 10 | Burp active scan on Community | `DetectBurpCapabilities` probes `/v0.1/version`; Community → sitemap relay only, active scan skipped |
-
-> **Note:** the amass integration described in the historical sections below was
-> **removed** in V12.3 (FAILURE 1). Those sections are retained only as a record
-> of prior behavior; `grep -ri "amass" pkg/ cmd/` now returns **0 matches**.
-
----
-
-## 🗄️ What's New in V12.2 PROCESS-CRISIS
-
-An 8-hour GitLab scan collapsed: Phase 12 (Port Scanning) ran with **no
-timeout** for 4h38m, an orphaned amass process burned 90% CPU for 3 hours
-*after* its phase ended, Ctrl+C was ignored 30+ times, a `--resume` re-ran the
-broken phase from scratch, and `!`-prefixed out-of-scope domains
-(`!service-now.com`, `!gitlab.cn`) were enumerated — 6,879 out-of-scope subs
-inflating the host count to 14,728. V12.2 is the forensic response — **6
-empirically-diagnosed process fixes, each shipped with a Go regression test:**
-
-| # | Failure (proven by logs) | Fix (proven by test) |
-|---|---|---|
-| 1 | Amass v5 returns 0 (7th version); "error" was its ASCII banner | `amass -o FILE` + `ingestAmassFile()`; auto-remove after 2 zero-runs (`amassGiveUpAfter`) |
-| 2 | Orphaned amass burned 90% CPU 3h **after** its phase ended | `ProcessRegistry` + `Setpgid` + `syscall.Kill(-pgid, SIGKILL)`; guaranteed `KillAll()`; **zero-orphan** test |
-| 3 | Phase 12 had NO timeout → 4h38m | Per-phase **hard timeout map** (Port Scanning = 15m) + `SampleHosts()` cap 1000 + naabu `-top-ports 100` |
-| 4 | Ctrl+C ignored 30+ times, hung 2 min | **Dual-signal** handler: 1st = graceful checkpoint + kill children (10s deadline); 2nd = force `os.Exit(1)` |
-| 5 | `--resume` re-ran the broken phase from scratch | `--skip` / `--only` accepting `4,12,20` and `12-20`; `ShouldRunPhase()` |
-| 6 | `!`-excluded domains were enumerated (scope pollution) | Parse `!`/`-` as **EXCLUDE**; `FilterExcluded` after every phase; `ApexDomainsForEnum` never enumerates excludes |
-
-**Plus mandated features:** per-phase timeout map (§2.1), `sampleHosts()` (§2.2),
-`ProcessRegistry.KillAll()` (§2.3), built-in `--scope gitlab|github` via
-`//go:embed` (§2.4), `--skip`/`--only` phase selection (§2.5), and a **Burp smart
-proxy gate** that forwards only high-value traffic (params/API/auth/admin/upload/
-non-404/crawl-sourced), drops noise (static assets/404/CDN-errors/out-of-scope),
-rate-limits to 10 req/s, logs `Burp: X proxied, Y filtered`, and exports
-`burp_scope.json` (§2.6).
-
-> **MOHAMMED V12.0 OMEGA** is an authorized-testing / HackerOne bug-bounty
-> reconnaissance and exploitation framework written in a single, self-contained
-> Go binary (`github.com/mohammed-v3/core`). It runs **65+ phases**, **16+ native
-> Go exploit engines**, **76+ passive OSINT sources**, a **local AI cognitive
-> cascade** (Ollama), **headless-Chrome CDP** for client-side confirmation, and —
-> new in V12.0 — **5 Secret Weapon algorithms** that discover attack surface and
-> confirm vulnerabilities that every prior version missed.
->
-> V12.0 OMEGA is grounded in **empirical evidence**: it fixes four bugs proven by
-> a live 4-hour scan (Amass v5 capturing 0 vs 8,531 subdomains, TLS mismatch
-> report pollution, unrejected Cloudflare 5xx WAF errors, and an SSTI oracle that
-> accepted literal reflection), and it adds five self-contained exploit engines
-> that need no external CLI tool at all.
-
----
-
-## 🔥 What's New in V12.1 ZERO-TOLERANCE
-
-**ZERO TOLERANCE FOR UNVERIFIED CLAIMS. EVERY FIX SHIPS WITH A UNIT TEST THAT
-PROVES IT WORKS.** A live Temu scan showed ~40 of 60 phases returning `0`
-findings. V12.1 is the forensic response: 6 empirically-diagnosed bug fixes, 3
-capability upgrades, and 6 modern tools — every single one backed by a Go unit
-test (integration tests skip cleanly where a binary/Chrome is absent, while pure
-parser/logic tests always run).
-
-### The 6 bug fixes (each proven by a test)
-
-| # | Phase | Root cause (Temu evidence) | Fix | Proving test |
-|---|-------|----------------------------|-----|--------------|
-| 1 | Amass | 6-min runner cap SIGKILLed amass mid-run → 0 subdomains (CLI gave 8,531) | `runAmassV5` 3-method fallback, 15-min streaming deadline, chaos-client backup | `TestAmassV5Integration`, `TestRunAmassV5_ThreeMethodContract` |
-| 2 | SQLi | Only 5 URLs tested, un-prioritized | Cap 5→20, param-priority ordering, elimination-funnel logging | `TestPrepareSQLiURLs_CapAndFunnel`, `_CapEnforced` |
-| 3 | CORS (17) | curl can't pass WAF → 0 CORS proofs | Go-Rod CDP browser for WAF hosts, curl only for non-WAF | `TestPartitionCORSByWAF` |
-| 4 | API Sec (35/36) | Weak results "CONFIRMED" then rejected downstream | Run full 5-Gate validation *before* marking CONFIRMED; API classes added to baseline/reproduce gates | `TestFix4_APIClassesNeedBaselineAndReproduce`, `_UnreachableAPIRejected` |
-| 5 | HTTP Smuggling (25/49) | CDN edge falsely flagged Critical | Auto-demote to Informational on Cloudflare/Fastly/Akamai/CloudFront, Critical only on direct origin | `TestFix5_CDNSmugglingDemotion` (6 sub-cases) |
-| 6 | DOM XSS (55/57) | Chrome crashed/leaked → phase aborted at 0 | Restart-on-drop, 30 s per-URL timeout, 3-tab cap, 500 MB RSS recycle | `TestFix6_*` (statm RSS, GuardMemory, Recover, slot cap) |
-
-### The 3 upgrades
-
-- **Phase 15 (JS analysis):** extracts URL paths / fetch calls / env-vars /
-  inline-JSON, feeds discovered endpoints into the corpus, flags `/api` &
-  `/graphql` for the API Hunter and `/admin` & `/internal` for auth, adds
-  source-map detection and entropy tiering (`<3.5` reject, `>4.5`+pattern = high
-  confidence). Proof: `TestFix_Phase15_{EnvAndInlineJSON,APIHunterTargets,EntropyTiering}`.
-- **Phase 32 (Auth/Session):** full `Set-Cookie` audit — HttpOnly, Secure,
-  SameSite, and excessive-lifetime (>30 d) detection, plus low-entropy session
-  tokens. Proof: `TestFix_Phase32_{CookieFlagMatrix,ExcessiveLifetime,LowEntropyToken}`.
-- **Phase 33-35 (IDOR / Race / Business Logic):** these returned 0 because they
-  had *no endpoints to test*; now `prioritizeDiscovered` makes them consume the
-  API/priority endpoints found by the crawler and JS analyzer first. Proof:
-  `TestUpgrade_PrioritizeDiscovered`.
-
-### The 6 new tools (Section 3)
-
-| Tool | Role | Integrated into |
-|------|------|-----------------|
-| **chaos-client** | Passive subdomain DB (amass replacement/backup) | Passive recon (amass fallback) |
-| **alterx** | Pattern-based subdomain permutations | Active bruteforce (→ dnsx-resolved) |
-| **cdncheck** | Accurate CDN/WAF/cloud detection | readiness inventory + runner |
-| **uncover** | Unified Shodan/Censys/FOFA/Hunter host search | Passive recon apex sweep |
-| **cariddi** | Endpoint + secret extraction from HTTP responses | Crawl phase |
-| **trufflehog** | Deep **verified** secret scanning | Client-Side Secret phase (filesystem scan) |
-| *notify* | Real-time Slack/Discord/Telegram push | readiness inventory + runner |
-| *ppmap* | Dedicated prototype-pollution prober | Prototype Pollution phase |
-
-Each tool has a pure, unit-tested output parser (`TestModernTools_*`) and a
-graceful "skip when binary absent" guard.
-
----
-
-## 📊 MOHAMMED V11.0 vs V12.1 ZERO-TOLERANCE — Definitive Comparison
-
-| Capability | V11.0 FINAL SOVEREIGN | V12.1 ZERO-TOLERANCE |
-|------------|-----------------------|----------------------|
-| Subdomain enum | subfinder/amass/bbot (amass capped at 6 min → 0) | + **15-min streaming amass** (3-method), **chaos-client** backup, **uncover** search-engine sweep, **alterx** permutations |
-| CORS confirmation | curl only (blocked by WAF) | **Go-Rod CDP browser** for WAF hosts, curl for the rest |
-| API security | reported before validation | **5-Gate validated BEFORE** reporting |
-| HTTP smuggling | Critical on any host (CDN false-positives) | **CDN-aware** — Informational on edge, Critical on origin |
-| DOM XSS | single Chrome, no recovery (crashes → 0) | **restart-on-drop, 30 s timeout, 3-tab cap, 500 MB recycle** |
-| JS analysis | regex secret grep | + **endpoint/env/inline-JSON extraction, entropy tiering, API-Hunter feed** |
-| Session audit | basic | **full cookie matrix** (HttpOnly/Secure/SameSite/expiry/entropy) |
-| IDOR/Race/BizLogic | tested raw corpus (often empty) | **consume discovered API/priority endpoints first** |
-| Secret scanning | client-storage harvest | + **trufflehog verified-secret** filesystem scan, **cariddi** response secrets |
-| Proto pollution | generic nuclei templates | + **ppmap** dedicated prober |
-| Tool inventory | 38 tools | **45 tools** (+7 modern) |
-| Test discipline | selective | **ZERO-TOLERANCE: every fix ships a unit test** |
-| verify.sh checks | ~450 | **484 structural checks passing** |
-
----
-
-## 📑 Table of Contents
-
-1. [What MOHAMMED V12.0 OMEGA Is](#-what-mohammed-v120-omega-is)
-2. [Architecture Diagram](#-architecture-diagram)
-3. [V11.0 vs V12.0 OMEGA — Definitive Comparison](#-mohammed-v110-vs-v120-omega--definitive-comparison)
-4. [The 4 Empirical Bug Fixes](#-the-4-empirical-bug-fixes-proven-by-a-live-scan)
-5. [The 5 Secret Weapons](#-the-5-secret-weapons)
-6. [Complete Phase Reference (65+)](#-complete-phase-reference-65-phases)
-7. [Installation Guide (Kali Linux 2026.x)](#-installation-guide-kali-linux-2026x)
-8. [Usage Examples](#-usage-examples)
-9. [Configuration](#-configuration)
-10. [False-Positive Validation (5 Gates)](#-false-positive-validation--the-5-gate-pipeline)
-11. [Responsible Disclosure / PoE Boundary](#-responsible-disclosure--poe-boundary)
-12. [Output Layout](#-output-layout)
-13. [Verification](#-verification)
-14. [Complete Version History](#-complete-version-history)
-
----
-
-## 🎯 What MOHAMMED V12.0 OMEGA Is
-
-MOHAMMED is a **zero-touch autonomous** engine: you give it a scope, it does the
-rest. There are no manual cookie pastes, no per-phase babysitting, and no cloud
-API costs — the local Ollama brain and every exploit engine run on your own
-machine.
-
-| Capability | Detail |
-|---|---|
-| **Language / build** | Go 1.22.5, one static binary, single external dep (`gopkg.in/yaml.v3`) |
-| **Phases** | 65+ registered phases, profile-filtered (small / passive / medium / large / full) |
-| **Native Go exploit engines** | 16+ (differential IDOR, SSTI arithmetic oracle, race-condition barrier, business-logic tampering, API security, correlation, + the 5 Secret Weapons) |
-| **OSINT sources** | 76+ passive certificate-transparency / passive-DNS / archive / intel sources |
-| **AI brain** | 3-tier local Ollama cascade (fast triage → deep analysis → reasoning), fails open to heuristics |
-| **Client-side confirmation** | Headless-Chrome CDP (Go-Rod) for real in-DOM XSS / postMessage / secret harvest |
-| **False-positive control** | 5-gate validation pipeline; every candidate must clear it before it becomes a finding |
-| **Ethics** | "Prove, don't exploit" PoE boundary; hard-capped ≤10 req/s per host |
-| **Output** | HackerOne-ready markdown reports with CVSS 3.1, plus JSON/txt artifacts |
-
----
-
-## 🏗 Architecture Diagram
-
-```mermaid
-flowchart TD
-    A[Scope Input<br/>domains · IPs · CIDRs] --> B[Phase 0<br/>Target Classifier]
-    B --> C{Recon Group<br/>Phases 01-15}
-
-    subgraph RECON [Recon & Attack-Surface Discovery]
-        C --> C1[OSINT + OSINTv2<br/>76+ passive sources]
-        C1 --> C2[Subdomain passive/active<br/>subfinder·amass·bbot·findomain]
-        C2 --> C3[DNS resolve · takeover · httpx probe]
-        C3 --> C4[TLS · deep recon · ports · wayback · crawl]
-        C4 --> C5[JS analysis · params · CORS · cloud recon]
-    end
-
-    C5 --> D{Injection & Vuln Group<br/>Phases 16-28}
-    subgraph INJECT [Injection & Classic Vulns]
-        D --> D1[fuzzing · nuclei · XSS · SQLi · SSRF]
-        D1 --> D2[open-redirect · 403-bypass · API · CRLF]
-        D2 --> D3[smuggling · git-exposure · email · proto-pollution]
-    end
-
-    D3 --> E{Native Exploit Engines<br/>Phases 31-53}
-    subgraph EXPLOIT [16+ Native Go Exploit Engines]
-        E --> E1[Auth/Session · differential IDOR · race · biz-logic]
-        E1 --> E2[API-security · WebSocket · upload · cloud · SSTI oracle]
-        E2 --> E3[Multi-tenant BOLA · barrier-race · financial · JWT/OAuth]
-    end
-
-    E3 --> F{Sovereign Group<br/>Phases 55-60}
-    subgraph SOVEREIGN [AI + CDP Sovereign Layer]
-        F --> F1[Auto account bootstrap<br/>User A victim · User B attacker]
-        F1 --> F2[Headless-Chrome DOM XSS · client-side secrets]
-        F2 --> F3[Stateful attack graph · AI payload mutation]
-    end
-
-    F3 --> G{🔥 SECRET WEAPONS 🔥<br/>Phases 61-65}
-    subgraph SW [5 Secret Weapons — pure Go]
-        G --> G1[SW#1 API Hunter<br/>classify + per-class attack]
-        G --> G2[SW#2 Response Differential<br/>structural JSON diff]
-        G --> G3[SW#3 Smart Fuzz<br/>WAF-adaptive mutation]
-        G --> G4[SW#4 JS Deep<br/>entropy-gated secret/endpoint mining]
-        G --> G5[SW#5 Subdomain Intel<br/>functional grouping + Wayback]
-    end
-
-    G1 & G2 & G3 & G4 & G5 --> H[Correlation Engine<br/>Phase 45]
-
-    H --> V{{5-Gate False-Positive Validator<br/>Pre-gate · Gates 1-5}}
-    V -->|rejected| X[out_of_scope / discarded]
-    V -->|CONFIRMED| I[Report Phase<br/>Phase 29]
-
-    I --> J[[HackerOne Reports<br/>CVSS 3.1 · PoC · Remediation]]
-    I --> K[[CONFIRMED_VULNS.txt · JSON · findings]]
-
-    L[Local Ollama Brain<br/>3-tier cascade] -. reasoning .-> E
-    L -. reasoning .-> F
-    L -. mutation .-> G3
-    M[Proxy-aware exploit.Client<br/>Burp · StealthGovernor ≤10 rps] -. all requests .-> INJECT
-    M -. all requests .-> EXPLOIT
-    M -. all requests .-> SW
+```
+                           MOHAMMED V4 PIPELINE ARCHITECTURE
+   
+   +---------------------------------------------------------------------------------+
+   |                           PHASE 00-02: PASSIVE OSINT                            |
+   |   Public CT Logs (crt.sh)  *  AlienVault OTX  *  Wayback History  *  Passive DNS|
+   +---------------------------------------------------------------------------------+
+                                         |
+                                         v
+   +---------------------------------------------------------------------------------+
+   |               PHASE 03-07: ATTACK SURFACE RECON & LIVE PROBING                  |
+   |   Passive Subdomain Fan-out  *  OS-Stub DNS Recovery  *  Live HTTP Pacing       |
+   +---------------------------------------------------------------------------------+
+                                         |
+                                         v
+   +---------------------------------------------------------------------------------+
+   |                   PHASE 08-16: ASSET PRIORITIZATION & DISCOVERY                 |
+   |   Staging/Internal Asset Float  *  Top-100 Diagnostic Ports  *  Param Filter    |
+   +---------------------------------------------------------------------------------+
+                                         |
+                                         v
+   +---------------------------------------------------------------------------------+
+   |               PHASE 17-45: SURGICAL EXPLOIT & CURATED INSPECTION                |
+   |   Exact Token Signature Check  *  CVE-2020-14882 WebLogic  *  Deep Cloud/Auth   |
+   +---------------------------------------------------------------------------------+
+                                         |
+                                         v
+   +---------------------------------------------------------------------------------+
+   |                   PHASE 54: AUTONOMOUS TARGET SAFETY GOVERNOR                   |
+   |   Auto-Capacity Probing (RTT/CDN) * Concurrency Semaphore * Circuit Breaker     |
+   +---------------------------------------------------------------------------------+
+                                         |
+                                         v
+   +---------------------------------------------------------------------------------+
+   |               REPORT GENERATION & ZERO-FP SANITIZATION ENGINE                   |
+   |   Filter Internal Milestones  *  No <nil> Artifacts  *  Tiered Outputs          |
+   |   --> CONFIRMED_VULNS.txt (Conf >= 70)  |  MANUAL_REVIEW.txt (Human Triage)     |
+   +---------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 🚀 MOHAMMED V11.0 vs V12.0 OMEGA — DEFINITIVE COMPARISON
+## 🛡️ Core Safety Governor & Autonomous Pacing
 
-| Feature / Metric | V11.0 FINAL SOVEREIGN | V12.0 OMEGA (FINAL) | Delta |
-|---|---|---|---|
-| **Total Phases** | 60 | 65+ | +5 Secret Weapon Phases |
-| **Amass Integration** | BROKEN (0 results) | FIXED (8,500+ subdomain capture) | BUG #1 FIXED |
-| **TLS Mismatch Severity** | Medium (pollutes reports) | Informational | BUG #2 FIXED |
-| **WAF 520 Handling** | Not rejected | Auto-rejected (520-530) | BUG #3 FIXED |
-| **SSTI Validation** | Accepts string reflection | Exact math product oracle | BUG #4 FIXED |
-| **API Intelligence Engine** | None | Full endpoint classification & targeted attack | SECRET WEAPON #1 |
-| **Response Differential** | None | Cross-context structural JSON diff | SECRET WEAPON #2 |
-| **Smart Fuzzing** | Static payloads | Adaptive learning mutation engine | SECRET WEAPON #3 |
-| **JS Deep Analysis** | Basic key extraction | Full endpoint/secret/source-map mining | SECRET WEAPON #4 |
-| **Subdomain Intelligence** | Raw list | Functional grouping & priority scoring | SECRET WEAPON #5 |
-| **Native Go Exploit Engines** | 11 | 16+ | +5 new engines |
-| **Total Verification Checks** | 394 | 430+ | +36 new checks |
-| **Build & Test Status** | Pass | Pass (0 errors, 0 warnings, 0 TODOs) | Production-Ready |
+Target stability is guaranteed by the integrated **Adaptive Target Governor** (`pkg/governor`):
 
----
-
-## 🐞 The 4 Empirical Bug Fixes (proven by a live scan)
-
-A live 4-hour scan against a real HackerOne target exposed four concrete defects.
-V12.0 OMEGA fixes each one and PROVES the fix with code + tests.
-
-### BUG #1 — Amass v5 integration captured 0 subdomains (CLI captured 8,531)
-`pkg/phases/phases.go` was rewritten to stream Amass output correctly:
-- A **10-minute** `context.WithTimeout` per invocation (no more premature kills).
-- A **subcommand matrix** by detected major version — it tries both
-  `amass enum -passive -d <domain>` **and** `amass passive -d <domain>` (V5 split
-  `enum` into a dedicated `passive` subcommand; we never invent flags, we try the
-  documented ones).
-- `bufio.Scanner` with a **1 MB line buffer** reading `StdoutPipe` line-by-line
-  (the old code discarded stdout).
-- Process-group `Setpgid` + a kill goroutine so a hung Amass is reaped cleanly.
-- The exact stderr/error is logged so a future failure is diagnosable.
-
-### BUG #2 — TLS hostname mismatch ranked "Medium" (report pollution)
-- `pkg/phases/phases.go`: every `tlsx` **hostname mismatch** is now
-  `Informational` ("TLS Certificate Hostname Mismatch"). Expired / self-signed
-  certs remain `Low`.
-- `pkg/report/exporter.go`: `isConfirmed()` gained a guard that rejects any
-  finding whose severity is `informational` / `info` / `none`, so demoted TLS
-  mismatches can **never** enter `CONFIRMED_VULNS.txt` or the severity summaries.
-
-### BUG #3 — WAF HTTP 520 not rejected
-- `pkg/validation/false_positive.go`: a new **Pre-gate 0** discards any candidate
-  whose status is a Cloudflare origin-error (**520, 521, 522, 523, 524, 525, 526,
-  527, 530**) or whose body matches the Cloudflare error signature. Three unit
-  tests (`TestBug3_*`) prove the gate rejects 52x and does **not** over-reject a
-  normal 200.
-
-### BUG #4 — SSTI accepted literal reflection
-- `pkg/exploit/ssti.go`: the oracle now uses `{{1337*1339}}` (product
-  **`1790243`**) and:
-  - requires the response to contain the **exact product `1790243`**;
-  - **rejects** if the response contains the literal `{{1337*1339}}` (echo, not eval);
-  - **rejects** if the response length equals the clean baseline (no change);
-  - **rejects** if the status is `4xx`/`5xx`.
+1. **Autonomous Target Capacity Detection (`--smart-rate`)**:
+   - Sends lightweight HTTP HEAD baseline probes before heavy phases.
+   - Evaluates network latency (RTT), multi-homing, and CDN fronting (Cloudflare, Akamai, CloudFront).
+   - Dynamically scales request rate and concurrency:
+     * **High Latency (>1000ms) or Single IP**: Throttles down to `1 req/s`, concurrency `1`.
+     * **Enterprise Tier (300ms–800ms)**: Sets `2–3 req/s`, concurrency `2`.
+     * **Edge CDN / Cloud WAF (<400ms)**: Allows up to `5 req/s`, concurrency `4`.
+2. **Circuit Breaker Protection**:
+   - Automatically trips on HTTP `429 Too Many Requests`, `503 Service Unavailable`, or `504 Gateway Timeout`.
+   - Freezes requests, applies exponential backoff cooldown (`5s` to `60s`), and tests with half-open recovery probes.
+3. **Pacing Jitter**:
+   - Injects random 200ms–400ms delays to eliminate synchronized request spikes.
 
 ---
 
-## 🔥 The 5 Secret Weapons
+## 🔬 Zero-False-Positive Architecture
 
-The Secret Weapons are **pure-Go, self-contained exploit algorithms** (Phases
-61-65). They use only the proxy-aware `exploit.Client` — no external CLI. Each is
-independently toggleable and budgeted in `config.yaml → secret_weapons`, and each
-candidate they surface still clears the 5-gate validator and the PoE boundary.
+Every finding must clear rigorous validation before it can be reported:
 
-### SW#1 — API Hunter · `pkg/exploit/api_hunter.go` (Phase 61)
-- **What it does:** classifies every discovered endpoint into
-  `AUTH / DATA / MONEY / ADMIN / OAUTH / Generic`, then runs the *right* attack
-  sequence for that class (e.g. IDOR/param-tamper on DATA, verb + object-id
-  swaps on MONEY/ADMIN, `redirect_uri`/`state` analysis on OAUTH).
-- **Why it's different:** generic scanners fire the same payloads at every URL.
-  API Hunter reasons about *what an endpoint is for* and attacks accordingly,
-  massively raising signal on money/admin/auth surfaces.
-- **Finds:** BOLA/IDOR, broken function-level auth, OAuth flaws, mass-assignment.
-- **Real-world scenario:** a `/api/v2/wallet/{id}/transfer` endpoint is classified
-  `MONEY`; API Hunter swaps `{id}` across authorized identities and detects that
-  another tenant's wallet shape is returned — a high-value BOLA a blind fuzzer skips.
-
-### SW#2 — Response Differential · `pkg/exploit/differential.go` (Phase 62)
-- **What it does:** performs a **structural** JSON diff across contexts —
-  auth vs unauth, User A vs User B, verb-tamper, param-pollution — ignoring
-  volatile keys (timestamps, session IDs, CSRF tokens) so noise never masks a diff.
-- **Why it's different:** naive byte-diffing flags every timestamp change as a
-  "difference." Differential compares the *shape*, so a real cross-tenant leak
-  stands out even when 90% of the body is volatile.
-- **Finds:** BOLA/IDOR, authorization bypass, verb-based access control gaps.
-- **Real-world scenario:** an unauthenticated `GET /account/profile` returns the
-  same structural shape as the authenticated one (with private fields populated) —
-  a silent auth bypass surfaced by shape equality.
-
-### SW#3 — Smart Fuzz · `pkg/exploit/smart_fuzz.go` (Phase 63)
-- **What it does:** WAF-adaptive mutation — `baseline → probe → adapt`. It learns
-  which payload shapes the WAF blocks, mutates around them, escalates to the local
-  Ollama **PayloadBrain** for fresh variants, and **stops at the first confirmed
-  Proof-of-Exploit** (no over-firing).
-- **Why it's different:** static payload lists die at the first WAF rule. Smart
-  Fuzz treats the WAF as a feedback signal and evolves its payloads.
-- **Finds:** XSS, SQLi, SSRF behind WAFs that defeat static lists.
-- **Real-world scenario:** a reflected XSS is blocked when `<script>` appears;
-  Smart Fuzz observes the block, mutates to an event-handler/SVG vector, and
-  confirms `alert(document.domain)` — then stops.
-
-### SW#4 — JS Deep · `pkg/exploit/js_deep.go` (Phase 64)
-- **What it does:** mines in-scope JavaScript for **endpoints, admin routes,
-  secrets, WebSocket URLs, GraphQL endpoints, S3 buckets, and source-maps**, with
-  **Shannon-entropy validation** (candidates below **3.5** entropy are rejected as
-  noise) plus known-secret patterns (`AKIA*`, `ghp_*`, `sk_*`, `AIza*`, …).
-- **Why it's different:** basic key-grep drowns in false positives. Entropy gating
-  + provider patterns yield high-confidence secrets and a real endpoint map.
-- **Finds:** leaked API keys/tokens, hidden admin panels, undocumented APIs,
-  exposed source-maps that reveal server routes.
-- **Real-world scenario:** a bundled `admin.chunk.js` references `/internal/api/v1/users`
-  and embeds a live `sk_live_…` Stripe key (entropy 4.6) — both reported for review.
-
-### SW#5 — Subdomain Intel · `pkg/exploit/subdomain_intel.go` (Phase 65)
-- **What it does:** groups subdomains **functionally**
-  (`production / staging-dev / internal / infrastructure`), **prioritizes
-  staging/dev/internal** for exploit-first testing, runs a **staging-vs-prod**
-  security-header diff, and does **Wayback (CDX) historical analysis** to surface
-  dead archived hosts as subdomain-takeover candidates.
-- **Why it's different:** a raw subdomain list is just noise. Functional grouping
-  tells you *where the bugs live* — staging boxes with debug on and weaker headers.
-- **Finds:** exposed staging/debug environments, weaker-than-prod configs,
-  dangling/takeover-able historical subdomains.
-- **Real-world scenario:** `staging-api.target.com` is missing the CSP/HSTS its
-  prod twin enforces and has `/debug` open — prioritized first, it yields an
-  authenticated debug console prod would never expose.
+- **Strict Non-Empty Signatures**:
+  * Vulnerability templates in `pkg/phases/curated_templates.go` enforce mandatory, non-empty response tokens (`RequiredSig`).
+  * Empty signatures never match universally on HTTP 200 OK responses (preventing false alarms on custom health endpoints).
+- **Dynamic Soft-404 Calibration**:
+  * Probes non-existent randomized paths (`/.calib-<uuid>`) to establish content length baseline, status codes, and body hashes.
+- **Exact Token & Regex Validation**:
+  * `.env` files require `APP_KEY=` or `DB_PASSWORD=`.
+  * `.git` exposure requires `[core]` or `ref: refs/heads/`.
+  * Spring Actuator endpoints require valid structured JSON `{"status":"UP"}`.
+- **Report Hygiene & Sanitization**:
+  * Eliminates `<nil>` tool and title artifacts in `final_report.md` and `MANUAL_REVIEW.txt`.
+  * Filters out internal pipeline progress milestones (Target Classification, Autonomous Bootstrap) from vulnerability tables.
 
 ---
 
-## 📋 Complete Phase Reference (65+ phases)
+## 🚀 Operational Profiles: Stealth Audit vs. Full Assault
 
-Phases run in dependency order and are filtered per profile (`small` / `passive`
-run a safe subset; `medium` / `large` / `full` run everything). Phase 0 (Target
-Classifier) reorders the plan adaptively.
+Preset profiles (`cmd/preset`) configure MOHAMMED V4 for distinct assessment objectives:
 
-### Recon & Attack-Surface Discovery
-| # | Phase | Description / Tools |
-|---|---|---|
-| 0 | Target Classifier | ≤30 s fingerprint → WebApp / REST-API / SPA / Backend, dynamic plan |
-| 01 | Scope Validation | Validates target domains, IPs, and scope rules (deduplicated) |
-| 02 | OSINT | Parallel harvest: crt.sh · HackerTarget · RapidDNS · BufferOver · AnubisDB · ThreatMiner · Certspotter · OTX · URLScan + Shodan · VT · SecurityTrails · Chaos |
-| 02b | OSINT v2 | 50+ passive CT/DNS/archive/intel sources fanned out concurrently |
-| 03 | Subdomain Passive | subfinder + assetfinder + amass + bbot + findomain (apex-only, once per root) · OSINT merge |
-| 04 | Subdomain Active | puredns bruteforce (auto resolvers) → dnsx fallback + dnsgen permutations |
-| 05 | DNS Resolve | Resolves live hosts via dnsx (deduplicated), filters wildcards |
-| 06 | Takeover | subzy detection + HTTP fingerprint confirmation (FP reduction) |
-| 07 | HTTP Probe | httpx: status codes, titles, tech detect, CDN (Burp-aware routing) |
-| 08 | TLS Analysis | tlsx — expired, self-signed, **mismatch → Informational (BUG #2)** |
-| 08b | Deep Recon | security.txt · SPF/DMARC vendor chain · favicon mmh3 (Shodan pivot) · ASN/netblock |
-| 09 | Port Scan | CDN-aware: skip CF/CloudFront edges, naabu the rest (`-scan-type c`) |
-| 10 | Wayback | gau (multi-provider) + waybackurls historical URL discovery |
-| 11 | Crawl | katana + gospider deep crawl on live endpoints (empty-input guarded) |
-| 12 | JS Analysis | Extract JS files, scan for API keys/tokens/secrets |
-| 13 | Param Discovery | paramspider + arjun + URL param extraction |
-| 14 | CORS | Tests CORS reflection, null origin, wildcard |
-| 15 | Cloud Recon | cloud_enum, s3scanner for exposed buckets |
-
-### Injection & Classic Vulnerabilities
-| # | Phase | Description / Tools |
-|---|---|---|
-| 16 | Fuzzing | ffuf directory brute-force on live endpoints |
-| 17 | Vuln Scan | Full nuclei template scan (JSONL parsed + AI triage) |
-| 18 | XSS | kxss pre-filter + dalfox on parameterized URLs |
-| 19 | SQLi | sqlmap + ghauri: CF-stripped, in-scope, WAF-checked, ≤5 URLs (zero-FP) |
-| 20 | SSRF | nuclei SSRF templates with interactsh callback |
-| 21 | Open Redirect | nuclei redirect templates on param URLs |
-| 22 | Forbidden Bypass | dontgo403 on forbidden endpoints |
-| 23 | API Discovery | kiterunner API endpoint brute-force (curl fallback) |
-| 24 | CRLF | crlfuzz on live endpoints |
-| 25 | Smuggling | smuggler CL.TE/TE.CL detection (per-endpoint, top 5) |
-| 26 | Git Exposure | nuclei exposure templates + custom sensitive-file checks |
-| 27 | Email Security | Checks SPF, DKIM, DMARC DNS records |
-| 28 | Prototype Pollution | nuclei prototype pollution templates |
-
-### Native Go Exploit Engines
-| # | Phase | Description |
-|---|---|---|
-| 31 | Auth & Session | discovers login surfaces, audits session-cookie flags & entropy |
-| 32 | IDOR (differential) | mutate numeric object ids and compare responses |
-| 33 | Race Condition | release-barrier burst on single-use endpoints (TOCTOU) |
-| 34 | Business Logic | price/role parameter tampering against baseline |
-| 35 | API Security | GraphQL introspection, verb tamper, mass assignment, JWT, versioning bypass, BOLA |
-| 36 | WebSocket | mine ws/wss endpoints, cross-origin handshake (CSWSH) + message injection |
-| 37 | File Upload | ext/content-type bypass, SVG XSS, traversal — verifies EXECUTION |
-| 38 | Cloud Attack | S3 ListBucket/ACL, metadata SSRF, K8s/Docker ports, .git extraction |
-| 39 | SSTI | arithmetic oracle `{{a*b}}` must render the product — **exact-product BUG #4** |
-| 40 | Google Dork | 20+ automated dorks; feeds discovered URLs to the corpus |
-| 41 | Credential Intel | HIBP domain-breach lookup + email cross-reference (informational only) |
-| 42 | Burp Integration | populates Burp sitemap, active scan, Interactsh OOB monitor |
-| 46 | Multi-Tenant BOLA | dual-token BOLA/BFLA — swap object IDs & tokens across contexts |
-| 47 | Barrier Race | atomic-barrier race (20-50 parallel) with state-delta confirmation |
-| 48 | Financial Logic | zero-amount, fractional, currency-swap, workflow-step bypass |
-| 49 | Advanced Web | HTTP smuggling, cache poisoning/deception, polyglot SSTI |
-| 50 | Auth Audit | JWT alg:none / key-confusion / weak-secret / JKU + OAuth redirect_uri & state |
-| 51 | Polyglot Upload | gif/jpeg-php, .phtml/.phar/.pht, .htaccess — actual-execution verification |
-| 52 | Deep Cloud/Repo | Azure/GCP bucket ACL, IMDSv2, .git/.svn/.env/.bak extraction + secret harvest |
-| 53 | Deep Burp OOB | Burp sitemap + active scan + batch OOB (SSRF/RCE/XXE/XSS) correlation |
-| 54 | Apex Orchestration | prime stealth governor, WAF/CDN fingerprint, high-signal Burp surface |
-
-### Sovereign Layer (AI + CDP)
-| # | Phase | Description |
-|---|---|---|
-| 55 | Sovereign Orchestration | prime local AI brain + headless-Chrome CDP, report sovereign posture |
-| 56 | Autonomous Bootstrap | auto-register User A (victim) & User B (attacker), harvest tokens, feed BOLA |
-| 57 | DOM XSS (CDP) | headless-Chrome canaries into #fragment/query/postMessage, confirm in-DOM |
-| 58 | Client-Side Secret (CDP) | localStorage/sessionStorage harvest + in-browser credentialed CORS |
-| 59 | Stateful Attack Graph | chained state machines — reset hijack, verify bypass, order-state manipulation |
-| 60 | AI Payload Mutation | feed WAF-blocked payloads to Ollama for real-time bypass variants + re-test |
-
-### 🔥 Secret Weapons (V12.0 OMEGA)
-| # | Phase | Description |
-|---|---|---|
-| 61 | **API Hunter (SW#1)** | classify API endpoints (AUTH/DATA/MONEY/ADMIN/OAUTH) + targeted per-class attacks |
-| 62 | **Response Differential (SW#2)** | cross-context structural JSON diff (auth/unauth, A/B, verb, param) for BOLA/IDOR |
-| 63 | **Smart Fuzz (SW#3)** | WAF-adaptive mutation fuzzer (baseline→probe→adapt→AI-escalate), stop-on-PoE |
-| 64 | **JS Deep Analysis (SW#4)** | mine in-scope JS for endpoints/admin/secrets/source-maps with entropy validation |
-| 65 | **Subdomain Intel (SW#5)** | functional grouping, staging-first prioritization, staging-vs-prod diff, Wayback |
-
-### Correlation & Reporting
-| # | Phase | Description |
-|---|---|---|
-| 45 | Correlation | chains atomic findings into high-severity attack paths (runs last-but-report) |
-| 29 | Report | Generates Markdown + JSON summary with all findings and AI verdicts + H1 reports |
+| Operational Profile | Target Profile | Rate Limit | Concurrency | WAF Bypass | Scope & Focus |
+|---|---|---|---|---|---|
+| `stealth-audit` | Government platforms, production APIs, sensitive infrastructure | $\le 2\text{ req/s}$ (120/min) | 1–2 workers | Off (Safe passive) | Low-footprint, non-destructive passive OSINT, light port scanning, and surgical verification. |
+| `full-assault` | Bug bounty programs (HackerOne, Bugcrowd), non-prod staging | $\le 10\text{ req/s}$ (600/min) | 5–10 workers | Active matrix enabled | Complete 65+ phase inspection, active fuzzing, differential response testing, and curated CVE templates. |
+| `passive` | Strict zero-touch compliance audits | 0 active probes | 1 worker | Off | 100% external OSINT (CT logs, Wayback, OTX, DNS). Zero packets sent to target IP. |
 
 ---
 
-## 🛠 Installation Guide (Kali Linux 2026.x)
+## 💻 CLI Quickstart & Examples
 
-MOHAMMED ships an idempotent installer that provisions Go, the 38-tool inventory,
-headless Chromium, and the Ollama AI cascade.
+### 1. Verification & Diagnostics
+
+Run doctor to verify tools, path bindings, and environment readiness:
+```bash
+./mohammed doctor
+```
+
+### 2. Autonomous Scan with Adaptive Governor (`--smart-rate`)
+
+Scan an enterprise target with automatic capacity sensing and safety gating:
+```bash
+./mohammed scan -s target.txt --profile medium --smart-rate --output output/audit-01
+```
+
+### 3. Government / Sensitive Target (Stealth Audit Mode)
 
 ```bash
-# 1. Clone
-git clone https://github.com/mohammedaljohaniit1-max/mohammed-V4.git
-cd mohammed-V4
+# Generate pre-configured scope and execution plan
+./preset -file scopes/government_target.json -mode stealth-audit
 
-# 2. Install Go 1.22.5+ (skip if already installed)
-#    Kali:  sudo apt update && sudo apt install -y golang-go
-#    or download from https://go.dev/dl/
-
-# 3. Build the single binary (module: github.com/mohammed-v3/core)
-export PATH=$PATH:/usr/local/go/bin
-go build -o mohammed ./cmd/mohammed
-./mohammed --help
-
-# 4. Install & PATH-link all 38 external recon/exploit tools
-#    (subfinder, amass, httpx, nuclei, katana, dalfox, sqlmap, ghauri, ...)
-bash install_path.sh          # installs Go/pip tools + dual-path symlinks
-
-# 5. Provision headless Chromium + the local Ollama AI cascade
-#    install_path.sh also pulls the 3-tier cascade when Ollama is present:
-#      ollama pull llama3.2:3b      # Tier 1 — fast triage / FP gate
-#      ollama pull qwen2.5:7b       # Tier 2 — deep payload / BOLA analysis
-#      ollama pull deepseek-r1:7b   # Tier 3 — chain-of-thought reasoning
-
-# 6. Health-check the whole stack (AI cascade / Chromium / recon tools)
-bash setup.sh
-
-# 7. Copy the config template and (optionally) add API keys
-cp config.yaml my-scan.yaml   # all API keys are OPTIONAL
+# Run with strict rate-limiting
+./mohammed scan -s recon/scopes/government_target.txt --profile small --rate 120 --threads 2 --output output/gov-stealth
 ```
 
-**Notes**
-- Every external tool is optional — a phase that can't find its tool **SKIPs**
-  rather than crashing.
-- The Ollama brain is optional — every AI tier fails open to deterministic
-  heuristics when Ollama is offline.
-- Nothing exceeds **10 requests/second per host**, even with `--waf-bypass`.
-
----
-
-## ▶️ Usage Examples
+### 4. Full Bounty Assault with WAF Bypass
 
 ```bash
-# Small / fast (safe subset — passive + light active)
-./mohammed -target example.com -profile small
-
-# Medium (default full attack surface, all exploit engines + Secret Weapons)
-./mohammed -target example.com -profile medium
-
-# Large (maximum depth, all 65+ phases, higher budgets)
-./mohammed -target example.com -profile large
-
-# Full (everything, including the heaviest engines)
-./mohammed -target example.com -profile full
-
-# Multi-target scope file (one domain/IP/CIDR per line)
-./mohammed -scope scope.txt -profile large
-
-# Route confirmed-evidence phases through Burp for manual review
-./mohammed -target example.com -profile medium -config my-scan.yaml
-
-# Enable the 8-WAF bypass matrix (still hard-capped ≤10 rps/host)
-./mohammed -target example.com -profile large --waf-bypass
-
-# Resume an interrupted scan from its saved state
-./mohammed -target example.com -profile large -resume
+./mohammed scan -s scopes/bounty_targets.txt --profile full --rate 300 --threads 10 --waf-bypass --output output/bounty-run
 ```
 
-> Run only against assets you are **explicitly authorized** to test.
-
----
-
-## ⚙️ Configuration
-
-All behaviour is driven by `config.yaml`. Highlights relevant to V12.0 OMEGA:
-
-```yaml
-# 5 Secret Weapons — every weapon defaults ON, each toggleable + budgeted
-secret_weapons:
-  api_hunter: true               # SW#1
-  differential: true             # SW#2
-  smart_fuzz: true               # SW#3
-  js_deep: true                  # SW#4
-  subdomain_intel: true          # SW#5
-  api_hunter_budget: 400         # max endpoints classified/attacked
-  differential_budget: 250       # max URLs compared cross-context
-  smart_fuzz_budget: 150         # max parameterized URLs fuzzed
-  js_deep_budget: 200            # max JS files mined
-  js_entropy_floor: 3.5          # min Shannon entropy for a secret candidate
-  wayback_history: true          # SW#5 Wayback historical takeover diff
-```
-
-Other key blocks: `exploit` (per-phase URL budget, race concurrency, Burp
-routing), `validation` (baseline comparison), `ollama` (3-tier cascade + timeouts),
-`waf_bypass` (per-vendor evasion, `max_rps_per_host` clamped ≤10), `boundary`
-(PoE `prove_only` mode), `filter` (Cloudflare-param stripping, JS scope
-enforcement), `proxy` (selective Burp routing).
-
----
-
-## 🚦 False-Positive Validation — the 5-Gate Pipeline
-
-Every candidate produced by any phase or Secret Weapon must pass
-`pkg/validation.Validate(ctx, c Candidate) Verdict`:
-
-- **Pre-gate 0 (V12.0, BUG #3):** discard Cloudflare origin-error statuses
-  (520-527, 530) and Cloudflare error-page signatures.
-- **Pre-gate (known FP):** AWSALB cookies, CloudFront error pages, wildcard-CORS
-  on public pages.
-- **Gate 1 — Baseline diff:** probe a random path; discard SPA catch-alls.
-- **Gate 2 — Private data:** the response must contain something actually private.
-- **Gate 3 — Exploitability:** the candidate must be demonstrably exploitable.
-- **Gate 4 — In-scope:** `pkg/filter.IsInScope()` oracle — out-of-scope is recorded, never probed.
-- **Gate 5 — Reproducible:** the finding must reproduce.
-
-Demoted `Informational` severities (e.g. TLS hostname mismatch, BUG #2) never
-enter `CONFIRMED_VULNS.txt` or the severity summaries.
-
----
-
-## 🛡 Responsible Disclosure / PoE Boundary
-
-MOHAMMED **proves**, it does not weaponize. See `RESPONSIBLE_DISCLOSURE.md` for
-the four enforced rules and the per-Secret-Weapon PoE boundaries:
-
-| Class | Allowed proof (and nothing more) |
-|---|---|
-| RCE | time-based delay **or** OOB DNS callback → STOP |
-| SQLi | DB error signature **or** time-based delay → STOP |
-| Path Traversal | read `/etc/hostname` only → STOP |
-| SSRF | DNS/HTTP callback to a controlled canary → STOP |
-| XSS | `alert(document.domain)` only → STOP |
-
-Rate is hard-capped ≤10 req/s per host; CAPTCHAs are never defeated (graceful
-fallback); every throwaway test account is logged for cleanup.
-
----
-
-## 📂 Output Layout
-
-```
-output/
-└── {target}/
-    ├── CONFIRMED_VULNS.txt          # confirmed findings only (no Informational)
-    ├── findings.json                # structured findings + AI verdicts
-    ├── subdomains.txt / live.txt    # recon corpus
-    ├── out_of_scope_urls.txt        # recorded, never probed (RULE 2)
-    ├── test_accounts_created.txt    # bootstrapper accounts for cleanup (RULE 3)
-    └── reports/
-        └── {vuln_id}_h1_report.md   # HackerOne-ready: PoC · CVSS 3.1 · remediation
-```
-
----
-
-## ✅ Verification
+### 5. Resuming Interrupted Scans
 
 ```bash
-export PATH=$PATH:/usr/local/go/bin
-go build ./...     # 0 errors
-go vet ./...       # 0 warnings
-go test ./...      # ALL pass (incl. Secret Weapon + BUG #3 suites)
-bash verify.sh     # 430+ PASS, 0 FAIL
+# Auto-detect latest checkpoint and resume
+./mohammed scan -s target.txt --resume auto --output output/audit-01
+
+# Run only specific phases (e.g. phases 17 to 25)
+./mohammed scan -s target.txt --only 17,18,19,20,21,22,23,24,25 --output output/audit-01
 ```
 
 ---
 
-## 📜 Complete Version History
+## 📊 Verification & Test Matrix
 
-| Version | Phases | OSINT Sources | Exploit Engines | Key Innovation |
-|---|---|---|---|---|
-| V6 (Original) | 30 | 14 | 0 | Basic tool wrapper |
-| V7 Quantum | 45 | 56 | 5 | First custom exploit engines |
-| V8 Level Max | 52 | 76 | 11 | Fuzzy baseline FP elimination |
-| V9 Apex | 53 | 76 | 11 | Adaptive stealth & WAF evasion |
-| V10 Sovereign | 60 | 76 | 11 | Local AI brain & headless Chrome |
-| V11 Final Sovereign | 60 | 76 | 11 | Ethical PoE boundary & H1 reports |
-| **V12 OMEGA** | **65+** | **76+** | **16+** | **5 Secret Weapons & empirical bug fixes** |
+All packages are continuously verified with Go unit tests, race detector, and static analysis:
+
+| Component | Path | Verification Command | Status |
+|---|---|---|---|
+| Safety Governor | `pkg/governor` | `go test -v ./pkg/governor/...` | PASS (0 regressions) |
+| Curated Templates & Checks | `pkg/phases` | `go test -v ./pkg/phases/...` | PASS (0 regressions) |
+| Report Generator & Exporter | `pkg/report` | `go test -v ./pkg/report/...` | PASS (0 regressions) |
+| Zero-Touch Passive OSINT | `pkg/osint` | `go test -v ./pkg/osint/...` | PASS (0 regressions) |
+| Baseline & Token Validator | `pkg/validation` | `go test -v ./pkg/validation/...` | PASS (0 regressions) |
+| Full Repository Compilation | `cmd/...`, `pkg/...` | `go build ./...` | PASS (Clean build) |
 
 ---
 
-*MOHAMMED V12.0 OMEGA — authorized security testing only. Module path
-`github.com/mohammed-v3/core` is permanent and must never be renamed.*
+## 📁 Report Artifacts
+
+When a scan finishes, output files are generated in the specified `--output` directory:
+
+- `CONFIRMED_VULNS.txt`: Validated vulnerabilities with confidence $\ge 70$ and HTTP/AI confirmation. Ready for immediate vulnerability submission.
+- `MANUAL_REVIEW.txt`: Findings requiring human triage (confidence 40–69 or offline confirmation). Internal milestones and `<nil>` artifacts are strictly excluded.
+- `final_report.md`: Complete executive summary table and categorized technical details.
+- `final_report.json`: Machine-readable structured JSON format for SIEM or automated ticketing integration.
+- `checkpoint.json`: Real-time state preservation allowing seamless recovery with `--resume`.

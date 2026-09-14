@@ -48,6 +48,7 @@ func run(args []string, out, errOut io.Writer) error {
 		profile = fs.String("profile", "", "scan profile (alias for mode): stealth-audit | full-assault | full | passive")
 		outDir  = fs.String("outdir", "recon/scopes", "where to write the generated scope.txt")
 		binPath = fs.String("bin", "./bin/mohammed", "path to the mohammed binary (for -run and the printed command)")
+		smartRate = fs.Bool("smart-rate", false, "autonomous adaptive target sensing (auto-tune rate & concurrency)")
 		doRun   = fs.Bool("run", false, "actually execute the mohammed scan (default: just print the command)")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -109,6 +110,9 @@ func run(args []string, out, errOut io.Writer) error {
 	}
 	if plan.WAFBypass {
 		margs = append(margs, "--waf-bypass")
+	}
+	if *smartRate {
+		margs = append(margs, "--smart-rate")
 	}
 
 	// ---- report -------------------------------------------------------------

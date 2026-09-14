@@ -79,14 +79,70 @@ func isConfirmed(f map[string]interface{}) bool {
 	return aiReal(f) || boolOf(f, "http_confirmed")
 }
 
+// IsReportableFinding filters out internal pipeline events or empty/malformed findings.
+func IsReportableFinding(f map[string]interface{}) bool {
+	title := sanitizeField(f["title"])
+	if title == "" || title == "<nil>" || title == "nil" {
+		title = sanitizeField(f["type"])
+	}
+	if title == "" || title == "<nil>" || title == "nil" {
+		return false
+	}
+
+	// Filter internal milestone logs that aren't actual vulnerabilities
+	lowerTitle := strings.ToLower(title)
+	if strings.Contains(lowerTitle, "target classification") ||
+		strings.Contains(lowerTitle, "autonomous session bootstrap") ||
+		strings.Contains(lowerTitle, "pipeline event") ||
+		strings.Contains(lowerTitle, "internal status") {
+		return false
+	}
+
+	return true
+}
+
+func sanitizeField(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s == "<nil>" || s == "nil" {
+		return ""
+	}
+	return s
+}
+
 // formatFinding renders a single finding block for a text export.
 func formatFinding(f map[string]interface{}) string {
+	title := sanitizeField(f["title"])
+	if title == "" {
+		title = sanitizeField(f["type"])
+	}
+	if title == "" {
+		title = "Security Observation"
+	}
+
+	tool := sanitizeField(f["tool"])
+	if tool == "" {
+		tool = "mohammed-engine"
+	}
+
+	severity := sanitizeField(f["severity"])
+	if severity == "" {
+		severity = "Info"
+	}
+
+	rawURL := sanitizeField(f["url"])
+	if rawURL == "" {
+		rawURL = "N/A"
+	}
+
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("[%v] %v\n", f["severity"], f["title"]))
-	b.WriteString(fmt.Sprintf("  URL       : %v\n", f["url"]))
-	b.WriteString(fmt.Sprintf("  Tool      : %v\n", f["tool"]))
+	b.WriteString(fmt.Sprintf("[%s] %s\n", severity, title))
+	b.WriteString(fmt.Sprintf("  URL       : %s\n", rawURL))
+	b.WriteString(fmt.Sprintf("  Tool      : %s\n", tool))
 	b.WriteString(fmt.Sprintf("  Confidence: %d\n", confidenceOf(f)))
-	if v, ok := f["ai_verdict"]; ok {
+	if v, ok := f["ai_verdict"]; ok && sanitizeField(v) != "" {
 		b.WriteString(fmt.Sprintf("  AI Verdict: %v\n", v))
 	}
 	b.WriteString(fmt.Sprintf("  Evidence  : %v\n", f["evidence"]))
@@ -109,7 +165,7 @@ func ExportTieredReports(state *engine.State) (int, int, error) {
 		target = state.Scope.Domains[0]
 	}
 	header := func(title string) string {
-		return fmt.Sprintf("# MOHAMMED v3 — %s\n# Target: %s\n# Generated: %s\n\n",
+		return fmt.Sprintf("# MOHAMMED v4 — %s\n# Target: %s\n# Generated: %s\n\n",
 			title, target, time.Now().Format(time.RFC1123))
 	}
 
@@ -119,6 +175,9 @@ func ExportTieredReports(state *engine.State) (int, int, error) {
 
 	cCount, rCount := 0, 0
 	for _, f := range state.Findings {
+		if !IsReportableFinding(f) {
+			continue
+		}
 		if isConfirmed(f) {
 			confirmed.WriteString(formatFinding(f))
 			cCount++

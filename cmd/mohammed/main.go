@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mohammed-v3/core/pkg/config"
+	"github.com/mohammed-v3/core/pkg/governor"
 	"github.com/mohammed-v3/core/pkg/engine"
 	"github.com/mohammed-v3/core/pkg/phases"
 	"github.com/mohammed-v3/core/pkg/report"
@@ -78,6 +79,7 @@ SCAN FLAGS:
   --startat       int      Skip to phase number N (0 = start from beginning) [was: --skip in V12.1]
   --threads       int      Global thread count (default: 30)
   --rate          int      Requests per minute (default: 150)
+  --smart-rate    bool     Autonomous adaptive target sensing (probes latency/CDN to auto-tune rate & concurrency)
   --output        string   Output directory (default: output/)
 
 V12.6 RUTHLESS NOTES:
@@ -214,6 +216,7 @@ func runScan(args []string) {
 	resume := fs.String("resume", "", "Resume an interrupted scan: 'auto' (latest in output/) or a path to checkpoint.json")
 	debug := fs.Bool("debug", false, "Debug mode: print the exact command + input/output for every tool call")
 	wafBypass := fs.Bool("waf-bypass", false, "WAF bypass mode: add sqlmap tamper scripts + delays when a WAF is confirmed (Genius #4, off by default)")
+	smartRate := fs.Bool("smart-rate", false, "Autonomous adaptive target sensing: dynamically tune rate-limit and concurrency based on latency and infrastructure")
 	fs.Parse(args)
 
 	// IMPROVEMENT #1: enable verbose per-tool command logging in the runner.
@@ -259,6 +262,19 @@ func runScan(args []string) {
 		}
 	} else {
 		fmt.Println("[*] No API keys configured — using native key-less scrapers (Tier 3 fallback)")
+	}
+
+	if *smartRate {
+		fmt.Println("[+] Autonomous adaptive target sensing active (--smart-rate)")
+		if len(scope.Domains) > 0 || len(scope.IPs) > 0 {
+			var sampleHosts []string
+			sampleHosts = append(sampleHosts, scope.Domains...)
+			sampleHosts = append(sampleHosts, scope.IPs...)
+			cap := governor.DetectTargetCapacity(sampleHosts)
+				fmt.Printf("[+] Target capacity detected: %s (Rate: %d req/s, Concurrency: %d, Latency: %v)\n", cap.Rationale, cap.RateLimit, cap.Concurrency, cap.AvgLatency)
+			*rate = cap.RateLimit * 60
+			*threads = cap.Concurrency
+		}
 	}
 
 	cfg := &config.Config{
