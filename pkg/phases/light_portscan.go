@@ -16,7 +16,6 @@ import (
 
 // Top100WebAdminPorts represents the high-yield web, admin, diagnostic, and database
 // service ports commonly checked in modern ASM and bug bounty methodologies (Coffinxp style).
-// It strictly avoids scanning the full 65535 range.
 var Top100WebAdminPorts = []int{
 	// Standard web
 	80, 443, 8080, 8443, 8000, 8888, 8008, 8081, 8088, 8880,
@@ -28,7 +27,6 @@ var Top100WebAdminPorts = []int{
 	2375, 2376, 6443, 8001, 8500, 8501, 8848, 9200, 9300, 9600,
 	// Alternative proxies & gateways
 	81, 82, 88, 444, 4443, 8009, 8085, 8086, 8087, 8089,
-	8090, 8091, 8181, 8282, 8383, 8881, 8882, 8883, 8884, 8885,
 	// Database & cache interfaces with web dashboards
 	1433, 1521, 3306, 3389, 5432, 5984, 6379, 7474, 8098, 11211,
 	// CI/CD & diagnostics
@@ -37,55 +35,91 @@ var Top100WebAdminPorts = []int{
 	2082, 2083, 2086, 2087, 2095, 2096, 2222, 5601, 7002, 7003,
 }
 
-// LightPortScanPhase executes targeted Top-100 port checks on verified live IPs/hosts
-// using our rate-limited governor to ensure zero DoS or server strain.
+// LightPortScanPhase executes targeted Top-100 port checks on IP-deduplicated targets
+// using an asynchronous connect pool with a 500ms socket timeout.
 type LightPortScanPhase struct{}
 
-func (p *LightPortScanPhase) Name() string { return "Lightweight Top-100 Port Scan" }
+func (p *LightPortScanPhase) Name() string { return "High-Speed IP-Deduplicated Port Scanner" }
 func (p *LightPortScanPhase) Description() string {
-	return "Surgically checks Top 100 web/admin ports on verified live targets without scanning 65535 ports"
+	return "Resolves subdomains to unique IPv4s, deduplicates edge IPs, and scans Top-100 web/admin ports via a 20-worker asynchronous dial pool (<=500ms socket timeout)"
 }
 
 func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error {
-	if len(s.LiveHosts) == 0 {
-		s.Printf("│  Light Portscan: SKIP (no live hosts)\n")
+	if len(s.LiveHosts) == 0 && len(s.Subdomains) == 0 {
+		s.Printf("│  Light Portscan: SKIP (no live hosts or subdomains)\n")
 		return nil
 	}
 
-	hosts := filter.PrioritizeLiveTargets(s.LiveHosts)
-	// Bounded sample to stay polite and fast on large enterprise scopes
-	if len(hosts) > 100 {
-		hosts = hosts[:100]
+	targets := s.LiveHosts
+	if len(targets) == 0 {
+		targets = s.Subdomains
+	}
+	hosts := filter.PrioritizeLiveTargets(targets)
+
+	s.Printf("│  Light Portscan: resolving and deduplicating IP addresses for %d target host(s)...\n", len(hosts))
+
+	// 1. IP Deduplication Engine
+	ipToHosts := make(map[string][]string)
+	var ipList []string
+
+	for _, rawHost := range hosts {
+		clean := cleanHost(rawHost)
+		if clean == "" {
+			continue
+		}
+
+		// Resolve host IPv4 addresses
+		ips, err := net.LookupIP(clean)
+		if err != nil {
+			continue
+		}
+
+		for _, ip := range ips {
+			ipv4 := ip.To4()
+			if ipv4 == nil {
+				continue
+			}
+			ipStr := ipv4.String()
+			if len(ipToHosts[ipStr]) == 0 {
+				ipList = append(ipList, ipStr)
+			}
+			ipToHosts[ipStr] = append(ipToHosts[ipStr], clean)
+		}
 	}
 
-	s.Printf("│  Light Portscan: scanning Top-100 web/admin ports across %d live host(s) (concurrency <= 2)\n", len(hosts))
+	if len(ipList) == 0 {
+		s.Printf("│  Light Portscan: no resolvable IPv4 addresses discovered\n")
+		return nil
+	}
 
-	gov := governor.NewGovernor(2,
-		governor.WithMaxRPS(2.0),
-		governor.WithConcurrency(2),
-		governor.WithJitter(200*time.Millisecond, 400*time.Millisecond),
-	)
+	s.Printf("│  Light Portscan: deduplicated %d hosts -> %d unique IP address(es)\n", len(hosts), len(ipList))
 
+	// 2. Asynchronous Connect Pool (20 concurrent dialers, 500ms timeout per socket)
+	workerCount := 20
+	if len(ipList) < workerCount {
+		workerCount = len(ipList)
+	}
+	if workerCount < 5 {
+		workerCount = 5
+	}
+
+	sem := make(chan struct{}, workerCount)
 	var (
 		mu        sync.Mutex
 		wg        sync.WaitGroup
-		openPorts = make(map[string][]int)
+		openPorts = make(map[string][]int) // IP -> open ports
 	)
 
-	sem := make(chan struct{}, 2) // Strictly cap concurrent workers <= 2
+	// Bounded governor rate
+	gov := governor.NewGovernor(20,
+		governor.WithMaxRPS(50.0),
+		governor.WithConcurrency(workerCount),
+		governor.WithJitter(5*time.Millisecond, 20*time.Millisecond),
+	)
 
-	for _, rawHost := range hosts {
-		host := cleanHost(rawHost)
-		if host == "" {
-			continue
-		}
+	startTime := time.Now()
 
-		// Resolve host IP to confirm it is live before probing ports
-		ips, err := net.LookupHost(host)
-		if err != nil || len(ips) == 0 {
-			continue
-		}
-
+	for _, ip := range ipList {
 		for _, port := range Top100WebAdminPorts {
 			select {
 			case <-ctx.Done():
@@ -96,14 +130,14 @@ func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error
 			wg.Add(1)
 			sem <- struct{}{}
 
-			go func(targetHost string, targetPort int) {
+			go func(targetIP string, targetPort int) {
 				defer wg.Done()
 				defer func() { <-sem }()
 
 				gov.Throttle()
 
-				address := fmt.Sprintf("%s:%d", targetHost, targetPort)
-				d := net.Dialer{Timeout: 2 * time.Second}
+				address := fmt.Sprintf("%s:%d", targetIP, targetPort)
+				d := net.Dialer{Timeout: 500 * time.Millisecond}
 				conn, err := d.DialContext(ctx, "tcp", address)
 				if err != nil {
 					return
@@ -111,30 +145,38 @@ func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error
 				_ = conn.Close()
 
 				mu.Lock()
-				openPorts[targetHost] = append(openPorts[targetHost], targetPort)
+				openPorts[targetIP] = append(openPorts[targetIP], targetPort)
 				mu.Unlock()
-			}(host, port)
+			}(ip, port)
 		}
 	}
 
 	wg.Wait()
+	duration := time.Since(startTime).Round(time.Millisecond)
 
+	// 3. Map open ports back to the associated virtual hostnames for HTTP verification
 	totalOpen := 0
-	for host, ports := range openPorts {
+	for ip, ports := range openPorts {
 		sort.Ints(ports)
 		totalOpen += len(ports)
-		s.Printf("│  [+] %s: %d open web/admin port(s): %v\n", host, len(ports), ports)
+		associatedHosts := ipToHosts[ip]
+
+		s.Printf("│  [+] IP %s open port(s): %v (hosts: %s)\n", ip, ports, strings.Join(associatedHosts, ", "))
+
 		for _, port := range ports {
 			scheme := "http"
 			if port == 443 || port == 8443 || port == 9443 || port == 10443 {
 				scheme = "https"
 			}
-			endpoint := fmt.Sprintf("%s://%s:%d", scheme, host, port)
-			s.URLs = append(s.URLs, endpoint)
+
+			for _, host := range associatedHosts {
+				endpoint := fmt.Sprintf("%s://%s:%d", scheme, host, port)
+				s.AddURL(endpoint)
+			}
 		}
 	}
 
-	s.Printf("│  Light Portscan: complete, found %d active port surface(s)\n", totalOpen)
+	s.Printf("│  Light Portscan: scan complete in %v, identified %d open port surface(s)\n", duration, totalOpen)
 	return nil
 }
 

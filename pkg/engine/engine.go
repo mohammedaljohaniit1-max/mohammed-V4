@@ -447,6 +447,21 @@ func (s *State) AddFinding(f map[string]interface{}) {
 	s.Findings = append(s.Findings, f)
 }
 
+// AddURL appends a discovered URL in a thread-safe manner with deduplication.
+func (s *State) AddURL(rawURL string) {
+	if rawURL == "" {
+		return
+	}
+	s.findingsMu.Lock()
+	defer s.findingsMu.Unlock()
+	for _, u := range s.URLs {
+		if u == rawURL {
+			return
+		}
+	}
+	s.URLs = append(s.URLs, rawURL)
+}
+
 // PhaseProxy returns the proxy manager appropriate for a phase's routing tier
 // (FIX #5). Tier-1 (noisy discovery) phases call PhaseProxy(ProxyModeDirect)
 // and get an inert manager so they never flood Burp; Tier-2 (confirmed

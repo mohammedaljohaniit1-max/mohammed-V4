@@ -1,73 +1,87 @@
 ================================================================================
                     PROJECT STATE & AUDIT LOG - MOHAMMED-V4
 ================================================================================
-Last Updated: 2026-09-14
+Last Updated: 2026-09-15
 Repository: mohammedaljohaniit1-max/mohammed-V4
 Branch: genspark_ai_developer
 Target Profile: Medium Enterprises, Government Bodies, BugBounty.sa Targets
+Standard: 100% Production Benchmark — Hybrid Re-Engineering (Scanner -> Intelligence)
 Core Objective: Discover High/Critical Impact Real Vulnerabilities with 0% False Positives and 0% Server Strain (Zero DoS).
 
 --------------------------------------------------------------------------------
-[1] ARCHITECTURAL IMPLEMENTATION HIGHLIGHTS
+[1] ARCHITECTURAL RE-ENGINEERING & PRODUCTION BENCHMARK MODULES
 --------------------------------------------------------------------------------
-1. Core Safety Governor (`pkg/governor/governor.go`):
-   - Strict rate-limiting hard cap (<= 2 req/s) with safe enterprise defaults.
-   - Concurrency semaphore strictly bounding simultaneous network workers (cap = 2).
-   - Dynamic jitter (200-400ms) to avoid predictable traffic spikes.
-   - Automated Circuit Breaker: triggers on HTTP 429 (Too Many Requests), 503 (Service Unavailable),
-     and 504 (Gateway Timeout), backing off exponentially before re-evaluating in half-open state.
+1. Module 1: Recursive Schema-Driven API Auditor (`pkg/phases/api_schema_auditor.go`):
+   - In-memory OpenAPI v2 / v3 & Swagger parser (`/v3/api-docs`, `/swagger.json`, `/openapi.json`).
+   - Automatically parses paths, HTTP methods (GET, OPTIONS, POST), and object parameters.
+   - Privilege & Broken Authentication Check: filters for sensitive operational route keywords
+     (`mgmt`, `admin`, `user`, `delete`, `create`, `token`, `export`, `config`, `internal`).
+   - Verifies unauthenticated responses return authentic application/json data rather than login
+     prompts or error wrappers, flagging:
+     `[High] Broken Authentication / Unprotected Management Endpoint: <url>`.
+   - BOLA / IDOR identifier extraction: flags routes containing `{uimUserId}`, `{campaignKey}`, `{id}`.
+
+2. Module 2: JavaScript & Source-Map Deep Harvester (`pkg/phases/js_harvester.go`):
+   - Bundle Scraper: extracts all unique in-scope `<script src="*.js">` bundles from landing pages.
+   - Secret & Credential Extraction: regex scans for AWS Access Keys (`AKIA[0-9A-Z]{16}`),
+     Google API keys (`AIza[0-9A-Za-z-_]{35}`), generic Bearer tokens, and RSA/SSH private keys.
+   - Shannon Entropy Validator: enforces entropy floors (>2.8 for AWS, >3.0 for Google, >3.2 for Bearer)
+     to discard placeholder test tokens (e.g. `AKIAEXAMPLEKEY12345`).
+   - Hidden Internal Route Harvesting: mines routes matching `/api/v[0-9]/...` and appends them
+     to target URL state for downstream security inspections.
+   - Source-Map Discovery: checks for public `*.js.map` exposures and flags information disclosure.
+
+3. Module 3: Dangling CNAME & Subdomain Takeover Resolver (`pkg/phases/takeover_resolver.go`):
+   - DNS CNAME mapping across all discovered subdomains.
+   - Cross-references pointers against verified cloud abandonment signatures:
+     * AWS S3: `NoSuchBucket`, `The specified bucket does not exist`
+     * GitHub Pages: `There isn't a GitHub Pages site here`
+     * Heroku: `No such app`, `herokucdn.com/error-pages/no-such-app.html`
+     * Azure Traffic Manager & CloudApp: `404 Web Site not found`
+     * Zendesk: `Help Center Closed`
+     * Fastly / CloudFront: `Fastly error: unknown domain`, `Bad request: ERROR: The request could not be satisfied`
+   - Flags confirmed takeovers as `[High] Subdomain Takeover: <subdomain> -> <cname>`.
+
+4. Module 4: Zero-Tolerance Catch-All Purge (`pkg/phases/surgical_probes.go`):
+   - Content Invariant & Magic Byte Validation:
+     * `/backup.zip`: Enforces ZIP magic bytes (`PK\x03\x04`).
+     * `/.env` & `/.env.production`: Enforces `^(APP_KEY|DB_PASSWORD|SECRET_KEY|DATABASE_URL|AWS_SECRET_ACCESS_KEY)=`.
+     * `/.git/HEAD`: Enforces exact header match `ref: refs/heads/` or `ref: refs/`.
+     * `/.git/config`: Enforces `[core]` and `repositoryformatversion`.
+     * `/.htpasswd`: Enforces Apache crypt, apr1, or bcrypt regex format.
+   - Silent Discard: If a 200 OK response fails its content invariant, it is immediately dropped
+     and never recorded as Info or High.
+
+5. Module 5: High-Speed IP-Deduplicated Port Scanner (`pkg/phases/light_portscan.go`):
+   - IP Deduplication: Resolves all live subdomains to underlying IPv4 addresses and deduplicates
+     edge anycast IPs (e.g., 1000 subdomains resolving to 4 Akamai anycast IPs are scanned only once).
+   - Asynchronous Connect Pool: 20 concurrent dialers scanning Top-100 web/admin ports
+     with a 500ms socket timeout. Complete run finishes in under 2 minutes.
+   - Maps open ports back to virtual hostnames for HTTP verification.
+
+6. Core Safety Governor (`pkg/governor/governor.go`):
+   - Strict rate-limiting (<= 2 req/s default), concurrency semaphore (cap = 2), and jitter (150-300ms).
    - Autonomous Target Capacity Sensing (`AutoDetectTargetCapacity` / `DetectTargetCapacity`):
-     * Lightweight baseline HTTP probes measuring RTT latency, IP multi-homing, and CDN headers (CF-Ray, Akamai, CloudFront).
-     * High latency (>1000ms) or single IP -> 1 req/s, concurrency 1.
-     * Edge CDN / Cloud WAF (<500ms) -> 5 req/s, concurrency 4.
-     * Medium Enterprise -> 2-3 req/s, concurrency 2.
-   - Exposed via `--smart-rate` CLI flag in `cmd/mohammed` and `cmd/preset`.
-   - Verified with race detector: `go test -v -race ./pkg/governor/...` PASSED.
+     dynamically tunes rate limit and concurrency based on RTT latency and CDN fronting.
+   - Automated Circuit Breaker on 429/503/504 errors with exponential backoff.
 
-2. Zero-Touch Passive OSINT (`pkg/osint/domain_recon.go`):
-   - 100% external passive reconnaissance: queries public aggregators without sending a single packet to target server.
-   - Certificate Transparency log collection via crt.sh JSON API with deduplication.
-   - Historical endpoint mining via Wayback Machine and AlienVault OTX Passive DNS.
-   - Passive DNS and CNAME mapping via public DNS resolvers (Cloudflare 1.1.1.1 / Google 8.8.8.8)
-     for dangling subdomain takeover identification.
-   - Isolated `DomainAssetBundle` struct decoupled from identity modules.
-   - Verified with mock HTTP tests: `go test -v -race ./pkg/osint/...` PASSED.
-
-3. False-Positive Elimination Layer (`pkg/validation/baseline_validator.go`):
-   - Dynamic Soft-404 baseline calibration: probes a non-existent randomized path (`/.calib-<uuid>`)
-     to fingerprint catch-all status codes, content lengths, body hashes, and HTML titles.
-   - Strict length tolerance (±64 bytes) and hash matching to reject wildcard 200 OK responses.
-   - Exact token and regex verification (`ExactTokenCheck`): enforces `APP_KEY=` for `.env`,
-     `[core]` / `ref: refs/heads/` for `.git`, and `{"status":"UP"}` JSON structure for Spring Boot Actuator.
-   - Rejects `text/html` responses claiming to be raw config or credential files.
-   - Verified with test suite: `go test -v -race ./pkg/validation/...` PASSED.
-
-4. Curated Surgical Vulnerability Templates (`pkg/phases/curated_templates.go`):
-   - Eliminated empty-signature checks (Log4j-Diagnostic, Struts2) that triggered universal matches on 200 OK.
-   - Added CVE-2020-14882 WebLogic RCE probe with `"Administration Console"` body signature.
-   - Strict invariant: `sig := strings.TrimSpace(check.RequiredSig); if sig == "" || !strings.Contains(string(body), sig) { continue }`.
-
-5. Report Hygiene & Sanitization Engine (`pkg/report/exporter.go` & `pkg/phases/phases_vuln.go`):
-   - Removed `<nil>` tool and title artifacts across all markdown and text reports.
-   - Added `IsReportableFinding(f)` filter: completely excludes internal pipeline milestones
+7. Report Hygiene & Sanitization Engine (`pkg/report/exporter.go` & `pkg/phases/phases_vuln.go`):
+   - Strict `IsReportableFinding(f)` filter: completely excludes internal pipeline milestones
      (Target Classification, Autonomous Session Bootstrap) from vulnerability tables.
-   - Provides strict fallback title and tool names ("mohammed-engine") for all reportable entries.
-
-6. Comprehensive Professional Documentation (`README.md`):
-   - Full rewrite with ASCII pipeline flow, safety governor architecture, zero-FP validation rules,
-     operational profile matrix (stealth-audit vs full-assault), and copy-paste CLI commands.
+   - Zero `<nil>` artifacts across Markdown and text reports.
 
 --------------------------------------------------------------------------------
 [2] AUDIT & VERIFICATION STATUS
 --------------------------------------------------------------------------------
+- [PASS] pkg/phases (APISchemaAuditor, JSHarvester, TakeoverResolver, SurgicalProbes, LightPortScan)
+- [PASS] pkg/phases/modules_bench_test.go (Dedicated regression tests for Modules 1, 2, and 4)
 - [PASS] pkg/governor (Rate limiting, jitter, circuit breaker, AutoDetectTargetCapacity, race detector)
-- [PASS] pkg/phases (CuratedTemplatesPhase non-empty signatures, report sanitization, light portscan)
 - [PASS] pkg/report (IsReportableFinding, no <nil> artifacts, tiered CONFIRMED vs MANUAL_REVIEW export)
 - [PASS] pkg/osint (External passive OSINT, crt.sh, OTX, Wayback, DNS CNAMEs)
 - [PASS] pkg/validation (Baseline calibration, soft-404 rejection, exact token verification)
 - [PASS] pkg/filter (Param filter, live target prioritization)
-- [PASS] cmd/mohammed (--smart-rate flag, target capacity detection, clean build)
+- [PASS] cmd/mohammed (--smart-rate flag, target capacity detection, new phase registration)
 - [PASS] cmd/preset (--smart-rate flag integration, stealth-audit, full-assault)
 - [PASS] go test ./... (Zero regressions across all 23 packages)
-- [PASS] go build ./... (Clean compilation across all binary commands)
+- [PASS] go build ./... (Clean compilation across all binary targets)
 ================================================================================

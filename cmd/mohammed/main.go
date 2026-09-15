@@ -376,6 +376,9 @@ func runScan(args []string) {
 			&phases.VulnScanPhase{},           // 17
 			&phases.SurgicalProbesPhase{},     // 17b: Pure Go Native Surgical Probes (.env, .git, Actuator, Swagger)
 			&phases.CuratedTemplatesPhase{},   // 17c: Curated Surgical Templates (<=30 High-Impact CVEs/Exposures)
+			&phases.APISchemaAuditorPhase{},   // 17d: Recursive Schema-Driven API Auditor
+			&phases.JSHarvesterPhase{},         // 17e: JavaScript & Source-Map Deep Harvester
+			&phases.TakeoverResolverPhase{},     // 17f: Dangling CNAME & Subdomain Takeover Resolver
 			&phases.XSSPhase{},                // 18
 		&phases.SQLiPhase{},               // 19
 		&phases.SSRFPhase{},               // 20
