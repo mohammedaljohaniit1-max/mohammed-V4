@@ -60,6 +60,14 @@ var CuratedSurgicalChecks = []CuratedTargetCheck{
 	{ID: "Drupal-Changelog", Category: "Admin Panel", Path: "/CHANGELOG.txt", Severity: "Low", RequiredSig: "Drupal", Disallowed: "text/html"},
 }
 
+func init() {
+	for i, check := range CuratedSurgicalChecks {
+		if strings.TrimSpace(check.RequiredSig) == "" {
+			panic(fmt.Sprintf("curated check [%d] %q has an empty RequiredSig - signature required to prevent false positives", i, check.ID))
+		}
+	}
+}
+
 // CuratedTemplatesPhase executes targeted, high-impact checks (Coffinxp methodology).
 type CuratedTemplatesPhase struct{}
 

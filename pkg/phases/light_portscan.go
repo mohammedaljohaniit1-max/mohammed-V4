@@ -41,10 +41,14 @@ type LightPortScanPhase struct{}
 
 func (p *LightPortScanPhase) Name() string { return "High-Speed IP-Deduplicated Port Scanner" }
 func (p *LightPortScanPhase) Description() string {
-	return "Resolves subdomains to unique IPv4s, deduplicates edge IPs, and scans Top-100 web/admin ports via a 20-worker asynchronous dial pool (<=500ms socket timeout)"
+	return "Resolves subdomains to unique IPv4s, deduplicates edge IPs, and scans Top-100 web/admin ports via a 25-worker asynchronous dial pool (<=400ms connect timeout, 3-minute hard ceiling)"
 }
 
 func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error {
+	// Enforce 3-minute hard ceiling for the entire phase execution
+	scanCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+
 	if len(s.LiveHosts) == 0 && len(s.Subdomains) == 0 {
 		s.Printf("│  Light Portscan: SKIP (no live hosts or subdomains)\n")
 		return nil
@@ -94,8 +98,8 @@ func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error
 
 	s.Printf("│  Light Portscan: deduplicated %d hosts -> %d unique IP address(es)\n", len(hosts), len(ipList))
 
-	// 2. Asynchronous Connect Pool (20 concurrent dialers, 500ms timeout per socket)
-	workerCount := 20
+	// 2. Asynchronous Connect Pool (25 concurrent dialers, 400ms timeout per socket)
+	workerCount := 25
 	if len(ipList) < workerCount {
 		workerCount = len(ipList)
 	}
@@ -111,7 +115,7 @@ func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error
 	)
 
 	// Bounded governor rate
-	gov := governor.NewGovernor(20,
+	gov := governor.NewGovernor(25,
 		governor.WithMaxRPS(50.0),
 		governor.WithConcurrency(workerCount),
 		governor.WithJitter(5*time.Millisecond, 20*time.Millisecond),
@@ -122,8 +126,9 @@ func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error
 	for _, ip := range ipList {
 		for _, port := range Top100WebAdminPorts {
 			select {
-			case <-ctx.Done():
-				return nil
+			case <-scanCtx.Done():
+				s.Printf("│  [!] Light Portscan: reached safety limit or deadline, aborting remaining dials\n")
+				break
 			default:
 			}
 
@@ -137,8 +142,8 @@ func (p *LightPortScanPhase) Execute(ctx context.Context, s *engine.State) error
 				gov.Throttle()
 
 				address := fmt.Sprintf("%s:%d", targetIP, targetPort)
-				d := net.Dialer{Timeout: 500 * time.Millisecond}
-				conn, err := d.DialContext(ctx, "tcp", address)
+				d := net.Dialer{Timeout: 400 * time.Millisecond}
+				conn, err := d.DialContext(scanCtx, "tcp", address)
 				if err != nil {
 					return
 				}
