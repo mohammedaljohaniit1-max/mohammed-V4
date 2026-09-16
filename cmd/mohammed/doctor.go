@@ -7,20 +7,22 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // DoctorToolStatus holds validation information for one tool.
 type DoctorToolStatus struct {
-	Name        string
-	Category    string
-	Installed   bool
-	Path        string
-	Version     string
+	Name      string
+	Category  string
+	Installed bool
+	Path      string
+	Version   string
 }
 
-// RunEcosystemDoctor performs comprehensive health checks across tools, network, DNS, and filesystem.
+// RunEcosystemDoctor performs comprehensive health checks across tools, network, DNS, filesystem, and system resources.
 func RunEcosystemDoctor() {
 	fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║       MOHAMMED-V4 RIGOROUS SYSTEM & ECOSYSTEM DOCTOR AUDIT       ║")
@@ -35,16 +37,21 @@ func RunEcosystemDoctor() {
 		goPath = home + "/go"
 	}
 	goBin := goPath + "/bin"
+	home, _ := os.UserHomeDir()
+	localBin := home + "/.local/bin"
 	currPath := os.Getenv("PATH")
 	if !strings.Contains(currPath, goBin) {
-		_ = os.Setenv("PATH", goBin+":"+currPath)
+		currPath = goBin + ":" + currPath
 	}
+	if !strings.Contains(currPath, localBin) {
+		currPath = localBin + ":" + currPath
+	}
+	_ = os.Setenv("PATH", currPath)
 
 	allFound := true
 	for idx, tool := range EssentialEcosystem {
 		path, err := exec.LookPath(tool.Name)
 		if err != nil {
-			// Also check goBin specifically
 			candidate := filepath.Join(goBin, tool.Name)
 			if info, sErr := os.Stat(candidate); sErr == nil && !info.IsDir() {
 				path = candidate
@@ -61,7 +68,6 @@ func RunEcosystemDoctor() {
 			status.Installed = true
 			status.Path = path
 
-			// Attempt version discovery
 			verCmd := exec.Command(path, "-version")
 			if tool.Name == "subfinder" || tool.Name == "dnsx" || tool.Name == "httpx" || tool.Name == "katana" || tool.Name == "alterx" {
 				verCmd = exec.Command(path, "-version")
@@ -93,8 +99,29 @@ func RunEcosystemDoctor() {
 
 	fmt.Println()
 
-	// 2. Network & DNS Latency Verification
-	fmt.Println("── 2. Network Connectivity & DNS Latency ─────────────────────────────")
+	// 2. System Resource Resilience (RAM, File Descriptors, CPU)
+	fmt.Println("── 2. Local Resource Availability & Concurrency Headroom ────────────")
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	numCPU := runtime.NumCPU()
+	fmt.Printf("  ✅ CPU Cores Available : %d logical cores\n", numCPU)
+	fmt.Printf("  ✅ Process Heap Alloc  : %.2f MB (Sys: %.2f MB)\n", float64(memStats.Alloc)/1024/1024, float64(memStats.Sys)/1024/1024)
+
+	// File descriptor check (ulimit -n)
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err == nil {
+		fmt.Printf("  ✅ File Descriptors    : Current Limit = %d (Max = %d)\n", rLimit.Cur, rLimit.Max)
+		if rLimit.Cur < 1024 {
+			fmt.Println("     ⚠️  Warning: Low file descriptor limit (<1024) may restrict async dialer pools.")
+		}
+	} else {
+		fmt.Printf("  ⚠️  File Descriptors    : Could not query rlimit (%v)\n", err)
+	}
+
+	fmt.Println()
+
+	// 3. Network & DNS Latency Verification
+	fmt.Println("── 3. Network Connectivity & DNS Latency ─────────────────────────────")
 	testDNSResolvers := []string{
 		"1.1.1.1:53", // Cloudflare
 		"8.8.8.8:53", // Google
@@ -127,8 +154,8 @@ func RunEcosystemDoctor() {
 
 	fmt.Println()
 
-	// 3. Socket Binding Capabilities
-	fmt.Println("── 3. Local Socket Binding Capabilities ─────────────────────────────")
+	// 4. Socket Binding Capabilities
+	fmt.Println("── 4. Local Socket Binding Capabilities ─────────────────────────────")
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Printf("  ❌ TCP Socket Binding: Failed (%v)\n", err)
@@ -149,8 +176,8 @@ func RunEcosystemDoctor() {
 
 	fmt.Println()
 
-	// 4. Output Workspace Read/Write Permissions
-	fmt.Println("── 4. Workspace Filesystem Read/Write Permissions ───────────────────")
+	// 5. Output Workspace Read/Write Permissions
+	fmt.Println("── 5. Workspace Filesystem Read/Write Permissions ───────────────────")
 	testDir := "output"
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		fmt.Printf("  ❌ Workspace directory creation (%s): Failed (%v)\n", testDir, err)
@@ -173,7 +200,7 @@ func RunEcosystemDoctor() {
 	fmt.Println()
 	fmt.Println("───────────────────────────────────────────────────────────────────")
 	if allFound {
-		fmt.Println("🎉 SYSTEM STATUS: HEALTHY — All essential zero-API tools & networking passed.")
+		fmt.Println("🎉 SYSTEM STATUS: HEALTHY — All essential zero-API tools, system resources & networking passed.")
 	} else {
 		fmt.Println("⚠️  SYSTEM STATUS: ATTENTION NEEDED — Run './mohammed setup' to install missing tools.")
 	}

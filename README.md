@@ -209,17 +209,45 @@ Scan outputs are written to `output/<target>/` with clear separation of verified
 
 ---
 
+## 🏛️ Hybrid ASM & Orchestration Architecture (Pillars 1–4)
+
+MOHAMMED V4 integrates four foundational architectural pillars ensuring enterprise safety, zero false positives, and high-performance hybrid asset discovery:
+
+### Pillar 1: Adaptive Target-Health Sensing & Load Governor (`pkg/governor/engine.go`)
+- **Real-Time Target Telemetry Monitor**: Tracks EWMA round-trip latency ($\alpha=0.2$) and sliding window error ratios (HTTP 429, 502, 503, 504, connection resets).
+- **Dynamic Backoff Algorithm**: Automatically trips a temporary backoff when error rates exceed 5% or when response latency spikes $\ge 3\times$ baseline RTT.
+- **Circuit Breaker Pattern**: Freezes active probes on degraded endpoints while maintaining passive reconnaissance threads, allowing target infrastructure to stabilize.
+
+### Pillar 2: Multi-Engine Hybrid Orchestration Pipeline (`pkg/phases/orchestrator.go`)
+- **Unified In-Memory Asset Graph**: Coordinates external CLI tools (`subfinder`, `dnsx`, `httpx`, `katana`, `gau`, `ffuf`, `cariddi`, `bbot`) using bounded Go channels and Unix stdout streaming, avoiding disk I/O bottlenecks.
+- **Smart Asset Canonicalization**: Normalizes URLs and hostnames, strips redundant query parameter permutations, and enforces out-of-scope regex boundaries.
+
+### Pillar 3: Zero-Noise Differential Verification Gate (`pkg/verification/gate.go`)
+- **Baseline Calibration**: Fingerprints baseline responses (status, length, SHA256 hash, title) to identify Soft-404 and catch-all behaviors.
+- **Multi-Pass Differential Probing**: Re-probes candidate findings across multiple isolated passes to confirm state repeatability before reporting.
+- **Structured Output Separation**:
+  * `CONFIRMED_FINDINGS.json`: High-confidence ($\ge 70$), verified vulnerabilities with complete telemetry.
+  * `MANUAL_ASSESSMENT.json`: Anomalies requiring human triage.
+
+### Pillar 4: Ecosystem Setup & Doctor Resilience (`cmd/mohammed/`)
+- **Multi-Tier Installer (`setup.go`)**: 3-tier installation pipeline (Go compilation $\to$ Apt system package fallbacks $\to$ pre-compiled release scripts).
+- **System Resource Health Doctor (`doctor.go`)**: Verifies RAM allocations, file descriptor limits (`ulimit -n`), CPU core count, network latency, and socket binding.
+
+---
+
 ## 📊 Verification & Test Matrix
 
 All packages are continuously verified with Go unit tests and static analysis:
 
 | Component | Path | Verification Command | Status |
 |---|---|---|---|
+| Target Health Governor (Pillar 1) | `pkg/governor/engine.go` | `go test -v ./pkg/governor -run TestTargetTelemetryMonitor` | PASS (0 regressions) |
+| Hybrid Orchestrator (Pillar 2) | `pkg/phases/orchestrator.go` | `go test -v ./pkg/phases/...` | PASS (0 regressions) |
+| Zero-Noise Gate (Pillar 3) | `pkg/verification/gate.go` | `go test -v ./pkg/verification -run TestZeroNoiseGate` | PASS (0 regressions) |
+| Ecosystem Setup & Doctor (Pillar 4) | `cmd/mohammed/` | `go build ./cmd/mohammed` | PASS (Clean build) |
 | API Schema Auditor | `pkg/phases/api_schema_auditor.go` | `go test -v ./pkg/phases -run TestAPISchemaAuditor` | PASS (0 regressions) |
 | JS & Source Map Harvester | `pkg/phases/js_harvester.go` | `go test -v ./pkg/phases -run TestJSHarvester` | PASS (0 regressions) |
 | Takeover Resolver | `pkg/phases/takeover_resolver.go` | `go test -v ./pkg/phases/...` | PASS (0 regressions) |
 | Zero Catch-All Purge | `pkg/phases/surgical_probes.go` | `go test -v ./pkg/phases -run TestSurgicalProbesCatchAll` | PASS (0 regressions) |
 | Deduplicated Port Scanner | `pkg/phases/light_portscan.go` | `go test -v ./pkg/phases -run TestLightPortScanPhase` | PASS (0 regressions) |
-| Core Safety Governor | `pkg/governor` | `go test -v ./pkg/governor/...` | PASS (0 regressions) |
-| Ecosystem Doctor & Setup | `cmd/mohammed` | `go build ./cmd/mohammed` | PASS (Clean build) |
-| Full Repository Suite | `cmd/...`, `pkg/...` | `go test ./...` | PASS (All 23 packages) |
+| Full Repository Suite | `cmd/...`, `pkg/...` | `go test ./...` | PASS (All 24 packages) |

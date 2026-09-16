@@ -85,3 +85,28 @@ Core Objective: Discover High/Critical Impact Real Vulnerabilities with 0% False
 - [PASS] go test ./... (Zero regressions across all 23 packages)
 - [PASS] go build ./... (Clean compilation across all binary targets)
 ================================================================================
+
+--------------------------------------------------------------------------------
+[3] PILLARS 1-4 HYBRID ORCHESTRATION & TELEMETRY IMPLEMENTATION
+--------------------------------------------------------------------------------
+1. Pillar 1: Adaptive Target-Health Sensing & Load Governor (pkg/governor/engine.go):
+   - Real-Time Target Telemetry Monitor with EWMA latency calculation (alpha = 0.2).
+   - Sliding window error rate evaluation across HTTP 429, 502, 503, 504 and connection resets.
+   - Dynamic Backoff Algorithm: pauses active testing when error rate > 5% or EWMA RTT spikes >= 3x baseline.
+   - Circuit Breaker Pattern: temporarily suspends endpoint requests with configurable cooldowns.
+
+2. Pillar 2: Multi-Engine Hybrid Orchestration Pipeline (pkg/phases/orchestrator.go):
+   - In-memory asset graph streaming tool output line-by-line via Unix pipes and Go channels.
+   - Smart URL & hostname canonicalization stripping default ports and sorting query parameters.
+   - Strict regex-based out-of-scope boundary enforcement.
+
+3. Pillar 3: Zero-Noise Differential Verification Gate (pkg/verification/gate.go):
+   - Baseline calibration fingerprinting HTTP status, content length, body SHA256 hash, and soft-404 indicators.
+   - Multi-pass differential probing ensuring deterministic verification before reporting.
+   - Structured JSON artifact export: CONFIRMED_FINDINGS.json (Confidence >= 70) vs MANUAL_ASSESSMENT.json.
+
+4. Pillar 4: Ecosystem Setup & Doctor Resilience (cmd/mohammed/setup.go & doctor.go):
+   - 3-tier installation resilience: Go compilation -> Apt system packages -> pre-compiled release scripts.
+   - Doctor verification of available CPU cores, process memory allocation, and file descriptor limits (ulimit -n).
+   - End-to-end network, UDP DNS latency, and ephemeral socket binding validation.
+================================================================================

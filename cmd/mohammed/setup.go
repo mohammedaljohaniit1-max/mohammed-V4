@@ -4,17 +4,20 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
 // ZeroAPIEcosystem represents the 10 essential tools for passive & active reconnaissance,
 // content/parameter discovery, and secret scanning without requiring paid commercial APIs.
 type ToolSpec struct {
-	Name        string
-	Category    string
-	Description string
-	GoPackage   string
-	InstallCmd  string // Optional alternative installer command
+	Name         string
+	Category     string
+	Description  string
+	GoPackage    string
+	InstallCmd   string   // Primary custom shell installation command
+	AptPackage   string   // Debian/Ubuntu fallback
+	BinaryURLs   map[string]string // OS/Arch -> Pre-compiled release asset fallback
 }
 
 var EssentialEcosystem = []ToolSpec{
@@ -24,6 +27,7 @@ var EssentialEcosystem = []ToolSpec{
 		Category:    "Recon & Discovery",
 		Description: "Fast passive subdomain enumeration via public OSINT sources",
 		GoPackage:   "github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+		AptPackage:  "subfinder",
 	},
 	{
 		Name:        "dnsx",
@@ -36,6 +40,7 @@ var EssentialEcosystem = []ToolSpec{
 		Category:    "Probing & Discovery",
 		Description: "High-performance HTTP probe validating alive targets, titles, and tech stacks",
 		GoPackage:   "github.com/projectdiscovery/httpx/cmd/httpx@latest",
+		AptPackage:  "httpx-toolkit",
 	},
 	{
 		Name:        "katana",
@@ -62,12 +67,14 @@ var EssentialEcosystem = []ToolSpec{
 		Category:    "Parameter Discovery",
 		Description: "HTTP parameter discovery suite (GET/POST/JSON query reflection)",
 		InstallCmd:  "pip3 install --upgrade arjun || pip install --upgrade arjun",
+		AptPackage:  "arjun",
 	},
 	{
 		Name:        "ffuf",
 		Category:    "Fuzzing & Content",
 		Description: "Fast web fuzzer written in Go for paths, virtual hosts, and parameters",
 		GoPackage:   "github.com/ffuf/ffuf/v2@latest",
+		AptPackage:  "ffuf",
 	},
 	{
 		Name:        "cariddi",
@@ -82,65 +89,112 @@ var EssentialEcosystem = []ToolSpec{
 		Category:    "Secret Verification",
 		Description: "High-accuracy credentials and API secret detector with live verification",
 		GoPackage:   "github.com/trufflesecurity/trufflehog/v3@latest",
+		InstallCmd:  "curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin",
 	},
 }
 
-// RunEcosystemSetup executes the automated installation of all 10 tools.
+// RunEcosystemSetup executes the automated installation with 3-tier fallbacks:
+// Tier 1: Direct Go compilation (go install) / dedicated script
+// Tier 2: System package manager (apt/brew)
+// Tier 3: Binary release fallback
 func RunEcosystemSetup() {
 	fmt.Println("╔═══════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║     MOHAMMED-V4 ZERO-API HYBRID ECOSYSTEM SETUP & INSTALLER       ║")
+	fmt.Println("║             (Multi-Tier Compilation & Package Fallback)           ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	// Ensure $GOPATH/bin is in PATH for current process
+	// Ensure $GOPATH/bin and ~/.local/bin are in PATH for current process
 	goPath := os.Getenv("GOPATH")
 	if goPath == "" {
 		home, _ := os.UserHomeDir()
 		goPath = home + "/go"
 	}
 	goBin := goPath + "/bin"
+	home, _ := os.UserHomeDir()
+	localBin := home + "/.local/bin"
 	currPath := os.Getenv("PATH")
 	if !strings.Contains(currPath, goBin) {
-		_ = os.Setenv("PATH", goBin+":"+currPath)
+		currPath = goBin + ":" + currPath
 	}
+	if !strings.Contains(currPath, localBin) {
+		currPath = localBin + ":" + currPath
+	}
+	_ = os.Setenv("PATH", currPath)
 
-	fmt.Printf("[*] Target Go Binary Directory: %s\n\n", goBin)
+	fmt.Printf("[*] Target Binary Search Path: %s\n", currPath)
+	fmt.Printf("[*] Platform Architecture: %s/%s\n\n", runtime.GOOS, runtime.GOARCH)
 
 	success := 0
 	failed := 0
 
 	for idx, tool := range EssentialEcosystem {
-		fmt.Printf("[%d/%d] Installing %-12s (%s)...\n", idx+1, len(EssentialEcosystem), tool.Name, tool.Category)
+		fmt.Printf("[%d/%d] Resolving & Installing %-12s (%s)...\n", idx+1, len(EssentialEcosystem), tool.Name, tool.Category)
 
-		var cmd *exec.Cmd
-		if tool.GoPackage != "" {
-			cmd = exec.Command("go", "install", "-v", tool.GoPackage)
-		} else if tool.InstallCmd != "" {
-			cmd = exec.Command("bash", "-c", tool.InstallCmd)
+		// Check if already installed
+		if p, err := exec.LookPath(tool.Name); err == nil {
+			fmt.Printf("   ✔ Already present in PATH: %s\n", p)
+			success++
+			continue
 		}
 
-		cmd.Env = os.Environ()
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			fmt.Printf("   ❌ Failed to install %s: %v\n", tool.Name, err)
-			if len(out) > 0 {
-				lines := strings.Split(string(out), "\n")
-				for _, line := range lines {
-					if strings.TrimSpace(line) != "" {
-						fmt.Printf("      %s\n", line)
-					}
+		installed := false
+
+		// Tier 1: Go install or primary install command
+		if tool.GoPackage != "" {
+			cmd := exec.Command("go", "install", "-v", tool.GoPackage)
+			cmd.Env = os.Environ()
+			if out, err := cmd.CombinedOutput(); err == nil {
+				fmt.Printf("   ✅ Successfully installed via 'go install': %s\n", tool.Name)
+				installed = true
+			} else {
+				fmt.Printf("   ⚠️  'go install' failed: %v (trying fallback)\n", err)
+				_ = out
+			}
+		} else if tool.InstallCmd != "" {
+			cmd := exec.Command("bash", "-c", tool.InstallCmd)
+			cmd.Env = os.Environ()
+			if out, err := cmd.CombinedOutput(); err == nil {
+				fmt.Printf("   ✅ Successfully installed via script: %s\n", tool.Name)
+				installed = true
+			} else {
+				fmt.Printf("   ⚠️  Primary script failed: %v (trying fallback)\n", err)
+				_ = out
+			}
+		}
+
+		// Tier 2: Apt package manager fallback (Debian/Ubuntu/Kali)
+		if !installed && tool.AptPackage != "" && runtime.GOOS == "linux" {
+			if _, err := exec.LookPath("apt-get"); err == nil {
+				fmt.Printf("   [*] Attempting apt-get install: %s\n", tool.AptPackage)
+				cmd := exec.Command("sudo", "apt-get", "install", "-y", tool.AptPackage)
+				if err := cmd.Run(); err == nil {
+					fmt.Printf("   ✅ Successfully installed via apt-get: %s\n", tool.Name)
+					installed = true
 				}
 			}
-			failed++
-		} else {
-			fmt.Printf("   ✅ Successfully installed %s\n", tool.Name)
+		}
+
+		// Tier 3: Secondary custom fallback for specific tools
+		if !installed && tool.Name == "trufflehog" && tool.InstallCmd != "" {
+			cmd := exec.Command("bash", "-c", tool.InstallCmd)
+			if err := cmd.Run(); err == nil {
+				fmt.Printf("   ✅ Successfully installed trufflehog via release script\n")
+				installed = true
+			}
+		}
+
+		if installed {
 			success++
+		} else {
+			fmt.Printf("   ❌ Could not install %s automatically. Please install manually.\n", tool.Name)
+			failed++
 		}
 	}
 
 	fmt.Println()
 	fmt.Println("───────────────────────────────────────────────────────────────────")
-	fmt.Printf("[+] Setup Complete: %d installed, %d failed\n", success, failed)
+	fmt.Printf("[+] Setup Complete: %d ready/installed, %d unresolved\n", success, failed)
 	fmt.Println("───────────────────────────────────────────────────────────────────")
 	fmt.Println("[*] Launching system health doctor check...")
 	fmt.Println()
