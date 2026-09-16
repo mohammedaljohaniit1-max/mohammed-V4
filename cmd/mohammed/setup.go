@@ -5,7 +5,9 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"net/http"
 	"strings"
+	"time"
 )
 
 // ZeroAPIEcosystem represents the 10 essential tools for passive & active reconnaissance,
@@ -198,5 +200,45 @@ func RunEcosystemSetup() {
 	fmt.Println("───────────────────────────────────────────────────────────────────")
 	fmt.Println("[*] Launching system health doctor check...")
 	fmt.Println()
+	// Provision Ollama & Models
+	ProvisionOllamaLocal()
+	
 	RunEcosystemDoctor()
+}
+
+// ProvisionOllamaLocal checks for Ollama, installs it if missing, ensures service is up, and pulls llama3.2:3b.
+func ProvisionOllamaLocal() {
+	fmt.Println("── 0. Local AI Service Provisioning (Ollama) ─────────────────────────")
+	if _, err := exec.LookPath("ollama"); err != nil {
+		fmt.Println("   [*] Ollama binary not found in PATH. Attempting automated installation...")
+		cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
+		cmd.Env = os.Environ()
+		if _, err := cmd.CombinedOutput(); err != nil {
+			fmt.Printf("   ⚠️  Automated Ollama installation failed: %v\n", err)
+		} else {
+			fmt.Println("   ✅ Successfully installed Ollama binary via official script")
+		}
+	} else {
+		fmt.Println("   ✔ Ollama binary found in system PATH")
+	}
+
+	// Verify or start service
+	resp, err := http.Get("http://127.0.0.1:11434/api/tags")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		fmt.Println("   [*] Ollama service is not responding. Starting ollama serve in background...")
+		_ = exec.Command("bash", "-c", "systemctl start ollama 2>/dev/null || nohup ollama serve >/dev/null 2>&1 &").Start()
+		time.Sleep(3 * time.Second)
+	}
+
+	// Verify again
+	resp, err = http.Get("http://127.0.0.1:11434/api/tags")
+	if err == nil && resp.StatusCode == http.StatusOK {
+		fmt.Println("   ✅ Ollama service is active and responding on http://127.0.0.1:11434")
+		fmt.Println("   [*] Ensuring baseline model llama3.2:3b is pulled...")
+		pullCmd := exec.Command("ollama", "pull", "llama3.2:3b")
+		_ = pullCmd.Run()
+	} else {
+		fmt.Println("   ⚠️  Ollama service offline. Scan will fallback to Gemini Cloud API if configured or deterministic heuristics.")
+	}
+	fmt.Println()
 }

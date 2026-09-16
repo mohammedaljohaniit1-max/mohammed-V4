@@ -74,6 +74,7 @@ type APIKeys struct {
 }
 
 type OllamaConfig struct {
+	GeminiAPIKey   string  `yaml:"gemini_api_key"`
 	Enabled     bool    `yaml:"enabled"`
 	Endpoint    string  `yaml:"endpoint"`
 	Model       string  `yaml:"model"`
