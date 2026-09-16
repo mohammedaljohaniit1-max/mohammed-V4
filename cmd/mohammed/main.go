@@ -129,13 +129,13 @@ func main() {
 		fmt.Print(banner)
 		fmt.Print(helpText)
 
-	case "doctor":
-		fmt.Print(banner)
-		runDoctor()
+		case "doctor":
+			fmt.Print(banner)
+			RunEcosystemDoctor()
 
-	case "setup":
-		fmt.Print(banner)
-		runSetup()
+		case "setup":
+			fmt.Print(banner)
+			RunEcosystemSetup()
 
 	case "scan":
 		fmt.Print(banner)

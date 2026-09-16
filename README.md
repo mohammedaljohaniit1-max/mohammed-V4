@@ -1,6 +1,6 @@
-# MOHAMMED V4 — Autonomous Attack Surface & Exploit Engine
+# MOHAMMED V4 — Autonomous Attack Surface & Defensive Audit Engine
 
-**Zero-Touch, Governed Offensive Security Engine for Enterprise & Bug Bounty Audits (Production Benchmark)**
+**High-Assurance, Governed Attack Surface Management & Security Verification Platform**
 
 [![Go Version](https://img.shields.io/badge/Go-1.22.5%2B-blue.svg)](https://golang.org)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Kali-red.svg)](https://www.kali.org)
@@ -10,30 +10,35 @@
 
 ---
 
-## 🎯 Executive Overview
+## 🎯 Executive Overview & Pipeline Architecture
 
-**MOHAMMED V4** is a high-assurance, multi-stage automated attack surface management and ethical penetration testing framework engineered for **Enterprise Platforms, Government Ministries, and Bug Bounty Programs** (HackerOne, Bugcrowd, BugBounty.sa).
+**MOHAMMED V4** is a high-assurance, multi-stage automated attack surface management (ASM) and diagnostic security audit engine designed for **Enterprise Networks, Organizations, and Authorized Bug Bounty Asset Discovery**.
 
-Following intensive audits against enterprise targets (such as Akamai-fronted enterprise apps and Red Bull assets), MOHAMMED-V4 has transitioned from a standard scanner into a **Next-Gen Attack Surface Intelligence Engine** designed to discover high-impact, reportable security defects with **zero denial-of-service risk** and **zero false positives**.
+Built to replace brittle multi-tool bash scripts with a single unified, resilient Go framework, MOHAMMED V4 operates on a strict **Zero-API, Zero-False-Positive, and Target-Safety** foundation:
+- **Zero Commercial API Dependency**: Operates entirely using native public OSINT intelligence (Certificate Transparency logs, Wayback CDX, AlienVault OTX, DNS) and high-speed native Go scanners.
+- **Strict Content Invariant Validation**: Eliminates phantom alerts on wildcard DNS or custom 404/200-OK landing pages via exact magic-byte verification, strict regex patterns, and baseline diffing.
+- **Safety Governor Protection**: Guarantees zero denial-of-service risk on audited systems with autonomous capacity sensing, rate throttling, and automatic circuit breakers.
 
 ```
                            MOHAMMED V4 PIPELINE ARCHITECTURE
    
    +---------------------------------------------------------------------------------+
-   |                           PHASE 00-02: PASSIVE OSINT                            |
-   |   Public CT Logs (crt.sh)  *  AlienVault OTX  *  Wayback History  *  Passive DNS|
+   |                           PHASE 00-02: ZERO-API PASSIVE OSINT                   |
+   |   Public CT Logs (crt.sh, certspotter) * Wayback CDX * AlienVault OTX * DNS     |
+   |   -> Native Keyless Scrapers & Shodan InternetDB IP Intelligence                |
    +---------------------------------------------------------------------------------+
                                          |
                                          v
    +---------------------------------------------------------------------------------+
    |               PHASE 03-07: ATTACK SURFACE RECON & LIVE PROBING                  |
-   |   Passive Subdomain Fan-out  *  OS-Stub DNS Recovery  *  Live HTTP Pacing       |
+   |   subfinder * dnsx (deduplication & wildcard filtering) * httpx live probing    |
    +---------------------------------------------------------------------------------+
                                          |
                                          v
    +---------------------------------------------------------------------------------+
-   |               PHASE 08-16: HIGH-SPEED DEDUPLICATED DISCOVERY                    |
-   |   IP-Deduplicated Port Scanner (Top-100, 20 Dialers) * Param Bloat Elimination  |
+   |               PHASE 08-16: HIGH-SPEED DEDUPLICATED PORT AUDIT                   |
+   |   Hostname-to-IP Deduplication * 25 Concurrent Dialers * 400ms Connect Timeout  |
+   |   Top-100 Web/Admin Ports * 3-Minute Hard Phase Safety Ceiling                  |
    +---------------------------------------------------------------------------------+
                                          |
                                          v
@@ -43,7 +48,7 @@ Following intensive audits against enterprise targets (such as Akamai-fronted en
    |   • Module 2: JavaScript & Source-Map Deep Harvester (Entropy Credentials)      |
    |   • Module 3: Dangling CNAME & Subdomain Takeover Resolver (SaaS Abandonment)   |
    |   • Module 4: Zero-Tolerance Surgical Probes (Zip Magic Bytes, Strict Regex)   |
-   |   • Curated CVE-2020-14882 WebLogic RCE & Spring Actuator Inspection            |
+   |   • Curated CVE-2020-14882 WebLogic & Spring Actuator Inspection                |
    +---------------------------------------------------------------------------------+
                                          |
                                          v
@@ -55,57 +60,60 @@ Following intensive audits against enterprise targets (such as Akamai-fronted en
                                          v
    +---------------------------------------------------------------------------------+
    |               REPORT GENERATION & ZERO-FP SANITIZATION ENGINE                   |
-   |   Filter Internal Milestones  *  No <nil> Artifacts  *  Tiered Outputs          |
+   |   Filter Internal Telemetry  *  Clean Field Formatting  *  Tiered Outputs       |
    |   --> CONFIRMED_VULNS.txt (Conf >= 70)  |  MANUAL_REVIEW.txt (Human Triage)     |
    +---------------------------------------------------------------------------------+
 ```
 
 ---
 
-## ⚡ Hybrid Re-Engineering: Production Benchmark Modules
+## 🛠️ Complete Tool Ecosystem (Zero-API Hybrid Toolset)
 
-### 1. Recursive Schema-Driven API Auditor (`pkg/phases/api_schema_auditor.go`)
-- **In-Memory Schema Parser**: Identifies exposed Swagger/OpenAPI endpoints (`/v3/api-docs`, `/swagger.json`, `/openapi.json`), parsing all defined routes, HTTP methods, and parameter schemas in real time.
-- **Unauthenticated Privilege Audit**:
-  * Filters for sensitive operational keywords: `mgmt`, `admin`, `user`, `delete`, `create`, `token`, `export`, `config`, `internal`.
-  * Sends non-destructive GET/OPTIONS probes under rate-governed pacing.
-  * Validates that responses contain authentic application/json data structures rather than login forms or generic errors, flagging:
-    `[High] Broken Authentication / Unprotected Management Endpoint: <url>`.
-- **BOLA/IDOR Detection**: Identifies identifier parameters (e.g. `{uimUserId}`, `{campaignKey}`, `{id}`) to prioritize structured object authorization audits.
+MOHAMMED V4 integrates 10 essential CLI utilities, compiled and configured via `./mohammed setup`:
 
-### 2. JavaScript & Source-Map Deep Harvester (`pkg/phases/js_harvester.go`)
-- **Bundle Scraper**: Discovers in-scope client-side script tags (`<script src="*.js">`) from all live landing pages.
-- **Entropy-Validated Credential Discovery**:
-  * Regex matching for AWS Access Keys (`AKIA[0-9A-Z]{16}`), Google API keys (`AIza[0-9A-Za-z-_]{35}`), generic Bearer tokens, and private RSA/SSH keys.
-  * **Shannon Entropy Verification**: Discards low-entropy placeholders or documentation dummies (e.g., `AKIAEXAMPLEKEY12345`).
-- **Hidden Route Extraction**: Automatically harvests internal routes matching `/api/v[0-9]/[a-zA-Z0-9_\-/]+` or internal administrative paths and appends them to the target scope corpus.
-- **Source Map Exposure**: Detects publicly accessible `*.js.map` files, flagging information disclosure.
+| # | Tool | Category | Architectural Role in MOHAMMED V4 |
+|---|---|---|---|
+| 1 | `subfinder` | Recon & Discovery | Fast passive subdomain enumeration across public intelligence sources without commercial API keys. |
+| 2 | `dnsx` | Recon & DNS | High-speed DNS resolution, CNAME chain tracing, and multi-resolver wildcard filtering. |
+| 3 | `httpx` | Probing & Discovery | Multi-purpose HTTP probe detecting alive services, status codes, response headers, and technologies. |
+| 4 | `katana` | Crawling & Scraping | Modern web crawler for endpoint extraction, link discovery, and client-side form detection. |
+| 5 | `gau` | Archive Harvesting | Fetches historical URLs from Wayback Machine, Common Crawl, and AlienVault OTX. |
+| 6 | `alterx` | Permutation & Mutation | Generates intelligent subdomain variations using contextual wordlists and syntax patterns. |
+| 7 | `arjun` | Parameter Discovery | Discovers hidden HTTP GET/POST/JSON parameters for deep interface inspection. |
+| 8 | `ffuf` | Content Fuzzing | High-performance Go fuzzer for directory brute-forcing, virtual host fuzzing, and route discovery. |
+| 9 | `cariddi` | Asset Extraction | Scans HTTP responses and JS files for endpoints, parameters, and sensitive strings. |
+| 10 | `trufflehog` | Secret Verification | High-entropy detector that flags leaked API keys and credentials with live verification checks. |
 
-### 3. Dangling CNAME & Subdomain Takeover Resolver (`pkg/phases/takeover_resolver.go`)
-- **DNS CNAME Resolution**: Resolves CNAME pointers across all in-scope subdomains.
-- **SaaS & Cloud Abandonment Verification**:
-  * Cross-references target HTTP responses with verified abandonment signatures:
-    - **AWS S3**: `NoSuchBucket` / `The specified bucket does not exist`
-    - **GitHub Pages**: `There isn't a GitHub Pages site here`
-    - **Heroku**: `No such app` / `herokucdn.com`
-    - **Azure Traffic Manager**: `404 Web Site not found`
-    - **Zendesk**: `Help Center Closed`
-    - **Fastly / CloudFront**: `Fastly error: unknown domain` / `Bad request: ERROR: The request could not be satisfied`
-  * Flags verified takeovers as `[High] Subdomain Takeover: <subdomain> -> <cname>`.
+---
 
-### 4. Zero-Tolerance Catch-All Purge (`pkg/phases/surgical_probes.go`)
-- Eliminates repetitive, low-confidence entries on wildcard 200 OK servers:
-  * `/backup.zip`: Validates standard ZIP magic bytes (`PK\x03\x04`).
-  * `/.env`: Enforces key-value regex patterns (`(APP_KEY|DB_PASSWORD|SECRET_KEY|DATABASE_URL|AWS_)=`).
-  * `/.git/HEAD`: Enforces exact header match `ref: refs/heads/` or `ref: refs/`.
-  * `/.git/config`: Enforces `[core]` and `repositoryformatversion`.
-  * `/.htpasswd`: Validates Apache crypt, apr1, or bcrypt hashes.
-  * **Silent Discard**: Any response lacking strict content invariants is dropped without contaminating reports.
+## 🔬 Core Phase Catalog & Benchmark Modules
 
-### 5. High-Speed IP-Deduplicated Port Scanner (`pkg/phases/light_portscan.go`)
-- **IP Deduplication**: Resolves all live subdomains to underlying IPv4 addresses and deduplicates edge anycast IPs (e.g., 1000 subdomains resolving to 4 Akamai anycast IPs are scanned only once).
-- **Asynchronous Connect Pool**: 20 concurrent dialers scanning Top-100 web/admin ports (80, 443, 8080, 8443, 3000, 5000, 9000, etc.) with a 500ms socket timeout. Complete run finishes in under 2 minutes.
-- Maps discovered ports back to virtual hostnames for HTTP verification.
+### 1. Zero-API Passive Reconnaissance & Discovery
+- **Native Threat-Intel Scrapers (`pkg/phases/scrapers.go`)**: Direct HTTP scrapers for crt.sh, Wayback CDX, AlienVault OTX, and Shodan InternetDB.
+- **DNS Clean & Wildcard Filtering**: Native integration of `dnsx` filters non-resolving or sinkholed records before any active probe is triggered.
+
+### 2. High-Speed IP-Deduplicated Port Scanner (`pkg/phases/light_portscan.go`)
+- **IP Deduplication Engine**: Maps all subdomains to IPv4 addresses, grouping duplicate hostnames that point to shared edge or CDN anycast IPs.
+- **25-Worker Async Connect Pool**: Scans Top-100 web/admin/management ports (80, 443, 8080, 8443, 3000, 5000, 9000, 10000, etc.) with 400ms connect timeouts.
+- **3-Minute Hard Ceiling**: Bounded execution timeout ensures port scanning never delays an audit workflow.
+
+### 3. Recursive Schema-Driven API Auditor (`pkg/phases/api_schema_auditor.go`)
+- Discovers and parses OpenAPI/Swagger specifications (`/v3/api-docs`, `/swagger.json`, `/openapi.json`) in memory.
+- Audits unauthenticated privilege paths (`admin`, `mgmt`, `internal`, `token`, `export`) and flags broken authentication with authentic JSON payload validation.
+- Extracts BOLA/IDOR object identifiers (`{uimUserId}`, `{id}`) to prioritize identity-based authorization checks.
+
+### 4. JavaScript & Source-Map Deep Harvester (`pkg/phases/js_harvester.go`)
+- Crawls client-side script bundles and audits inline scripts.
+- Detects leaked cloud keys (AWS, Google, GitHub, Slack) and filters placeholders via **Shannon entropy verification**.
+- Uncovers hidden API endpoints and alerts on publicly exposed `.js.map` source maps.
+
+### 5. Dangling CNAME & Subdomain Takeover Resolver (`pkg/phases/takeover_resolver.go`)
+- Performs live CNAME resolution across all discovered subdomains.
+- Validates cloud abandonment fingerprints against AWS S3, GitHub Pages, Heroku, Azure Traffic Manager, Zendesk, and CloudFront.
+
+### 6. Zero-Tolerance Surgical Probes (`pkg/phases/surgical_probes.go` & `curated_templates.go`)
+- **Strict Content Invariant Validation**: Enforces standard ZIP magic bytes (`PK\x03\x04`), `.env` key-value regex patterns, and exact Git repository headers.
+- **Compile-Time / Init-Time Panic Assertion**: Prevents empty or whitespace-only signatures in curated templates, stopping false alarms on generic 200 OK responses.
 
 ---
 
@@ -114,12 +122,11 @@ Following intensive audits against enterprise targets (such as Akamai-fronted en
 Target stability is guaranteed by the integrated **Adaptive Target Governor** (`pkg/governor`):
 
 1. **Autonomous Target Capacity Detection (`--smart-rate`)**:
-   - Sends lightweight HTTP HEAD baseline probes before heavy phases.
-   - Evaluates network latency (RTT), multi-homing, and CDN fronting (Cloudflare, Akamai, CloudFront).
-   - Dynamically scales request rate and concurrency:
-     * **High Latency (>1000ms) or Single IP**: Throttles down to `1 req/s`, concurrency `1`.
-     * **Enterprise Tier (300ms–800ms)**: Sets `2–3 req/s`, concurrency `2`.
-     * **Edge CDN / Cloud WAF (<500ms)**: Allows up to `5 req/s`, concurrency `4`.
+   - Sends baseline round-trip time (RTT) probes before active phases.
+   - Detects CDN fronting (Cloudflare, Akamai, CloudFront) and automatically calibrates request pacing:
+     - **High Latency (>1000ms) or Single IP**: Throttles down to `1 req/s`, concurrency `1`.
+     - **Standard Application Tier (300ms–800ms)**: Sets `2–3 req/s`, concurrency `2`.
+     - **Edge CDN Fronted (<500ms)**: Scales safely up to `5 req/s`, concurrency `4`.
 2. **Circuit Breaker Protection**:
    - Automatically trips on HTTP `429 Too Many Requests`, `503 Service Unavailable`, or `504 Gateway Timeout`.
    - Freezes requests, applies exponential backoff cooldown (`5s` to `60s`), and tests with half-open recovery probes.
@@ -128,48 +135,77 @@ Target stability is guaranteed by the integrated **Adaptive Target Governor** (`
 
 ---
 
-## 🚀 Operational Profiles: Stealth Audit vs. Full Assault
+## 🚀 CLI Flags & Operational Modes
 
-Preset profiles (`cmd/preset`) configure MOHAMMED V4 for distinct assessment objectives:
+### Command Structure
+```bash
+./mohammed <command> [flags]
+```
 
-| Operational Profile | Target Profile | Rate Limit | Concurrency | Active Modules | Scope & Focus |
-|---|---|---|---|---|---|
-| `stealth-audit` | Government platforms, production APIs, sensitive infrastructure | $\le 2\text{ req/s}$ (120/min) | 1–2 workers | Modules 3 & 4 (Takeover & Invariants) | Low-footprint, non-destructive passive OSINT, light port scanning, and surgical verification. |
-| `full-assault` | Bug bounty programs (HackerOne, Bugcrowd), non-prod staging | $\le 10\text{ req/s}$ (600/min) | 5–10 workers | All Modules (1, 2, 3, 4, 5) | Complete inspection: OpenAPI schema auditing, JS secret harvesting, deduplicated port scans, and WAF evasion. |
-| `passive` | Strict zero-touch compliance audits | 0 active probes | 1 worker | None (Pure OSINT) | 100% external OSINT (CT logs, Wayback, OTX, DNS). Zero packets sent to target IP. |
+### Commands
+- `scan`: Execute reconnaissance, port auditing, and diagnostic verification.
+- `report`: Serve the interactive HTML dashboard for a completed scan (`--serve --port 8090`).
+- `doctor`: Comprehensive health check validating all 10 tools, network connectivity, DNS latency, socket binding, and filesystem I/O.
+- `setup`: Automated one-click installation and compilation of all 10 ecosystem tools.
+- `help`: Display complete CLI help and usage options.
+
+### Scan Options & Flags
+
+| Flag | Type | Description |
+|---|---|---|
+| `-s, --scope` | `string` | Target scope file path, or built-in scope profile (`gitlab` / `github`) [Required]. |
+| `-c, --config` | `string` | Path to configuration file (default: `config.yaml`). |
+| `--profile` | `string` | Scan profile: `small` \| `medium` \| `large` \| `passive` (default: `medium`). |
+| `--smart-rate` | `bool` | Autonomous target sensing (probes latency/CDN to auto-tune rate & concurrency). |
+| `--rate` | `int` | Custom requests-per-minute ceiling (e.g. `120`). |
+| `--threads` | `int` | Global thread and worker concurrency limit (default: `30`). |
+| `--skip` | `string` | Comma-separated list or range of phase numbers to skip (e.g. `4,12,20` or `12-20`). |
+| `--only` | `string` | Run ONLY specified phase numbers (e.g. `13,14,15` or `13-15`). |
+| `--resume` | `string` | Resume interrupted audit: `auto` (picks latest in `output/`) or path to `checkpoint.json`. |
+| `--burp` | `string` | Proxy all outgoing HTTP traffic through Burp Suite or an upstream proxy (e.g. `http://127.0.0.1:8080`). |
+| `--output` | `string` | Custom output directory for artifacts and reports (default: `output/`). |
+
+### Profile Recommendations
+
+1. **`--profile small` (Single App / Sensitive Target)**:
+   - Minimal active probing, low concurrency, strict rate limiting.
+   - Ideal for production web applications and sensitive APIs.
+2. **`--profile medium` (Standard Audit)**:
+   - Balanced recon, IP-deduplicated port scan, API schema analysis, and surgical checks.
+   - Recommended default for standard corporate scopes (10–50 hosts).
+3. **`--profile large` (Large Scope / Bounty)**:
+   - Deep recursive crawling, full parameter discovery, extensive wordlists, and JS harvesting.
+   - Best for expansive organizational scopes.
+4. **`--profile passive` (Zero-Touch Compliance)**:
+   - 100% external OSINT (CT logs, Wayback, AlienVault OTX, DNS).
+   - Zero packets sent to target IPs.
 
 ---
 
-## 💻 CLI Quickstart & Examples
+## 🔧 Troubleshooting & Maintenance
 
-### 1. Diagnostics & Readiness Check
+### 1. Diagnostic Health Check (`./mohammed doctor`)
+Run doctor to verify system prerequisites:
 ```bash
 ./mohammed doctor
 ```
+The doctor command performs 4 rigorous checks:
+1. **Tool Presence & Versioning**: Tests whether all 10 tools (`subfinder`, `dnsx`, `httpx`, `katana`, `gau`, `alterx`, `arjun`, `ffuf`, `cariddi`, `trufflehog`) are present in `$PATH` or `$GOPATH/bin`.
+2. **DNS & Network Latency**: Verifies connectivity and round-trip time across Cloudflare (`1.1.1.1:53`), Google (`8.8.8.8:53`), and Quad9 (`9.9.9.9:53`).
+3. **Socket Binding Capabilities**: Tests ephemeral TCP and UDP socket listeners on the local host.
+4. **Workspace Permissions**: Validates write and read integrity inside the designated output workspace.
 
-### 2. Autonomous Scan with Adaptive Governor (`--smart-rate`)
+### 2. Ecosystem Installer (`./mohammed setup`)
+If any tools are missing, install and compile the complete ecosystem with a single command:
 ```bash
-./mohammed scan -s target.txt --profile medium --smart-rate --output output/audit-01
+./mohammed setup
 ```
 
-### 3. Government / Sensitive Target (Stealth Audit Mode)
-```bash
-# Generate pre-configured scope and execution plan
-./preset -file scopes/government_target.json -mode stealth-audit
-
-# Run with strict rate-limiting
-./mohammed scan -s recon/scopes/government_target.txt --profile small --rate 120 --threads 2 --output output/gov-stealth
-```
-
-### 4. Full Enterprise Assault with WAF Bypass & Schema Auditing
-```bash
-./mohammed scan -s scopes/bounty_targets.txt --profile full --rate 300 --threads 10 --waf-bypass --smart-rate --output output/bounty-run
-```
-
-### 5. Resuming Interrupted Scans
-```bash
-./mohammed scan -s target.txt --resume auto --output output/audit-01
-```
+### 3. Interpreting Report Artifacts
+Scan outputs are written to `output/<target>/` with clear separation of verified vs. triage findings:
+- `CONFIRMED_VULNS.txt`: Findings with confidence $\ge 70$ backed by cryptographic or structural HTTP evidence.
+- `MANUAL_REVIEW.txt`: Findings requiring human triage or validation.
+- `final_report.json`: Machine-readable structured dossier for SIEM or dashboard ingestion.
 
 ---
 
@@ -179,11 +215,11 @@ All packages are continuously verified with Go unit tests and static analysis:
 
 | Component | Path | Verification Command | Status |
 |---|---|---|---|
-| API Schema Auditor (Module 1) | `pkg/phases/api_schema_auditor.go` | `go test -v ./pkg/phases -run TestAPISchemaAuditor` | PASS (0 regressions) |
-| JS & Source Map Harvester (Module 2) | `pkg/phases/js_harvester.go` | `go test -v ./pkg/phases -run TestJSHarvester` | PASS (0 regressions) |
-| Takeover Resolver (Module 3) | `pkg/phases/takeover_resolver.go` | `go test -v ./pkg/phases/...` | PASS (0 regressions) |
-| Zero Catch-All Purge (Module 4) | `pkg/phases/surgical_probes.go` | `go test -v ./pkg/phases -run TestSurgicalProbesCatchAll` | PASS (0 regressions) |
-| Deduplicated Port Scanner (Module 5) | `pkg/phases/light_portscan.go` | `go test -v ./pkg/phases/...` | PASS (0 regressions) |
+| API Schema Auditor | `pkg/phases/api_schema_auditor.go` | `go test -v ./pkg/phases -run TestAPISchemaAuditor` | PASS (0 regressions) |
+| JS & Source Map Harvester | `pkg/phases/js_harvester.go` | `go test -v ./pkg/phases -run TestJSHarvester` | PASS (0 regressions) |
+| Takeover Resolver | `pkg/phases/takeover_resolver.go` | `go test -v ./pkg/phases/...` | PASS (0 regressions) |
+| Zero Catch-All Purge | `pkg/phases/surgical_probes.go` | `go test -v ./pkg/phases -run TestSurgicalProbesCatchAll` | PASS (0 regressions) |
+| Deduplicated Port Scanner | `pkg/phases/light_portscan.go` | `go test -v ./pkg/phases -run TestLightPortScanPhase` | PASS (0 regressions) |
 | Core Safety Governor | `pkg/governor` | `go test -v ./pkg/governor/...` | PASS (0 regressions) |
+| Ecosystem Doctor & Setup | `cmd/mohammed` | `go build ./cmd/mohammed` | PASS (Clean build) |
 | Full Repository Suite | `cmd/...`, `pkg/...` | `go test ./...` | PASS (All 23 packages) |
-| Binary Compilation | `cmd/...` | `go build ./...` | PASS (Clean build) |
