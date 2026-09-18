@@ -175,3 +175,20 @@ Core Objective: Discover High/Critical Impact Real Vulnerabilities with 0% False
 ### 4. Build & Full Repository Test Status
 - Full repository test pass: `go test -v ./...` passed across all packages with zero regressions.
 - Release binary compiled: `go build -ldflags="-s -w" -o mohammed ./cmd/mohammed`.
+
+## Update 2026-09-18: Phase 0 Pre-Flight Telemetry & Surface Enrichment Integration
+
+### 1. Master Pipeline Integration (`pkg/phases/phase_preflight_telemetry.go` & `cmd/mohammed/main.go`)
+- Integrated `UnifiedAuditEngine` (`pkg/collector/`) natively as **Phase 0: Pre-Flight Telemetry & Asset Enrichment** prior to Phase 1 Scope Validation and Phase 2 OSINT.
+- Registered `PreFlightTelemetryPhase` in `allPhases` and all active scan profiles (`small`, `passive`, `stealth-audit`, `full-assault`, `medium`, `large`).
+- Maintained active in-memory trace correlator (`ActiveCorrelator()`) for continuous asynchronous callback and webhook correlation throughout the scan lifecycle.
+
+### 2. Discovered Route Pipeline Ingestion & Persistence
+- Automatically extracts discovered API/GraphQL routes from JS bundles and `.map` source maps via `pkg/drift`.
+- Ingests canonicalized routes into the target's URL corpus (`state.AddURL`), enabling all downstream active/passive phases to audit discovered client-side paths.
+- Persists comprehensive telemetry report to `output/<target>/audit_telemetry.json` including RFC 7234 cache conformance ratings and TLS/ingress health.
+
+### 3. Build & Test Status
+- Full repository test pass: `go test -v ./...` passed across all modules with 0 failures.
+- Release binary compiled cleanly: `go build -ldflags="-s -w" -o mohammed ./cmd/mohammed`.
+EOF && cd /home/user/webapp && git add cmd/mohammed/main.go pkg/phases/ PROJECT_STATE_LOG.txt && git commit -m "feat(pipeline): wire Phase 0 Pre-Flight Telemetry into scan execution lifecycle" && git push origin genspark_ai_developer

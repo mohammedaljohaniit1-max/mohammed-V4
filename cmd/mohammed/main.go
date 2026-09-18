@@ -349,6 +349,7 @@ func runScan(args []string) {
 	orch := engine.NewOrchestrator(state)
 
 		allPhases := []engine.Phase{
+			&phases.PreFlightTelemetryPhase{}, // 00: Pre-Flight Telemetry & Asset Enrichment
 			&phases.ScopeValidationPhase{},    // 01
 			&phases.OSINTPhase{},              // 02
 			&phases.OSINTv2Phase{},            // 02b: V7 — 50+ passive OSINT sources
@@ -471,6 +472,7 @@ func runScan(args []string) {
 	// or reordering phases can never silently corrupt a profile — a lesson from
 	// the old fragile map[int]bool that broke whenever a phase was inserted.
 	smallPhases := map[string]bool{
+		"Phase 0: Pre-Flight Telemetry & Asset Enrichment": true,
 		"Scope Validation": true, "Passive Subdomain Enumeration": true,
 		"DNS Resolution & Enrichment": true, "HTTP Probing & Tech Fingerprinting": true,
 		"TLS/SSL Analysis": true, "Deep External Recon": true,
@@ -478,6 +480,7 @@ func runScan(args []string) {
 		"Git & Sensitive File Exposure": true, "Final Report Generation": true,
 	}
 	passivePhases := map[string]bool{
+		"Phase 0: Pre-Flight Telemetry & Asset Enrichment": true,
 		"Scope Validation": true, "OSINT Intelligence Gathering": true,
 		"OSINT v2 (50+ Sources)":        true, // V7: passive, key-less CT/DNS/archive
 		"Passive Subdomain Enumeration": true, "DNS Resolution & Enrichment": true,
@@ -498,6 +501,7 @@ func runScan(args []string) {
 
 	// Profile "stealth-audit": Passive OSINT + Safe surgical checks (Rate <= 2 req/s)
 	stealthAuditPhases := map[string]bool{
+		"Phase 0: Pre-Flight Telemetry & Asset Enrichment": true,
 		"Scope Validation":                   true,
 		"OSINT Intelligence Gathering":       true,
 		"OSINT v2 (50+ Sources)":             true,
@@ -519,6 +523,7 @@ func runScan(args []string) {
 
 	// Profile "full-assault": Top-100 port scan + Curated CVE/Exposure templates + Parameter fuzzing (Rate <= 10 req/s with dynamic backoff)
 	fullAssaultPhases := map[string]bool{
+		"Phase 0: Pre-Flight Telemetry & Asset Enrichment": true,
 		"Scope Validation":                    true,
 		"OSINT Intelligence Gathering":        true,
 		"OSINT v2 (50+ Sources)":              true,
