@@ -148,3 +148,30 @@ Core Objective: Discover High/Critical Impact Real Vulnerabilities with 0% False
 ### 2. Build & Verification Status
 - Full repository test pass: `go test ./...` passed across all packages with zero regressions.
 - Release binary compiled: `go build -ldflags="-s -w" -o mohammed ./cmd/mohammed`.
+
+## Update 2026-09-18: Asynchronous Trace Correlation & RFC 7234 Cache Conformance
+
+### 1. Asynchronous Trace & Webhook Correlator (`pkg/beacon/`)
+- Implemented `pkg/beacon/correlator.go`:
+  - Thread-safe in-memory token registry using `sync.Map` for tracking asynchronous callbacks and webhook events.
+  - Generates 16-byte cryptographically random hex trace identifiers with status tracking (`Register`, `Resolve`, `Get`).
+- Implemented `pkg/beacon/listener.go`:
+  - Non-invasive HTTP callback listener handling W3C `traceparent` headers and `X-Correlation-ID` headers to correlate and mark events as resolved.
+- Unit tests added in `pkg/beacon/beacon_test.go` with **82.9% statement coverage**.
+
+### 2. Defensive RFC 7234 Cache Header Evaluator (`pkg/cache/`)
+- Implemented `pkg/cache/cache.go`:
+  - Evaluates standard HTTP response headers (`Cache-Control`, `Vary`) for sensitive endpoint protection.
+  - Audits presence of `no-store` and `private` directives without invasive delimiter injections or cache poisoning vectors.
+- Unit tests added in `pkg/cache/cache_test.go` with **100.0% statement coverage**.
+
+### 3. Engine Telemetry Integration (`pkg/collector/`)
+- Updated `pkg/collector/engine.go`:
+  - Integrated `beacon.Correlator` and `cache.EvaluateResponseHeaders` into `UnifiedAuditEngine`.
+  - Added `CacheReports map[string]cache.CacheConformanceReport` and correlator accessors to `AuditReport`.
+  - Audits response headers for all discovered client bundle routes.
+- Updated `pkg/collector/engine_test.go` with **95.7% statement coverage**.
+
+### 4. Build & Full Repository Test Status
+- Full repository test pass: `go test -v ./...` passed across all packages with zero regressions.
+- Release binary compiled: `go build -ldflags="-s -w" -o mohammed ./cmd/mohammed`.

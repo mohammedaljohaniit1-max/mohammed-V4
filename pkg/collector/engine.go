@@ -10,27 +10,31 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mohammed-v3/core/pkg/beacon"
+	"github.com/mohammed-v3/core/pkg/cache"
 	"github.com/mohammed-v3/core/pkg/contract"
 	"github.com/mohammed-v3/core/pkg/drift"
 	"github.com/mohammed-v3/core/pkg/ingress"
 )
 
-// AuditReport summarizes the quality assurance, asset inventory, and contract testing results.
+// AuditReport summarizes the quality assurance, asset inventory, cache evaluation, and contract testing results.
 type AuditReport struct {
-	TargetHost       string                    `json:"target_host"`
-	IngressHealth    *ingress.EndpointHealth   `json:"ingress_health"`
-	DiscoveredRoutes []string                  `json:"discovered_routes"`
-	ContractResults  []*contract.TestResult    `json:"contract_results"`
-	ExecutedAt       time.Time                 `json:"executed_at"`
-	ExecutionSuccess bool                      `json:"execution_success"`
-	Summary          string                    `json:"summary"`
+	TargetHost       string                                  `json:"target_host"`
+	IngressHealth    *ingress.EndpointHealth                 `json:"ingress_health"`
+	DiscoveredRoutes []string                                `json:"discovered_routes"`
+	ContractResults  []*contract.TestResult                  `json:"contract_results"`
+	CacheReports     map[string]cache.CacheConformanceReport `json:"cache_reports,omitempty"`
+	ExecutedAt       time.Time                               `json:"executed_at"`
+	ExecutionSuccess bool                                    `json:"execution_success"`
+	Summary          string                                  `json:"summary"`
 }
 
-// UnifiedAuditEngine coordinates non-invasive ingress monitoring, frontend route discovery, and contract boundary testing.
+// UnifiedAuditEngine coordinates non-invasive ingress monitoring, frontend route discovery, contract boundary testing, and beacon/cache telemetry.
 type UnifiedAuditEngine struct {
 	mu             sync.RWMutex
 	monitor        *ingress.IngressMonitor
 	routeParser    *drift.RouteParser
+	correlator     *beacon.Correlator
 	outputDir      string
 	defaultTimeout time.Duration
 }
@@ -46,9 +50,15 @@ func NewUnifiedAuditEngine(timeout time.Duration, outputDir string) *UnifiedAudi
 	return &UnifiedAuditEngine{
 		monitor:        ingress.NewIngressMonitor(timeout),
 		routeParser:    drift.NewRouteParser(),
+		correlator:     beacon.NewCorrelator(),
 		outputDir:      outputDir,
 		defaultTimeout: timeout,
 	}
+}
+
+// Correlator returns the underlying asynchronous trace correlator.
+func (e *UnifiedAuditEngine) Correlator() *beacon.Correlator {
+	return e.correlator
 }
 
 // ParseBundles inspects provided JavaScript bundle contents and returns all identified API routes.
@@ -69,11 +79,12 @@ func (e *UnifiedAuditEngine) ParseBundles(bundles []string) []string {
 	return routes
 }
 
-// ExecuteAudit runs ingress verification, catalogs routes from bundles, saves output/routes.json, and executes boundary tests.
+// ExecuteAudit runs ingress verification, catalogs routes from bundles, saves output/routes.json, and executes boundary and cache conformance tests.
 func (e *UnifiedAuditEngine) ExecuteAudit(ctx context.Context, targetHost string, jsBundles []string) (*AuditReport, error) {
 	report := &AuditReport{
-		TargetHost: targetHost,
-		ExecutedAt: time.Now(),
+		TargetHost:   targetHost,
+		ExecutedAt:   time.Now(),
+		CacheReports: make(map[string]cache.CacheConformanceReport),
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, e.defaultTimeout*3)
@@ -93,7 +104,7 @@ func (e *UnifiedAuditEngine) ExecuteAudit(ctx context.Context, targetHost string
 		_ = os.WriteFile(routesFilePath, routesData, 0644)
 	}
 
-	// 3. API Contract Conformance Testing
+	// 3. API Contract Conformance & Cache Conformance Testing
 	baseURL := targetHost
 	if baseURL != "" {
 		client := contract.NewContractClient(baseURL, e.defaultTimeout)
@@ -111,13 +122,28 @@ func (e *UnifiedAuditEngine) ExecuteAudit(ctx context.Context, targetHost string
 		}
 
 		if len(suite) > 0 {
-			report.ContractResults = client.RunSuite(callCtx, suite)
+			results := client.RunSuite(callCtx, suite)
+			report.ContractResults = results
+
+			// Also perform defensive RFC 7234 cache header evaluation on discovered routes
+			httpClient := &http.Client{Timeout: e.defaultTimeout}
+			for _, r := range discovered {
+				reqURL := fmt.Sprintf("%s%s", baseURL, r)
+				req, reqErr := http.NewRequestWithContext(callCtx, http.MethodGet, reqURL, nil)
+				if reqErr == nil {
+					resp, respErr := httpClient.Do(req)
+					if respErr == nil {
+						report.CacheReports[r] = cache.EvaluateResponseHeaders(resp.Header)
+						resp.Body.Close()
+					}
+				}
+			}
 		}
 	}
 
 	report.ExecutionSuccess = true
-	report.Summary = fmt.Sprintf("Audit completed. Health: %v. Discovered Routes: %d. Contract Tests Executed: %d",
-		report.IngressHealth.Healthy, len(report.DiscoveredRoutes), len(report.ContractResults))
+	report.Summary = fmt.Sprintf("Audit completed. Health: %v. Discovered Routes: %d. Contract Tests Executed: %d. Cache Checks: %d",
+		report.IngressHealth.Healthy, len(report.DiscoveredRoutes), len(report.ContractResults), len(report.CacheReports))
 
 	return report, nil
 }

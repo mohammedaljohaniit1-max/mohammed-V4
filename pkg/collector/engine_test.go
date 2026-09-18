@@ -18,6 +18,8 @@ func TestUnifiedAuditEngine_ExecuteAudit(t *testing.T) {
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "nginx/1.22-test")
+		w.Header().Set("Cache-Control", "no-store, private")
+		w.Header().Set("Vary", "Accept-Encoding")
 		if r.URL.Path == "/api/v1/users" {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte(`{"error":"bad_request"}`))
@@ -29,6 +31,10 @@ func TestUnifiedAuditEngine_ExecuteAudit(t *testing.T) {
 	defer mockServer.Close()
 
 	engine := NewUnifiedAuditEngine(2*time.Second, tempDir)
+
+	if engine.Correlator() == nil {
+		t.Fatalf("expected non-nil Correlator from UnifiedAuditEngine")
+	}
 
 	jsBundles := []string{
 		`const endpoint = "/api/v1/users"; fetch(endpoint);`,
@@ -53,15 +59,27 @@ func TestUnifiedAuditEngine_ExecuteAudit(t *testing.T) {
 		t.Errorf("expected 1 api route extracted (/api/v1/users), got %d: %v", len(report.DiscoveredRoutes), report.DiscoveredRoutes)
 	}
 
-	if len(report.ContractResults) != 1 {
-		t.Errorf("expected 1 contract test executed, got %d", len(report.ContractResults))
-	} else {
-		if !report.ContractResults[0].Passed {
-			t.Errorf("expected contract test to pass on 400 rejection, failed: %s", report.ContractResults[0].FailureNotes)
+		if len(report.ContractResults) != 1 {
+			t.Errorf("expected 1 contract test executed, got %d", len(report.ContractResults))
+		} else {
+			if !report.ContractResults[0].Passed {
+				t.Errorf("expected contract test to pass on 400 rejection, failed: %s", report.ContractResults[0].FailureNotes)
+			}
 		}
-	}
 
-	// Verify routes.json output was created
+		// Verify cache report was collected for discovered route
+		if cacheReport, ok := report.CacheReports["/api/v1/users"]; !ok {
+			t.Errorf("expected cache report for /api/v1/users")
+		} else {
+			if !cacheReport.HasNoStore {
+				t.Errorf("expected HasNoStore to be true")
+			}
+			if !cacheReport.IsExplicitPrivate {
+				t.Errorf("expected IsExplicitPrivate to be true")
+			}
+		}
+
+		// Verify routes.json output was created
 	routesFile := tempDir + "/routes.json"
 	if _, err := os.Stat(routesFile); os.IsNotExist(err) {
 		t.Errorf("expected output/routes.json to be written")
